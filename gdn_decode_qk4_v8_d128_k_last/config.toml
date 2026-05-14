@@ -1,0 +1,8 @@
+[solution]
+name = "gdn_decode_qk4_v8_d128_k_last_v36_b8_warp1_stage3_hybrid_fi_vendored_submission_v27"
+definition = "gdn_decode_qk4_v8_d128_k_last"
+author = "yue-shui"
+
+[build]
+language = "triton"
+entry_point = "kernel.py::kernel_hybrid_dispatch"

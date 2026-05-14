@@ -1,0 +1,71 @@
+{
+  "definition": "dsa_topk_indexer_fp8_h64_d128_topk2048_ps64",
+  "submission_record": "dsa_topk_indexer_fp8_h64_d128_topk2048_ps64_submission_v50",
+  "submission_tag": "submission-v50",
+  "status": "promoted",
+  "entry_point": "kernel.cu::kernel_cuda",
+  "candidate": "v49c_cute_tile_n16: CuTe scorer tile N=16, 8 warps/256 threads, parallel epilogue",
+  "previous_submission": "submission-v48",
+  "method": "Double CuTe scorer token tile from N=8 to N=16, expanding TiledMMA layout from Shape<_4,_1,_1> to Shape<_4,_2,_1> (4 warps M x 2 warps N), giving M=64 heads, N=16 tokens, K=16 with 8 warps / 256 threads per CTA. This halves scorer CTAs (~280→~140 for medium band) with better Q data reuse per CTA. Parallel epilogue: each warp independently reduces 2 tokens (32 lanes cover 64 heads at 2 heads/lane), eliminating inter-warp merge and shared-memory barrier. launch_bounds(256,2) targets 2 CTAs/SM. Filtered selector, hist2048 fallback, short-only pass-through, and PDL unchanged.",
+  "dataset": {
+    "label": "Official 128-workload DSA top-k indexer set",
+    "source_jsonl": "mlsys26-contest/workloads/dsa_paged/dsa_topk_indexer_fp8_h64_d128_topk2048_ps64.jsonl",
+    "dataset_size": 128,
+    "num_pages": 11923,
+    "batch_size_range": [1, 31],
+    "max_num_pages_band_counts": {
+      "1-32": 69,
+      "33-36": 18,
+      "37-45": 21,
+      "82-91": 20
+    }
+  },
+  "previous_submission_metrics": {
+    "submission": "submission-v48",
+    "retained_label": "v48b_filtered_vec4_loads",
+    "retained_full_sweep": {
+      "avg_latency_ms": 0.007604,
+      "passed_workloads": 128,
+      "total_workloads": 128
+    }
+  },
+  "runs": [
+    {
+      "run_id": 1,
+      "label": "v49c_cute_tile_n16_full128",
+      "avg_latency_ms": 0.006893,
+      "passed": 128,
+      "total": 128,
+      "run_type": "validated_full_sweep"
+    }
+  ],
+  "mean_across_repeats": {
+    "repeat_count": 1,
+    "avg_latency_ms": 0.006893
+  },
+  "selected_retained_run": {
+    "label": "v49c_cute_tile_n16_full128",
+    "reason": "Single validated full-sweep run, 128/128 passed. Avg latency 6.893us is a clear -9.4% improvement over v48."
+  },
+  "comparison_vs_previous_submission": {
+    "previous_submission": "submission-v48",
+    "previous_avg_latency_ms": 0.007604,
+    "candidate_avg_latency_ms": 0.006893,
+    "avg_delta_pct": -9.35
+  },
+  "torch_profile_medium_band": {
+    "workload": "f59fd3e2-a6b0-4ce7-bddd-fa47b35b9b90",
+    "params": "bs=14, mnp=35",
+    "scorer_us": 4.896,
+    "selector_us": 5.312,
+    "total_us": 10.208,
+    "vs_v48": {
+      "scorer_us": 6.783,
+      "selector_us": 5.728,
+      "total_us": 12.511,
+      "scorer_delta_pct": -27.8,
+      "selector_delta_pct": -7.3,
+      "total_delta_pct": -18.4
+    }
+  }
+}

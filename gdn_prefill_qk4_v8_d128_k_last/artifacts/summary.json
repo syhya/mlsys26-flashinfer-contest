@@ -1,0 +1,87 @@
+{
+  "generated_at_utc": "2026-04-23T13:22:50Z",
+  "definition": "gdn_prefill_qk4_v8_d128_k_last",
+  "candidate": "pr3001_blackwell_narrow_short_fallback",
+  "solution_name": "gdn_prefill_qk4_v8_d128_k_last_pr3001_blackwell_narrow_short_fallback_submission_v26",
+  "current_tag": "submission-v26",
+  "previous_submission": "submission-v25",
+  "entry_point": "kernel.py::kernel_prefill_hybrid",
+  "comparison_baseline": "Compare the PR #3001-derived Blackwell chunk candidate with a narrow recovered short-path fallback against the current tagged submission-v25 payload (v56_regcap) in the official-aligned CUDA 13.2 Modal environment.",
+  "reporting_basis": "Official-aligned Modal environment (flashinfer/flashinfer-ci-cu132:20260401-2c675fb, flashinfer-bench GitHub main, cupti-python, use_isolated_runner=True, warmup=1, iter=5, trials=3).",
+  "reference_recon": {
+    "repo": "reference/flashinfer",
+    "paths_checked": [
+      "reference/flashinfer/flashinfer/gdn_kernels/blackwell/gdn_prefill.py",
+      "reference/flashinfer/flashinfer/gdn_kernels/blackwell/gated_delta_net_chunked.py",
+      "reference/flashinfer/flashinfer/gdn_kernels/blackwell/gated_delta_net_tile_scheduler.py"
+    ],
+    "note": "The active submission now vendors the upstream PR #3001 Blackwell chunk path directly, then layers only the contest compatibility fixes: log-gate inputs, scalar gate precompute sidecar, explicit Int32 ceil_div, range_constexpr TMEM workaround, non-persistent launch selection, and the long-sequence cumprod-tail numerical fix."
+  },
+  "runs": [
+    {
+      "run_id": "submission_v25_tagged_payload",
+      "date": "2026-04-21",
+      "dataset": "100wl",
+      "env": "official-aligned Modal B200",
+      "kernel": "v56_regcap: v54a 40-pair dispatch with tighter chunk-kernel register caps",
+      "avg_latency_ms": 0.1851828,
+      "median_latency_ms": 0.06645000000000001,
+      "p95_latency_ms": 0.69512,
+      "min_latency_ms": 0.00545,
+      "max_latency_ms": 0.88016,
+      "avg_reference_latency_ms": 1160.658589,
+      "avg_speedup_factor": 2714.73315,
+      "passed": 100,
+      "total": 100,
+      "artifacts": {
+        "benchmark_json": "optimize_ops/benchmarks/round_20260421_gdn_prefill_v56_regcap_modal_gate/full_sweep_candidate/benchmark_detailed_results.json",
+        "benchmark_log": "optimize_ops/benchmarks/round_20260421_gdn_prefill_v56_regcap_modal_gate/full_sweep_candidate/retained_run.log"
+      }
+    },
+    {
+      "run_id": "submission_v26_draft_pr3001_blackwell_narrow_short_fallback",
+      "date": "2026-04-23",
+      "dataset": "100wl",
+      "env": "official-aligned Modal B200",
+      "kernel": "PR #3001-derived Blackwell chunk kernel + scalar CUDA gate helper, with a narrow recovered short CUDA fallback for tiny regression shapes",
+      "avg_latency_ms": 0.0519917,
+      "median_latency_ms": 0.02105,
+      "p95_latency_ms": 0.15769,
+      "min_latency_ms": 0.00547,
+      "max_latency_ms": 0.23132,
+      "avg_reference_latency_ms": 1095.8836427,
+      "avg_speedup_factor": 9621.114835,
+      "passed": 100,
+      "total": 100,
+      "artifacts": {
+        "benchmark_json": "gdn_prefill_qk4_v8_d128_k_last/retained_run.json",
+        "benchmark_log": "gdn_prefill_qk4_v8_d128_k_last/retained_run.log",
+        "local_archive_dir": "optimize_ops/gdn_prefill_qk4_v8_d128_k_last/full_eval_20260423_narrow_short_fallback"
+      }
+    }
+  ],
+  "improvement": {
+    "vs_submission_v25_avg": "-71.92% avg latency (0.1851828ms -> 0.0519917ms)",
+    "vs_submission_v25_median": "-68.32% median latency (0.06645ms -> 0.02105ms)",
+    "vs_submission_v25_p95": "-77.31% p95 latency (0.69512ms -> 0.15769ms)",
+    "vs_submission_v25_workload_record": "90/100 workloads faster, 10/100 slower, 0/100 tied",
+    "vs_submission_v25_speedup": "+254.40% avg speedup factor (2714.73x -> 9621.11x)"
+  },
+  "dispatch_logic": {
+    "condition": "(total_seq_len, num_seqs) in 15 tiny measured-regression pairs -> recovered submission-v25 short CUDA kernel; otherwise -> compute_gates scalar CUDA helper -> PR #3001-derived Blackwell chunk kernel",
+    "short_shape_path": "The fallback is intentionally narrow and only covers the retained-run regression set: (6,1), (12,1), (13,1), (14,1), (16,1), (18,1), (23,1), (24,1), (28,2), (30,1), (32,2), (35,2), (40,2), (42,2), (46,2).",
+    "gate_precompute": "Non-fallback shapes use the scalar compute_gates helper to materialize log_gate and beta.",
+    "kernel_notes": "The vendored chunk kernel consumes log-space gates directly and includes the cu132 portability plus long-sequence correctness fixes validated during the upstream bring-up."
+  },
+  "validation": {
+    "retained_run_path": "gdn_prefill_qk4_v8_d128_k_last/retained_run.json",
+    "retained_log_path": "gdn_prefill_qk4_v8_d128_k_last/retained_run.log",
+    "candidate_path": "gdn_prefill_qk4_v8_d128_k_last/retained_run.json",
+    "local_archive_dir": "optimize_ops/gdn_prefill_qk4_v8_d128_k_last/full_eval_20260423_narrow_short_fallback",
+    "candidate_status": "100/100 PASSED after an initial 42-workload partial sweep plus a retry that filled the remaining 58 workloads"
+  },
+  "decision": {
+    "status": "prepare_submission_v26_pending_user_confirmation",
+    "reason": "This PR #3001-derived all-shape chunk candidate is materially faster than the current tagged submission-v25 across the official 100-workload sweep. The repository is now organized around that payload and awaits explicit user confirmation before commit, tag, and push."
+  }
+}

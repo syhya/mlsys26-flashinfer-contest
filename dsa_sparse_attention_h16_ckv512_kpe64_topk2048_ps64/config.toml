@@ -1,0 +1,8 @@
+[solution]
+name = "dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64_submission_v47"
+definition = "dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64"
+author = "yue-shui"
+
+[build]
+language = "triton"
+entry_point = "kernel.py::run"

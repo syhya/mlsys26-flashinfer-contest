@@ -1,0 +1,8 @@
+[solution]
+name = "gdn_prefill_qk4_v8_d128_k_last_pr3001_blackwell_narrow_short_fallback_submission_v26"
+definition = "gdn_prefill_qk4_v8_d128_k_last"
+author = "yue-shui"
+
+[build]
+language = "triton"
+entry_point = "kernel.py::kernel_prefill_hybrid"

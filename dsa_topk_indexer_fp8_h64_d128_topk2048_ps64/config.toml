@@ -1,0 +1,9 @@
+[solution]
+name = "dsa_topk_indexer_fp8_h64_d128_topk2048_ps64_submission_v50"
+definition = "dsa_topk_indexer_fp8_h64_d128_topk2048_ps64"
+author = "yue-shui"
+
+[build]
+language = "cuda"
+entry_point = "kernel.cu::kernel_cuda"
+binding = "tvm-ffi"

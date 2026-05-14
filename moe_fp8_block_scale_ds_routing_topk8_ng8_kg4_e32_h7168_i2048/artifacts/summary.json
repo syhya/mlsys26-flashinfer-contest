@@ -1,0 +1,94 @@
+{
+  "date": "2026-04-26",
+  "definition": "moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048",
+  "candidate": "moe-submission-v31-gemm2-finalize-le128",
+  "entry_point": "kernel.py::run",
+  "previous_submission": "submission-v30",
+  "proposed_submission": "submission-v31",
+  "evaluation_config": {
+    "atol": 1.0,
+    "rtol": 0.3,
+    "required_matched_ratio": 0.9,
+    "warmup_runs": 10,
+    "iterations": 50,
+    "num_trials": 3,
+    "use_isolated_runner": true,
+    "image": "flashinfer/flashinfer-ci-cu132:20260401-2c675fb",
+    "hardware": "NVIDIA B200",
+    "cuda_version": "13.2"
+  },
+  "results": {
+    "full_sweep_repeats": [
+      {
+        "label": "v31c_gemm2_finalize_le128_run1",
+        "archive_path": "optimize_ops/v31/benchmarks/v31c_gemm2_finalize_le128_run1/benchmark_detailed_results.json",
+        "avg_latency_ms": 0.28734,
+        "median_latency_ms": 0.22407,
+        "p95_latency_ms": 0.86713,
+        "min_latency_ms": 0.07024,
+        "max_latency_ms": 1.18990,
+        "passed_workloads": "19/19"
+      },
+      {
+        "label": "v31c_gemm2_finalize_le128_run2",
+        "archive_path": "optimize_ops/v31/benchmarks/v31c_gemm2_finalize_le128_run2/benchmark_detailed_results.json",
+        "avg_latency_ms": 0.29032,
+        "median_latency_ms": 0.22969,
+        "p95_latency_ms": 0.87937,
+        "min_latency_ms": 0.07112,
+        "max_latency_ms": 1.23273,
+        "passed_workloads": "19/19"
+      },
+      {
+        "label": "v31c_gemm2_finalize_le128_run3",
+        "archive_path": "optimize_ops/v31/benchmarks/v31c_gemm2_finalize_le128_run3/benchmark_detailed_results.json",
+        "avg_latency_ms": 0.29156,
+        "median_latency_ms": 0.22626,
+        "p95_latency_ms": 0.87259,
+        "min_latency_ms": 0.06748,
+        "max_latency_ms": 1.26354,
+        "passed_workloads": "19/19"
+      }
+    ],
+    "mean_across_repeats": {
+      "label": "3-repeat mean",
+      "avg_latency_ms": 0.28974,
+      "median_latency_ms": 0.22667,
+      "p95_latency_ms": 0.87303,
+      "min_latency_ms": 0.06961,
+      "max_latency_ms": 1.22872,
+      "passed_workloads": "19/19"
+    },
+    "v30_baseline": {
+      "label": "v30_compact_long_route_full_sweep_20260425",
+      "archive_path": "solution/triton/retained_run.json",
+      "avg_latency_ms": 0.29143,
+      "median_latency_ms": 0.23009,
+      "p95_latency_ms": 0.86962,
+      "min_latency_ms": 0.07099,
+      "max_latency_ms": 1.22451,
+      "avg_speedup": 75.70,
+      "passed_workloads": "19/19"
+    }
+  },
+  "improvement": {
+    "avg_latency_pct_vs_v30": "-0.58%",
+    "median_latency_pct_vs_v30": "-1.48%",
+    "note": "Marginal improvement (-0.58%) consistent across 3 repeats. Per-workload wins on seq_len=7,15,16,32,55,59 at -2% to -5%. Solution at 97.5% of theoretical roofline."
+  },
+  "decision": {
+    "status": "promoted",
+    "proposed_tag": "submission-v31",
+    "reason": "Extended GEMM2 finalize epilogue to seq_len<=128, validated with 3 independent B200 sweeps."
+  },
+  "key_changes": [
+    "Extended GEMM2 finalize (atomic scatter-add) epilogue from seq_len==1 to seq_len<=128.",
+    "Eliminates reduceAddWrapper kernel and intermediate buffer for small/medium workloads.",
+    "All other kernel paths unchanged from v30."
+  ],
+  "backup_archives": [
+    "optimize_ops/v31/benchmarks/v31c_gemm2_finalize_le128_run1",
+    "optimize_ops/v31/benchmarks/v31c_gemm2_finalize_le128_run2",
+    "optimize_ops/v31/benchmarks/v31c_gemm2_finalize_le128_run3"
+  ]
+}

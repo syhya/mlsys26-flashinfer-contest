@@ -1,0 +1,4 @@
+interface:
+  display_name: "FlashInfer Submission Tagger"
+  short_description: "Tag submissions with config safety"
+  default_prompt: "Use $flashinfer-submission-tagger to create and push the next FlashInfer contest submission tag after validating config.toml topology."
