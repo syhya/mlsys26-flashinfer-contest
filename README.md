@@ -30,13 +30,13 @@ Each kernel directory contains:
 
 ## Kernels
 
-| Kernel | Entry point | Retained result |
+| Track | Kernel | Retained result |
 | --- | --- | --- |
-| [moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048](./moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048/) | `kernel.py::run` | 19/19 passed, 0.289740 ms three-repeat mean latency |
-| [gdn_decode_qk4_v8_d128_k_last](./gdn_decode_qk4_v8_d128_k_last/) | `kernel.py::kernel_hybrid_dispatch` | 54/54 passed, 0.006201 ms average latency |
-| [gdn_prefill_qk4_v8_d128_k_last](./gdn_prefill_qk4_v8_d128_k_last/) | `kernel.py::kernel_prefill_hybrid` | 100/100 passed, 0.051992 ms average latency |
-| [dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64](./dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64/) | `kernel.py::run` | 23/23 passed, 0.011128 ms average latency |
-| [dsa_topk_indexer_fp8_h64_d128_topk2048_ps64](./dsa_topk_indexer_fp8_h64_d128_topk2048_ps64/) | `kernel.cu::kernel_cuda` | 128/128 passed, 0.006893 ms average latency |
+| MoE FP8 | [Block-scale routing](./moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048/)<br>`kernel.py::run` | 19/19 passed<br>0.289740 ms, three-repeat mean |
+| Gated DeltaNet | [Decode QK4](./gdn_decode_qk4_v8_d128_k_last/)<br>`kernel.py::kernel_hybrid_dispatch` | 54/54 passed<br>0.006201 ms average |
+| Gated DeltaNet | [Prefill QK4](./gdn_prefill_qk4_v8_d128_k_last/)<br>`kernel.py::kernel_prefill_hybrid` | 100/100 passed<br>0.051992 ms average |
+| DeepSeek Sparse Attention | [Sparse attention](./dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64/)<br>`kernel.py::run` | 23/23 passed<br>0.011128 ms average |
+| DeepSeek Sparse Attention | [Top-k indexer](./dsa_topk_indexer_fp8_h64_d128_topk2048_ps64/)<br>`kernel.cu::kernel_cuda` | 128/128 passed<br>0.006893 ms average |
 
 ## Full Optimization Records
 
@@ -44,11 +44,11 @@ This combined repository is intentionally curated. The original project
 repositories keep the broader optimization traces, scratch work, references, and
 historical context:
 
-| Track | Source repository | Snapshot commit used here |
-| --- | --- | --- |
-| MoE FP8 | [mlsys26-flashinfer-solution-fused-moe](https://github.com/syhya/mlsys26-flashinfer-solution-fused-moe) | `a880866956216b80d1f4a9704b9eb449812f935a` |
-| Gated DeltaNet | [mlsys26-flashinfer-solution-gated-delta-net](https://github.com/syhya/mlsys26-flashinfer-solution-gated-delta-net) | `025db70cfdb1247421c2dfaf5ac8f4ab595255d3` |
-| DeepSeek Sparse Attention | [mlsys26-flashinfer-solution-sparse-attention](https://github.com/syhya/mlsys26-flashinfer-solution-sparse-attention) | `e2ba69e5a6c26822245db7f2295a37230a6f243e` |
+| Track | Source repository |
+| --- | --- |
+| MoE FP8 | [mlsys26-flashinfer-solution-fused-moe](https://github.com/syhya/mlsys26-flashinfer-solution-fused-moe) |
+| Gated DeltaNet | [mlsys26-flashinfer-solution-gated-delta-net](https://github.com/syhya/mlsys26-flashinfer-solution-gated-delta-net) |
+| DeepSeek Sparse Attention | [mlsys26-flashinfer-solution-sparse-attention](https://github.com/syhya/mlsys26-flashinfer-solution-sparse-attention) |
 
 ## Skills
 
