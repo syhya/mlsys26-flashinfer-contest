@@ -1,0 +1,8 @@
+**Outline 1: Expanded Template Instantiation via Metaprogramming**
+* **Mathematical Formulation**: 
+  - Variables ($X$): Template parameters $K \in \{64, 128, 256\}$, $V_{chunk}$.
+  - Constraints ($C$): $K$ must be a power of 2, memory alignment for `float4` requires address $\bmod 16 = 0$.
+  - Objective ($f(X)$): Maximize the "catchment area" of the peak-performance fast-path kernel without runtime divergence.
+* **Solver Strategy**: C++ Template Metaprogramming. The compiler acts as the solver, generating highly unrolled, register-optimized kernels for each dimension set.
+* **Validity Mechanism**: A deterministic PyTorch runtime router (the "Safety Valve") mathematically checks `if (K == 128)`, `else if (K == 64)`, etc., strictly routing to the valid template or a generic fallback.
+* **Why this solution?**: Generalizes the 777x speedup to more shapes without sacrificing the exactness and FMA efficiency of the K=128 path.

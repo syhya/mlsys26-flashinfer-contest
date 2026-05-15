@@ -1,0 +1,28 @@
+Outline 3: More aggressive fused persistent small-workload kernel with on-chip staging
+
+Mathematical Formulation
+- Variables X:
+  1. Persistent block assignment over (token, head-group).
+  2. Tile size over sparse slots and shared-memory staging pattern.
+  3. Query register blocking and optional double-buffering.
+- Constraints C:
+  1. Exact output semantics identical to reference.
+  2. fp32 accumulation for dots, softmax state, and reductions.
+  3. Invalid sparse slots masked exactly.
+  4. Explicit bf16 conversions only; base-2 lse required.
+- Objective f(X): maximize throughput by reducing workspace traffic and increasing on-chip reuse.
+
+Solver Strategy
+- Deterministic kernel-topology choice with online softmax as the exact solver inside the fused loop.
+- No randomness; use one carefully chosen persistent design.
+- If shared-memory pressure exceeds safe occupancy, downgrade to current parent path.
+
+Validity Mechanism
+- Deterministic fallback dispatch to parent kernels whenever dimensions or occupancy assumptions are unsafe.
+- Neutral-state treatment for all-invalid tiles.
+- Final normalization and lse generation remain algebraically exact.
+
+Why this solution?
+- Expected performance improvement: potentially highest upside by eliminating small-path workspace traffic entirely.
+- Advantages: could materially improve T=1..32 latency.
+- Disadvantages: highest implementation and correctness risk, more likely to regress or fail compilation, difficult to validate in one evolution step.

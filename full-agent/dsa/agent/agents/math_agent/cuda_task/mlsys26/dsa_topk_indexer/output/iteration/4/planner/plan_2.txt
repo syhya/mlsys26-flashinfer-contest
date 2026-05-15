@@ -1,0 +1,19 @@
+Plan 2: Hopper FP8 Tensor Core MMA with Fused Block Top-K
+
+Mathematical Formulation:
+- Variables: Hardware mapping choices (Block dimensions, Warp counts, MMA sizes). Let $B_x$ = tokens per block, $B_y$ = heads per block.
+- Constraints: Thread count per block $\le 1024$. Shared memory $\le 227$ KB. Top-K constraint $\le 2048$. Out-of-bounds tokens must be masked to $-\infty$.
+- Objective: Minimize latency $L(X)$ by maximizing Tensor Core utilization for the FP8 GEMV (which is actually a GEMM when batched over tokens) and minimizing memory round-trips.
+
+Solver Strategy:
+1. Matrix Multiplication Abstraction: Treat $q @ K.T$ as an FP8 Matrix Multiplication. Use `nvcuda::wmma` or inline PTX `mma.sync` instructions specifically targeting SM90 FP8 capabilities.
+2. Kernel Fusion: Fuse the ReLU, weight multiplication, and sum-over-heads directly into the MMA epilogue in registers.
+3. Thread-Level Heap / Block Radix Sort: Instead of writing all scores to global memory, each block maintains a Top-K structure. If $K=2048$, a multi-pass block radix sort using CUB is applied in shared memory.
+
+Validity Mechanism:
+1. Exact Bounds Checking: The kernel employs a strict `if (global_token_idx < seq_lens[batch_idx])` guard.
+2. MMA Correctness: FP8 inputs are cast via hardware-native `__nv_fp8_e4m3` intrinsics and accumulated in FP32 to prevent numerical overflow, ensuring exact parity with the reference PyTorch FP32 accumulation.
+
+Why this solution?
+- Advantages: Exploits SM90 Tensor Cores for massive throughput gains in the scoring phase. Fusing operations avoids global memory traffic.
+- Disadvantages: Highly complex to implement manually without CUTLASS. Requires intricate register management for the MMA instructions.

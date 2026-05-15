@@ -1,0 +1,56 @@
+## Strategic Summary Report — Solution `8e3c776e` (Iteration 32, Generation 8)
+
+---
+
+### 1. Executive Summary
+
+This iteration was a **solid incremental improvement** because it successfully fused the proven FP8 TC GEMM2 path (via `tl.float8e4nv`) with `tl.range()` pipelining AND added novel `BLOCK_M=256` autotune configs, lifting the parent's score from 1.2014 (12.01x) to **1.5395 (15.40x)** — an enormous +28% jump — and marginally edging out its cross-lineage peer `a96d6608` (15.34x, 1.5338) to become the new best-known solution in the entire lineage.
+
+---
+
+### 2. Data-Driven Findings (Facts ONLY)
+
+- **Sibling Rank:** 2 out of 2 children of parent `b550fc5e`. Sibling `464404d0` scored 1.2233 (12.23x). This child scores **1.5395 (15.40x)** — #1 of 2, +0.3162 above sibling. Cross-lineage comparison: `a96d6608` (grandchild via 464404d0) = 1.5338. This solution narrowly tops it by +0.0057.
+- **Score Delta:** Parent `b550fc5e` (1.2014, 12.01x, 2.320ms) → child `8e3c776e` (**1.5395, 15.40x, 1.523ms**). Absolute gain: **+0.3381 (+28.1% relative)**. Kernel latency reduction: **-0.797ms (-34.4%)**.
+- **Key Change:** GEMM2 kernel replaced with the FP8 TC path — per-tile SCALAR quantization (`tl.max(tl.abs(c))` no-axis → `(c / c_scale).to(tl.float8e4nv)` → `tl.dot(c_fp8, w2_fp8)`) while retaining `tl.range()` software pipelining. Autotune space expanded to **13 GEMM1 configs / 12 GEMM2 configs**, adding two novel `BLOCK_M=256` entries (`num_warps=8/16, num_stages=3`) that had never been tested in this lineage.
+- **Core Metrics:**
+  - Correctness: **1.0** (Passed)
+  - Speedup: **15.395x** (sibling `464404d0`: 12.23x; peer `a96d6608`: 15.34x)
+  - Kernel latency: **1.523ms** (vs `a96d6608` 1.547ms — 1.6% faster)
+  - Max absolute error: **32,768.0** (vs `a96d6608`'s 36,864 — marginally tighter; vs parent's 8192 — 4x larger)
+  - Max relative error: 2.08e11 (vs `a96d6608`'s 1.43e11 — somewhat worse)
+  - Eval time: **39.26s** (vs `a96d6608`'s 68.92s — notably faster despite 2 more configs; likely cache effects)
+  - Total workloads: 19
+
+---
+
+### 3. Strategic Analysis (The "So What?")
+
+- **Root Cause:** The outcome is a product of **both excellent plan design and faithful execution**. The plan correctly identified that the parent `b550fc5e` was NOT the database best (the true best was `a96d6608` at 15.34x in a parallel lineage) and explicitly directed the executor to "copy `a96d6608` verbatim as a floor" then expand the search space. The executor obeyed — using the proven `tl.float8e4nv` alias (not `tl.float8_e4m3fn`), preserving scalar `tl.max`, and adding only the 2 novel `BLOCK_M=256` configs. The result narrowly exceeds `a96d6608`, confirming that at least one `BLOCK_M=256` config was selected for at least one of the 19 workloads — likely a large-prefill shape where wider M-tiles improved SM utilization.
+
+- **Key Insight:** The single most important lesson is that **cross-lineage strategic awareness multiplies evolutionary efficiency**. The planner looked beyond the immediate parent, recognized that a sibling lineage had already achieved 15.34x, and deliberately set that as a floor via verbatim copy. This turns what could have been a redundant re-derivation (or worse, a regression) into an incremental exploration on top of the global frontier. The `BLOCK_M=256` additions produced the marginal +0.006 score gain — modest, but importantly demonstrating that the autotune space still has room to grow at the large-batch end. Prescriptive copy-paste plans with explicit anti-regression instructions continue to be the dominant communication pattern preventing executor drift.
+
+- **Identified Risk:** Three interlocking risks:
+  1. **Numerical precision erosion is compounding.** Max abs error: 8192 (parent) → 32768 (child), max rel error: 6.4e9 → 2.08e11. Still within `atol=1e-2, rtol=1e-2`, but the margin is shrinking. Per-tile scalar FP8 quantization over [BLOCK_M=256 × BLOCK_K=128] tiles amplifies outlier sensitivity substantially.
+  2. **Diminishing returns on autotune expansion.** The +0.006 score gain from adding 2 new configs vs the peer `a96d6608` shows the autotune search-space lever is saturating. Future score jumps will require architectural changes.
+  3. **Shared fragility with `a96d6608`.** Since this solution is essentially `a96d6608 + 2 configs`, it inherits all of that solution's latent issues (per-tile scalar quantization precision cliff, outstanding `seq_len=7` 8192-error mystery).
+
+---
+
+### 4. Actionable Guidance (The "What's Next?")
+
+- **Recommend Fusion [high priority]:** This solution is now the lineage's **new production floor**. All future iterations should treat this code as the mandatory starting base. Specifically: GEMM1 (13 configs with BLOCK_M=256), GEMM2 (12 configs with BLOCK_M=256, FP8 TC via `tl.float8e4nv`), and `tl.range()` pipelining are all load-bearing. Any child that refactors these without preserving the triad `(tl.max no-axis) → (to tl.float8e4nv) → (tl.dot fp8,fp8)` will regress to ≤12.2x.
+
+- **Recommend Exploration [highest upside]:** The remaining high-leverage unexplored vector is the **fused Triton routing kernel**. At 1.523ms total, PyTorch's multi-launch `_route_tokens` (sigmoid + 3×topk + scatter + nonzero + argsort + bincount + cumsum) likely consumes 15-25% of the budget for small-T decode workloads. Fusing this into 1-2 Triton kernels with atomics could unlock another 5-15% speedup. This is now the **dominant untapped lever** — autotune expansion is saturated, GEMM path is FP8 TC'd, SwiGLU is fused.
+
+- **Recommend Exploration:** Apply `tl.make_block_ptr` / TMA-style loads for W1/W2 tile reads in both GEMMs. B200's TMA engine provides higher bandwidth than strided loads, and this lineage has never attempted it. Target: further 3-5% on GEMM1 which remains the compute bottleneck (K=7168).
+
+- **Recommend Stripping:** The plan directed the executor to include `BLOCK_M=256, num_warps=16, num_stages=3`. If profiling shows this config is never selected by the autotuner for any of the 19 workloads (easily verified via Triton autotune logs), REMOVE it — each unused config adds JIT compile overhead. Keep only the `BLOCK_M=256, num_warps=8` variant if the num_warps=16 version never wins.
+
+- **Recommend Exploration [precision insurance]:** Investigate switching from per-tile scalar FP8 quantization to **per-row (BLOCK_M×1) scalar FP8 quantization** for GEMM2's c_fp8. Cost: one extra `tl.max(axis=1)` per K-iter (~2% overhead). Benefit: reduces max_abs_error by an expected 2-4x, buying tolerance margin and protecting against evaluation tightening. The current 32,768 max_abs_error trajectory is concerning.
+
+- **Warn:** Do NOT assume further autotune expansion will yield meaningful gains. The data shows +0.006 score from +2 configs — clear saturation signal. Planners should redirect budget from "add more configs" to architectural changes (fused routing, TMA loads, split-K for decode).
+
+- **Warn:** The persistent 8192→32768 absolute error growth is a ticking clock. Ideally the next 2-3 iterations should include a diagnostic pass on the specific workload producing this error (likely `seq_len=7` per prior lineage notes). Ignoring this risks catastrophic lineage-wide correctness failure if tolerance is ever tightened by the benchmark harness.
+
+- **Warn:** Reference latency varies noticeably between runs (17.44ms for parent → 16.80ms for this child → 17.09ms for `a96d6608`). The +0.006 score edge over `a96d6608` is within one standard deviation of benchmark noise. This "win" is statistically marginal; treat `a96d6608` and `8e3c776e` as effectively tied for the lineage frontier.

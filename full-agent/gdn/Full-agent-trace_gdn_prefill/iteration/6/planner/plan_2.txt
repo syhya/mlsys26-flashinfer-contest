@@ -1,0 +1,17 @@
+Outline 2: Vectorized Global Memory Loads with Float4 Unpacking
+
+Mathematical Formulation:
+Variables (X): Global memory load width ($W$).
+Constraints (C): $W \times \text{threads} = 128$ elements per vector. Memory alignment must be 16 bytes.
+Objective (f(X)): Maximize memory bandwidth utilization (minimize memory transactions).
+
+Solver Strategy: Vectorized Load Optimization.
+- Instead of 128 threads loading 2 bytes each, use 16 threads to load 16 bytes (`float4`) each.
+- Unpack the `float4` (which contains 8 `bfloat16` values) into shared memory using bitwise operations and `__bfloat162float`.
+
+Validity Mechanism:
+- C++ wrapper ensures `.contiguous()` on inputs to guarantee 16-byte alignment.
+- A static loop calculates the exact offsets to avoid out-of-bounds memory accesses.
+
+Why this solution?
+Maximizes memory bus utilization by issuing 128-bit load instructions. Disadvantage: uneven workload distribution across the warp (only 16 threads do the load), potentially causing execution bottlenecks during unpacking.

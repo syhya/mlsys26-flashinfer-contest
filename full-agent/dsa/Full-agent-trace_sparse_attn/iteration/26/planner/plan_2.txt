@@ -1,0 +1,7 @@
+Plan 2: Fuse reducer into compute via cooperative groups / single-block per (t,h)
+- Eliminate O_tmp HBM round-trip entirely by doing all 64 partitions sequentially within one block per (t,h).
+- Grid: (T, 16), block: 32 threads.
+- Each block iterates over 64 sparse tiles online. (Same as fused large path!)
+- Risk: only T*16 blocks = 16 blocks at T=1, very low occupancy. Worse than split-K.
+- Math: trivially correct.
+- Verdict: REJECT — exactly the large fused path which is known-worse for small T.

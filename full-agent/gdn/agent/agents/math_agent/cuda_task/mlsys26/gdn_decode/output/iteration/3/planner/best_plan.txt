@@ -1,0 +1,37 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized CUDA kernel for the GDN decode step that maximizes GPU SM occupancy, completely eliminates block synchronization overhead, and seamlessly hides L1TEX memory latencies using high-throughput math intrinsics, significantly outperforming the 970x baseline to reach a perfect 1.0 score.
+
+**Selected Outline:** Warp-Level Autonomy & FMA Optimization (Synchronization Elimination)
+
+**Rationale for Selection:**
+1.  **Data-Driven Bottleneck Resolution:** The NCU profiling from the parent identified that 1) SM occupancy is still critically low (~11.8%) due to an insufficient number of blocks per SM, 2) Block synchronization (`__syncthreads()`) is causing hardware idling because there aren't enough active blocks per SM to swap out, and 3) 27,648 instructions were non-fused FP32 instructions, leaving 26% throughput on the table.
+2.  **Mathematical & Hardware Guarantee:** By removing `__shared__` memory and `__syncthreads()` entirely, and shifting to a smaller block/larger grid configuration, we mathematically guarantee that warps can execute completely independently. This allows the hardware scheduler to seamlessly hide the remaining 40-49% L1TEX memory stalls.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Definition & Algebraic Model**
+    *   **Variables:** Define Grid configuration $G = (B, HV, V / 2)$ and Block configuration $B_{dim} = (32, 2)$. This doubles the grid size from 256 to 512, providing roughly ~3.45 blocks per SM (up from 1.7), guaranteeing enough blocks to hide memory fetches.
+    *   **Objective Function:** Maximize SM occupancy $\mathcal{O}(G)$ and eliminate barrier stall cycles $\mathcal{B}_{stall} = 0$.
+    *   **Constraints:** Tensor sizes are fixed ($K=128$, $V=128$). Thread mapping must satisfy $T_x = 32$ (one warp) perfectly mapping to $K/4$ via `float4` vectorized loads.
+    *   **Mathematical State Update:** Retain exact decoupled equations:
+        *   $g = \exp(-\exp(A\_log) \cdot \text{softplus}(a + dt\_bias))$
+        *   $\beta = \text{sigmoid}(b)$
+        *   $qh_v = \sum (q \cdot state_v)$, $kh_v = \sum (k \cdot state_v)$
+        *   $output_v = scale \cdot (g \cdot qh_v + \beta \cdot (v_v - g \cdot kh_v) \cdot qk\_dot)$
+        *   $new\_state_v = g \cdot state_v + \beta \cdot (v_v - g \cdot kh_v) \cdot k$
+
+2.  **Phase 2: The Optimization Loop (Kernel Execution Strategy)**
+    *   **Zero-Barrier Architecture:** Eliminate `__shared__` memory and `__syncthreads()` completely.
+    *   **Warp-Level Autonomy:** Have thread 0 of *each warp* (not block) compute the head-level scalars (`a_val`, `b_val`, `dt_bias`, `A_log`), evaluate the complex math (`__expf`, `__logf`), and then broadcast `g` and `beta` to the rest of the warp using `__shfl_sync(0xffffffff, val, 0)`.
+    *   **Fused Multiply-Add (FMA):** Explicitly use the `fmaf(a, b, c)` hardware intrinsic for all inner-loop accumulations (e.g., `qh_local = fmaf(q_f[0], st.x, qh_local)`) to collapse the non-fused FP32 instructions reported by NCU into higher-throughput fused operations.
+
+3.  **Phase 3: The "Safety Valve" (CRITICAL)**
+    *   **Deterministic State Initialization:** The PyTorch `state` tensor is optional. The C++ wrapper MUST enforce a deterministic validity check: `if (state.defined() && state.numel() > 0)`. If true, pass the raw pointer. If false, pass `nullptr`.
+    *   **Kernel-Level Fallback:** Inside the CUDA kernel, implement a strict conditional safety valve: `float4 st = make_float4(0.0f, 0.0f, 0.0f, 0.0f); if (state_ptr != nullptr) { st = reinterpret_cast<const float4*>(...)[tx]; }`. This guarantees the kernel will never segfault on undefined memory and mathematically correctly defaults to a zero-state.
+    *   **Contiguity Enforcement:** The C++ wrapper MUST call `.contiguous()` on all input tensors before extracting data pointers to prevent silent memory offset corruption.
+
+4.  **Phase 4: Implementation Details**
+    *   **Libraries:** Strictly use `<cuda_bf16.h>` for hardware-accelerated types (`__nv_bfloat16`, `__bfloat162float`, `__float2bfloat16`) and `<torch/extension.h>` for the binding.
+    *   **Intra-Warp Reduction:** Use the mathematically exact `__shfl_down_sync(0xffffffff, val, offset)` loop to sum variables (`qk_local`, `qh_local`, `kh_local`) across the 32 threads in the warp.
+    *   **Vectorization:** Cast pointers to `float4*` for the $FP32$ `state` tensor and `float2*` for the $BF16$ `q` and `k` tensors to guarantee maximum 128-byte transaction efficiency on the memory bus. Ensure the `__launch_bounds__(64)` directive is used to minimize register spillage for the smaller block size.

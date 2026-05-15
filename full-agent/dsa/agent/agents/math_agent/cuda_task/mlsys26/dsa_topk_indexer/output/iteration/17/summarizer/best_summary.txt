@@ -1,0 +1,21 @@
+### Strategic Analysis Report
+
+**1. Executive Summary:**
+This iteration was a major breakthrough because the introduction of a tier-based dispatch strategy (TIER-S direct enumeration + TIER-M/L conditional sorting via empty CUB segments) more than doubled the parent's score, dramatically outperforming all known siblings of the parent.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   **Sibling Rank:** Top among the parent's lineage; outranks both direct siblings of `ee397e71` (siblings: `b10c8693` @ 3.41, `42c585fd` @ 3.98). Current child @ 7.86.
+*   **Score Delta:** From parent (3.45) to child (7.86), a +4.41 absolute / +128% relative improvement.
+*   **Key Change:** Added `emit_short_topk_kernel` (TIER-S) that bypasses scoring/sorting entirely when `seq_len <= TOPK=2048`, and modified offset generation (`generate_offsets_tier`) so CUB segmented sort skips short batches by emitting empty segments (`begin == end`).
+*   **Core Metrics:** Kernel latency 0.123ms → 0.057ms; Speedup 34.51x → 78.60x; Correctness = 1.0; baseline 4.04ms → 2.80ms (different workload mix). 12 workloads, max abs/rel error = 0.
+
+**3. Strategic Analysis (The "So What?"):**
+*   **Root Cause:** Both plan and execution quality. The plan correctly identified that for short sequences (`L <= K`), the entire score+sort pipeline is wasted work — every valid index is in the output by definition. Execution cleanly partitioned work across tiers without breaking the proven parent score-compute kernel, and the empty-segment trick avoids touching CUB for skipped batches with zero overhead.
+*   **Key Insight:** **Workload-aware dispatch is the highest-leverage optimization here.** A non-trivial fraction of benchmark workloads have `L <= 2048`, and skipping all FP8 arithmetic for them yields larger gains than any micro-optimization of the inner MMA loop. The "trivial-case" branch should always be the first thing implemented when K approaches L.
+*   **Identified Risk:** The much more ambitious fused TIER-M `fused_score_topk_kernel` from the *plan* was apparently NOT implemented in the final solution code — the executor delivered only the TIER-S split, not the planned BlockRadixSort fusion. So the plan's headline ambition (single-kernel fused score+sort for medium L) is left on the table; the gain came entirely from the TIER-S shortcut. This is a "plan-execution gap" — the easy half of the plan landed, the hard half didn't, but the easy half alone was enough to dominate.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   **Recommend Fusion:** Now actually execute the *unrealized* portion of this iteration's plan — fuse `compute_scores_kernel` with `cub::BlockRadixSort` for the TIER-M band (`2048 < L <= 6144`). This eliminates an HBM round-trip on `scores_buf`/`indices_buf` and a kernel launch, with realistic potential to push score toward 10–12x.
+*   **Recommend Exploration:** Add a TIER-XS path: for `L <= 64` (single-page sequences), skip the `block_table` indirection entirely and write a constant `arange + block_table[b,0]*64` pattern with a minimal block. Also consider tiering by `num_pages_used` rather than `L` so that batches with large `max_num_pages` but small `L` don't pay any sorting cost.
+*   **Recommend Stripping:** The full `scores_buf` / `indices_buf` allocation of size `[B, max_num_pages*64]` is now wasted memory for TIER-S batches. Allocate these buffers only sized for TIER-M/L batches (compact layout) to reduce HBM pressure on large `max_num_pages` workloads.
+*   **Warn:** Do NOT regress the TIER-S kernel — its correctness depends on the invariant that "every valid token index is in the answer when L ≤ K". Any future kernel that filters by score before this check will silently break correctness on short sequences. Also, beware that the FP8 inner loop (per-head warp reduction inside an `h=0..63` loop with single-lane accumulation) is now the dominant cost on TIER-M/L batches and is the next true bottleneck — this is where Tensor-Core MMA (CUTLASS/CuTe FP8) should finally be tried.

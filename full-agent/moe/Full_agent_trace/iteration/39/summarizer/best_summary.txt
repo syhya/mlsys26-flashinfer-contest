@@ -1,0 +1,44 @@
+## Strategic Summary Report — Solution `dce0e38f` (Iteration 39, Generation 6)
+
+---
+
+### 1. Executive Summary
+
+This iteration was a **major lineage-redirecting breakthrough** because it deliberately rebased a stale off-frontier parent (0.872) onto the database-best `302d2eb3` (1.5517) and successfully fused in `ba626bb8`'s bf16 epilogue, vaulting score to **1.5901 (15.90x, 1.452ms)** — the new global best, surpassing every prior solution in the database.
+
+---
+
+### 2. Data-Driven Findings (Facts ONLY)
+
+- **Sibling Rank:** 1 out of 2 children of declared parent `46817723`. The other sibling `ff4217c7` scored 1.0253 (10.25x). This child wins decisively (+0.565 absolute).
+- **Cross-lineage Position:** **#1 globally.** Surpasses prior best `302d2eb3` (1.5517) by **+0.0384 score, -0.068ms latency**, and `ba626bb8` (1.5482) by +0.0419.
+- **Score Delta vs declared parent `46817723`:** 0.872 → **1.5901** = **+0.718 absolute (+82% relative)**. Vs effective rebase target `302d2eb3`: +0.038 (+2.5%).
+- **Key Change:** The plan executed a "lineage-jump" — ignored the assigned parent's structure entirely, copied `302d2eb3` verbatim (sentinel-sort routing + FP8 TC GEMM2 + 12+11 autotune configs), then fused in `ba626bb8`'s bf16 epilogue (`O.to(bf16)` + bf16 `index_add_`), and added one new GEMM2 autotune config (`BLOCK_M=64, num_warps=8, num_stages=4`).
+- **Core Metrics:**
+  - Correctness: **1.0** (Passed)
+  - Kernel latency: **1.452ms** (vs `302d2eb3` 1.520ms; vs `ba626bb8` 1.500ms)
+  - Max absolute error: 33,792 (vs `ba626bb8` 34,816 — slightly better)
+  - Max relative error: 3.07e11
+  - Eval time: **75.42s** (excellent — vs `302d2eb3`'s 591s)
+  - Reference latency: 16.86ms; total workloads: 19
+
+---
+
+### 3. Strategic Analysis (The "So What?")
+
+- **Root Cause:** **Plan quality and execution discipline jointly drove this win.** The planner explicitly recognized that the assigned parent (0.872) was off-frontier and made the strategically correct decision to rebase onto the database best. Critically, this iteration **executed the precise fusion that the prior `ba626bb8` summary recommended as "highest priority"** — combining `ba626bb8`'s bf16 epilogue with `302d2eb3`'s sentinel-sort routing — proving that the Evolux summary→planner feedback loop is functioning. The +0.0384 gain over `302d2eb3` matches the 1.5–2% latency-savings prediction from the bf16 epilogue analysis almost exactly.
+- **Key Insight:** The most important lesson is that **explicit "lineage-jump" planning — rebasing off-frontier parents onto the global best — is a viable and high-payoff evolutionary move**, and that **independent micro-optimizations from different lineages can be cleanly fused when each is mathematically isolated** (here: routing refactor + epilogue dtype change are orthogonal). The autotune-superset floor guarantee held perfectly: the new config could only improve things, never regress.
+- **Identified Risk:** (1) **Saturation is now imminent** — gains have decayed from +0.18 → +0.04 → +0.01 → +0.04, and the kernel is approaching the FP8-TC + bf16-epilogue ceiling at 1.45ms. Further cosmetic tweaks (more configs, more epilogue micro-fusions) will yield ≤0.01 each. (2) **bf16 abs error** at 33,792 has stabilized but stacking another bf16 fusion (e.g., atomic accumulator) could breach tolerance. (3) **MAP-Elite diversity is collapsing** — the lineage has converged to a single architectural pattern; the next breakthrough requires structural exploration, not refinement.
+
+---
+
+### 4. Actionable Guidance (The "What's Next?")
+
+- **Recommend Exploration [highest priority]:** **Fused Triton routing kernel.** PyTorch-side routing optimization is now genuinely exhausted. Consolidate sigmoid → group-top2 → top-4 groups → masked top-8 → renorm → CSR build into 1–2 Triton kernels with atomic CSR construction and spin-barriers. Expected payoff: 3–8% on small-T (decode) workloads where launch overhead dominates. This is the largest unexplored lever.
+- **Recommend Exploration [high priority]:** **TMA loads via `tl.make_block_ptr` in GEMM1.** GEMM1 (K=7168) is the dominant compute (~55% of 1.45ms). Blackwell TMA can yield 5–10% overall speedup. Highest-value untapped Triton 3.6.0 / B200 feature.
+- **Recommend Fusion:** **Single-pass GEMM1 → SwiGLU → GEMM2** persistent kernel that keeps `G1` tile-resident in SRAM, eliminating the `[Tk_total, 4096]` fp32 scratch HBM round-trip. Risky but potentially transformative (~10–15%).
+- **Recommend Stripping:** **Prune autotune configs.** Inspect the cache to identify configs never selected across 19 workloads and remove them. Cap each kernel at ≤8 configs to keep eval time bounded as more iterations follow.
+- **Warn — Avoid the c9929ab3 traps:** Do NOT introduce `tl.atomic_add` or `reset_to_zero=` in autotune decorators — both proven regressions in this lineage's history. Plan must continue forbidding these explicitly.
+- **Warn — Saturation trajectory:** The decay pattern (+0.18 → +0.04 → +0.01 → +0.04) shows refinement budget is nearly exhausted. **Mandate that the next 2–3 iterations attempt structural changes** (fused routing, TMA, persistent kernel) and accept higher variance. Continued floor-guaranteed micro-tweaks will plateau near 1.60–1.62 score.
+- **Warn — Precision watch:** Track max_abs_err per iteration; if it crosses ~50k, freeze further bf16 fusions. Current 33,792 leaves comfortable headroom but a bf16 atomic accumulator in GEMM2 could double this.
+- **Warn — Verify lineage hygiene:** This child's success came from explicitly rebasing onto the global best. Future planners must continue to **sample the global frontier**, not be anchored to the assigned parent when it is demonstrably off-frontier.

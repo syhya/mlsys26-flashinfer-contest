@@ -1,0 +1,9 @@
+Plan 2: Base on 302d2eb3. Fuse the final fp32->bf16 cast into the GEMM2 epilogue when possible. Specifically, allocate a single bf16 output buffer of shape [Tk_total, H], have GEMM2 store bf16 directly (acc.to(tl.bfloat16)). Then PyTorch index_add_ on a bf16 buffer is not supported natively; fallback: keep f32 O scratch but use scatter_add_ on bf16 conversion or do final cast just once. The savings: avoid one fp32 write+read pass on Tk_total*H buffer.
+
+Math: identical, only the final dtype handling changes.
+Risk: medium. bf16 store loses some precision in O[j,h], but routing weight + index_add_ accumulation typically tolerates it.
+Upside: small-medium (~2-3%).
+
+Better alternative: keep Output as fp32 zeros [T,H], and scatter_add via index_add_, then cast. (this is what parent does already).
+
+Actually a cleaner fusion: since each token row is touched by ≤8 experts BUT GEMM2 processes them serially, the simplest fusion is to keep GEMM2 outputting fp32 to local O, then cast O to bf16 first, then bf16 index_add_. PyTorch supports bf16 index_add_. Skips fp32 [T,H] alloc.

@@ -1,0 +1,21 @@
+Plan 1: Segmented Radix Sort with Shared Memory FP32 Compute
+
+Mathematical Formulation:
+- Variables: Query Q (FP8), Key K (FP8), Scale S (FP32), Weights W (FP32).
+- Objective: Compute Scores(b, t) = sum_h [ W(b,h) * ReLU( sum_d [ Q(b,h,d) * K(p,t,d) * S(p,t) ] ) ]
+- Constraints: Select Top-2048 tokens per batch element. Valid tokens <= seq_lens[b].
+- Padding Constraint: Out-of-bounds tokens must strictly yield -1.
+
+Solver Strategy:
+1. Two-phase mapping: First, a highly parallel score computation kernel where each CUDA block handles exactly 1 page (64 tokens) of 1 batch element.
+2. Shared Memory Tiling: Load Q, K, W, S into block shared memory. Transpose K in shared memory to ensure mathematically perfect memory coalescing (0 bank conflicts).
+3. Batched Sorting: Write scores to a padded 2D tensor [batch_size, max_num_pages * 64]. Use `cub::DeviceSegmentedRadixSort` to sort the batches entirely on the GPU.
+
+Validity Mechanism:
+1. Initialization of the score tensor to -INF mathematically guarantees that any padding/invalid tokens will sink to the bottom during the descending sort.
+2. The Top-K extraction kernel enforces the `actual_topk = min(topk, seq_lens[b])` bound, forcing -1 for any remaining slots.
+3. Explicit `cudaFuncSetAttribute` ensures the 67KB dynamic shared memory is successfully allocated without CUDA runtime errors.
+
+Why this solution?
+- Advantages: Extremely robust, fully avoids GPU-CPU syncs, maximizes memory bandwidth via shared memory, relies on battle-tested CUB sorting algorithms.
+- Disadvantages: Slightly higher peak memory usage for the intermediate padded score tensor, but well within acceptable limits for typical batch sizes.

@@ -1,0 +1,32 @@
+Outline 2: Two-level reduction with split-K compute and deterministic CUB-based block reduction refinement
+
+Mathematical Formulation
+- Variables X:
+  1) Split factor S dividing 2048 sparse positions into S chunks.
+  2) Chunk-local states (m_s, l_s, O_s) for s in {0,...,S-1}.
+  3) Final reduction weights alpha_s = exp(m_s - m_global) / l_global.
+  4) Block size and vector width for output reduction.
+- Constraints C:
+  1) m_global = max_s m_s.
+  2) l_global = sum_s l_s * exp(m_s - m_global).
+  3) output = sum_s alpha_s * O_s.
+  4) Invalid sparse entries do not affect any local state.
+  5) FP32 accumulation and exact base-2 lse requirement.
+  6) Workspace tensors must remain in-bounds and shape-correct.
+- Objective f(X): minimize latency subject to exact equivalence with the reference recurrence.
+
+Solver Strategy
+- Deterministic decomposition solver:
+  1) Solve chunk-local exact online softmax independently.
+  2) Solve global merge via associative softmax merge equations.
+- Use CUB block reduction primitives to reduce branchy handwritten reductions and improve robustness.
+
+Validity Mechanism
+- Algebraic exactness of the merge equations guarantees that the final answer equals the one-pass recurrence.
+- Deterministic guard for all-invalid rows writes zeros and -INF.
+- Shape checks and dtype checks in host entry point prevent malformed launches.
+
+Why this solution?
+- Expected improvement: more robust and easier to maintain than handwritten reductions; can improve low-token occupancy.
+- Advantages: low implementation risk, mathematically exact merge, easier debugging.
+- Disadvantages: still requires large intermediate global workspace and two kernel launches; likely limited upside versus current parent.

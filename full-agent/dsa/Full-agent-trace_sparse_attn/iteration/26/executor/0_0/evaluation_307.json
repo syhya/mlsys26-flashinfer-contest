@@ -1,0 +1,43 @@
+{
+  "status": "success",
+  "summary": "Optimization successful! Speedup: 35.36x (ref: 2.432ms, kernel: 0.075ms)",
+  "score": 3.535860347442015,
+  "metrics": {
+    "correctness": 1.0,
+    "speedup": 35.35860347442015,
+    "exec_time_ms": 0.07512309420289855,
+    "baseline_time_ms": 2.432337195652174,
+    "compile_time": 0.0,
+    "eval_time": 200.05771732330322
+  },
+  "artifacts": {
+    "eval_backend": "modal+flashinfer-bench",
+    "task_id": "dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64",
+    "execution_time": "200.06s",
+    "kernel_latency_ms": "0.075ms",
+    "reference_latency_ms": "2.432ms",
+    "speedup": "35.36x",
+    "bench_stats": {
+      "reference_latency_ms": 2.432337195652174,
+      "max_relative_error": 0.4130421578884125,
+      "max_absolute_error": 0.0078125,
+      "total_workloads": 23
+    },
+    "correctness_check": "Passed",
+    "ncu_profile": {
+      "ncu_set": "full",
+      "ncu_page": "details",
+      "ncu_kernel_name": null,
+      "rows": [
+        {
+          "workload_uuid": "0c23b10c7b7645719517828c12eaa1d2",
+          "axes": {
+            "num_tokens": 1,
+            "num_pages": 8462
+          },
+          "output": "==PROF== Connected to process 1332 (/opt/conda/envs/py312/bin/python3.12)\n\n==ERROR== An error was reported by the counter measurement library:\n==ERROR== For more information, see /tmp/nsight-compute-4b79-7375.log\n==ERROR== Failed to initialize the profiler: LibraryNotLoaded. Check that a compatible driver library is loaded.\n==ERROR== For more information, see /tmp/nsight-compute-4b79-7375.log\n==PROF== Trying to shutdown target application\n==ERROR== The application returned an error code (9).\n"
+        }
+      ]
+    }
+  }
+}

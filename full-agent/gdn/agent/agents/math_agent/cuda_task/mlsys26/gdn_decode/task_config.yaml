@@ -1,0 +1,118 @@
+# GDN decode configuration
+workspace_path: "./output"
+
+# Global LLM configuration
+llm_config:
+  url: "https://api.chatanywhere.tech/v1"
+  api_key: "${LLM_API_KEY}"
+  model: "openai/gemini-3.1-pro-preview"
+  temperature: 0.9
+  context_length: 128000
+  max_tokens: 32768
+  timeout: 1200
+
+# ------------------------------------------------------------------------------
+# Define all available components
+# ------------------------------------------------------------------------------
+
+planners:
+  evolve_planner:
+    react_max_steps: 5
+
+executors:
+  evolve_executor_react:
+    parallel_candidates: 1
+    max_rounds: 3
+    react_max_steps: 10
+
+  evolve_executor_chat:
+    max_rounds: 3
+
+  evolve_executor_fuse:
+    max_rounds: 3
+    react_max_steps: 10
+    score_threshold: 0.99
+
+summarizers:
+  evolve_summary:
+    react_max_steps: 5
+
+# ------------------------------------------------------------------------------
+# Define main evolution process configuration
+# ------------------------------------------------------------------------------
+evolve:
+  task: |
+    # Role
+    You are a world-class expert in high-performance computing, specializing in PyTorch and CUDA C++ programming. Your expertise includes writing custom CUDA kernels, optimizing memory access patterns, and leveraging low-level hardware features for maximum performance.
+
+    # Task
+    You will be given a JSON task definition for **Gated Delta Net (GDN) decode** — a recurrent state-update operation used in linear attention models (Qwen3-Next). Your goal is to implement a **highly optimized CUDA kernel** that significantly outperforms the provided PyTorch reference while maintaining strict numerical correctness.
+
+    # Output Format
+    1. Provide **only a single CUDA/C++ code block** — the content of `kernel.cu`.
+    2. Your `kernel.cu` MUST include `<torch/extension.h>` and expose exactly this C++ entry point:
+
+    ```cpp
+    #include <torch/extension.h>
+    #include <tuple>
+
+    // ... your CUDA kernels and helpers ...
+
+    std::tuple<torch::Tensor, torch::Tensor> gdn_forward(
+        torch::Tensor q,       // [batch_size, 1, 4, 128]     bfloat16
+        torch::Tensor k,       // [batch_size, 1, 4, 128]     bfloat16
+        torch::Tensor v,       // [batch_size, 1, 8, 128]     bfloat16
+        torch::Tensor state,   // [batch_size, 8, 128, 128]   float32  (k-last)
+        torch::Tensor A_log,   // [8]                          float32
+        torch::Tensor a,       // [batch_size, 1, 8]           bfloat16
+        torch::Tensor dt_bias, // [8]                          float32
+        torch::Tensor b,       // [batch_size, 1, 8]           bfloat16
+        float scale            // scalar: 1/sqrt(128)
+    );
+    // Returns: {output [batch_size,1,8,128] bfloat16,
+    //           new_state [batch_size,8,128,128] float32}
+    ```
+
+    3. End with:
+    ```cpp
+    PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+        m.def("gdn_forward", &gdn_forward, "GDN decode forward");
+    }
+    ```
+
+    # Correctness Requirements
+    1. Output shapes and dtypes must match exactly.
+    2. Numerical tolerance: rtol=1e-2, atol=1e-2.
+    3. All intermediate accumulation must be in FP32; convert to BF16 only for final output store.
+    4. GVA mode: num_v_heads=8 > num_q_heads=4 — expand q and k by repeat_interleave(2).
+    5. State layout is k-last [B, HV, V, K].
+    6. Gate formulas: g = exp(-exp(A_log) * softplus(a + dt_bias)), beta = sigmoid(b).
+
+    Now, provide your answer below:
+
+
+  # Component selection
+  planner_name: "evolve_planner"
+  executor_name: "evolve_executor_fuse"
+  summary_name: "evolve_summary"
+
+  # Core parameters
+  max_iterations: 20
+  target_score: 100.0
+  concurrency: 1
+
+  # Skip evaluation of the JSON initial file (it's a task definition, not code)
+  initial_score: 0.0
+  initial_evaluation: "Initial file is a JSON task definition for GDN decode. No kernel to evaluate yet."
+
+  # Evaluator configuration
+  evaluator:
+    timeout: 3600
+
+  # Database configurations
+  database:
+    storage_type: "in_memory"
+    num_islands: 1
+    population_size: 100
+    checkpoint_interval: 1
+    sampling_weight_power: 2

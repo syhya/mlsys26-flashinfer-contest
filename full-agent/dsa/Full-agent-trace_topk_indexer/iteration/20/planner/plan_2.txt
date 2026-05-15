@@ -1,0 +1,10 @@
+Plan 2: TRUE register-resident fusion for TIER-M (no smem staging)
+- Each thread owns specific (head=lane_id) heads; warp-cooperative scoring writes scores DIRECTLY
+  into the register keys[] slot owned by that thread post-sort. Slot mapping: g -> (item=g/256, owner=g%256).
+- Use warp-shuffle/atomic-free scatter via shared scratch of size 256 (one float per thread)
+  to bridge from "warp lane 0 has score" to "owner thread has score in keys[item]".
+- Solver: CUB BlockRadixSort<float, 256, 24, int32_t> SortDescendingBlockedToStriped.
+- Validity: pre-init keys=-1e30f, vals=-1; only valid (g<L) slots overwritten; same exact sort primitive.
+- Fallback: if fusion buggy, revert to plan 1 path.
+- Advantages: removes scores_buf/indices_buf HBM round-trip AND saves a kernel launch.
+- Disadvantages: complex scatter logic; bug-prone (history shows fusion attempts have regressed).

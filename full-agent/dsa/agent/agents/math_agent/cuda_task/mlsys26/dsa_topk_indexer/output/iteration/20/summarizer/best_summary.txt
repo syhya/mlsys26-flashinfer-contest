@@ -1,0 +1,21 @@
+### Strategic Analysis Report
+
+**1. Executive Summary:**
+This iteration was a modest recovery because the strict revert to the proven 3-tier (S/M/L) architecture reversed the parent's regression and restored kernel latency from 0.057ms to 0.047ms, though it still fell short of the grandparent champion `dc51d5fc` (9.564) — a partial, not full, restoration.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   **Sibling Rank:** Only child of parent `baa28cba` (no siblings retrieved). Outperforms its direct parent (7.86) but underperforms the lineage's known champion `dc51d5fc` (9.564).
+*   **Score Delta:** From parent (7.86) to child (7.97) — a modest +0.11 absolute / +1.4% relative improvement.
+*   **Key Change:** Reverted the parent's smem-staging fused TIER-M attempt and restored the canonical 3-tier pipeline: `emit_short_topk_kernel` (TIER-S, L≤2048) + `compute_scores_kernel` + `block_topk_kernel<256,24>` (TIER-M, 2048<L≤6144) + `cub::DeviceSegmentedRadixSort` with empty-segment offsets (TIER-L, L>6144) + `extract_topk_kernel`.
+*   **Core Metrics:** Kernel 0.047ms (vs. parent 0.057ms, vs. grandparent champion 0.036ms); Speedup 79.74x; Correctness 1.0; max_abs/rel_error = 0; 12/12 workloads passed; baseline 2.86ms.
+
+**3. Strategic Analysis (The "So What?"):**
+*   **Root Cause:** The outcome was driven primarily by plan quality (correctly identifying that a revert was the highest-expected-value move after three consecutive regressions). Execution was faithful but not byte-equivalent to the stated target `dc51d5fc` — hence the 0.047ms latency vs. the grandparent's 0.036ms. Reference baseline noise (2.86ms vs. dc51d5fc's era) may also explain part of the gap.
+*   **Key Insight:** **Reverts work, but imperfect reverts leave performance on the table.** The plan explicitly mandated a "byte-equivalent" restoration of `dc51d5fc` (score 9.564, 0.036ms), but the delivered kernel runs ~30% slower than that baseline. Some subtle structural detail — possibly the `cvt_fp8x4_to_float4` helper variant (this child uses a union-cast while `dc51d5fc` may have had a different codegen path), the `compute_scores_kernel`'s shared-memory layout (this child uses `q_smem_u32[64*32]` rather than the transposed `q_smem_f[128][65]` described in the plan's Phase 2.C), or launch-parameter alignment — is not actually matching the champion.
+*   **Identified Risk:** **Score ceiling via algorithmic stagnation.** This iteration anchored the floor but did not raise the ceiling. The lineage now has 4 consecutive iterations below 9.564, and reverting again will not unlock new territory. Also risky: the plan's "strict revert" claim was not fully delivered, meaning future planners may mis-estimate the "safe baseline" as 7.97 rather than 9.56.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   **Recommend Stripping:** Perform a *true* byte-equivalent revert by directly resurrecting `dc51d5fc`'s source as the next parent (skip `ab09f5be`). Diff the two `compute_scores_kernel` implementations token-by-token — in particular verify the Q-shared-memory layout (`q_smem_u32` vs transposed-float `q_smem_f[128][65]`) and the inner `h=0..63` loop structure. The 10µs gap between 0.047ms and 0.036ms is almost certainly one of these micro-structural differences.
+*   **Recommend Exploration:** Once re-anchored at 9.564, attack the true bottleneck identified earlier — the single-lane accumulation `if (lane_id == 0) total_score += val * weights_smem[h]` inside the `h` loop serializes 64 warp reductions per token. Replace with: (a) per-lane head partitioning (each lane owns a subset of heads, then final warp-reduce across lanes), or (b) CUTLASS/CuTe FP8 WGMMA for the Q·K^T matmul.
+*   **Recommend Fusion:** After the matmul bottleneck is removed, revisit TIER-M fusion — but this time use a **register-resident** scoring→sort path (avoid the smem-staging indirection that caused `baa28cba`'s regression). The previously-failed fusion pattern should stay on the blacklist.
+*   **Warn:** Do NOT attempt another speculative fusion from this node. The lineage has 4 consecutive sub-champion iterations; the next evolutionary step must be either (a) a clean re-anchor to 9.564 or (b) a structurally new approach (tensor-core MMA), not another incremental tweak on the current 3-tier scaffold.

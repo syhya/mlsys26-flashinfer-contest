@@ -1,0 +1,119 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Further improve the 42.36x speedup of the parent `topk_indexer_forward` kernel while preserving 1.0 correctness.
+
+**Selected Outline:** Plan 2 — Vectorized `uint4` K-Cache Load with Quarter-Warp Cooperative Tiling (Vertical Optimization)
+
+**Rationale for Selection:**
+1. **Mathematically safe**: The scoring math is unchanged; only the memory-access pattern for the K-cache is altered. The CUB segmented radix sort remains the deterministic "safety valve" that guarantees exact top-2048 set selection.
+2. **Directly addresses the profiler-identified bottleneck**: The parent summary explicitly flagged "K-cache is loaded with 32-bit uint32_t loads; upgrade to 128-bit uint4".
+3. **Low risk, deterministic**: No randomness, no speculative filtering; every token's score is still written and sorted.
+
+---
+
+### Phase 1: Mathematical Definition
+
+- Per batch b, page p, token t (t < seq_len[b] and t < 64*(p+1)):
+  - `K[t, d] = fp8_to_float(k_bytes[t,d]) * scale[t]` for d in [0,128)
+  - `dot[h, t] = sum_d Q[b,h,d] * K[t,d]`
+  - `score[b, p*64+t] = sum_h ReLU(dot[h,t]) * weights[b,h]`
+- Final output: top-2048 indices per batch from `global_page_idx[p]*64 + t`; padded with -1 beyond `min(2048, seq_len[b])`.
+
+Constraints preserved:
+- Masked positions (t >= seq_len[b]) → score = -1e20, idx = -1.
+- NaN → -1e20.
+- `k_index_cache_fp8` layout: 128 FP8 bytes + 4 scale bytes per token in page.
+
+---
+
+### Phase 2: The Optimization Kernel Design (compute_scores_kernel_v2)
+
+**Grid/Block:** `grid(max_num_pages, batch_size)`, `block(256)` = 8 warps.
+
+**Step 2.1 — Shared Memory Layout (keep parent's proven design):**
+```cpp
+__shared__ float q_smem_f[128][65];   // transposed Q, +1 padding for bank-conflict-free
+__shared__ float k_smem[8][128];      // one row per warp (8 warps process 8 tokens simultaneously)
+__shared__ float scale_smem[8];       // per-warp scale for its current token
+__shared__ float weights_smem[64];
+```
+
+**Step 2.2 — Q Preload (unchanged from parent):**
+256 threads cooperatively dequantize 2048 FP8 values into `q_smem_f[d][h]` transposed layout.
+
+**Step 2.3 — Cooperative K Load with `uint4` (KEY CHANGE):**
+Within each iteration, all 8 warps each handle 1 token (so 8 tokens per iteration → 8 iterations for 64 tokens, same as parent).
+
+For loading the 128 FP8 bytes of token `t = iter*8 + warp_id`:
+- Use **only 8 lanes** (lane_id < 8) per warp, each loading a `uint4` (16 bytes = 16 FP8 values):
+  ```cpp
+  if (lane_id < 8) {
+      uint4 kv = *reinterpret_cast<const uint4*>(k_page_base + t*128 + lane_id*16);
+      // dequantize uint4 → 16 floats using 4 cvt_fp8x4_to_float4 calls
+      float4 f0 = cvt_fp8x4_to_float4(kv.x);
+      float4 f1 = cvt_fp8x4_to_float4(kv.y);
+      float4 f2 = cvt_fp8x4_to_float4(kv.z);
+      float4 f3 = cvt_fp8x4_to_float4(kv.w);
+      float* dst = &k_smem[warp_id][lane_id*16];
+      ((float4*)dst)[0] = f0; ((float4*)dst)[1] = f1;
+      ((float4*)dst)[2] = f2; ((float4*)dst)[3] = f3;
+  }
+  if (lane_id == 0) scale_smem[warp_id] = *(const float*)(k_page_base + 8192 + t*4);
+  __syncwarp();
+  ```
+This replaces the parent's 32 scalar `uint32_t` loads per warp with **8 vectorized `uint4` loads** — same 128 bytes but issued in 1/4 the instructions, freeing issue slots and improving coalescing.
+
+**Step 2.4 — Dot product (unchanged from parent, already optimal head-parallel mapping):**
+Each lane (lane_id ∈ [0,32)) owns 2 heads (h = lane_id and lane_id+32). Multiply `scale` once:
+```cpp
+float scale = scale_smem[warp_id];
+float val0 = 0.f, val1 = 0.f;
+#pragma unroll
+for (int i = 0; i < 128; i++) {
+    float k_v = k_smem[warp_id][i];
+    val0 += q_smem_f[i][lane_id]      * k_v;
+    val1 += q_smem_f[i][lane_id + 32] * k_v;
+}
+val0 *= scale; val1 *= scale;
+```
+Then ReLU, multiply by `weights_smem[lane_id]`/`weights_smem[lane_id+32]`, warp reduce, write.
+
+**Step 2.5 — Validity Masking:**
+- `if (p*64 + t >= seq_len) skip / write -1e20 & -1`.
+- NaN guard as in parent.
+
+---
+
+### Phase 3: The "Safety Valve" — External Segmented Sort (UNCHANGED)
+
+- Use `cub::DeviceSegmentedRadixSort::SortPairsDescending` with bounded `begin_offsets[b] = b*N`, `end_offsets[b] = b*N + seq_lens[b]` — exact top-K by construction.
+- Extract kernel fills tail with -1 when `actual_topk = min(2048, seq_len[b]) < 2048`.
+
+This keeps correctness mathematically guaranteed regardless of scoring optimization.
+
+---
+
+### Phase 4: Implementation Details
+
+**Files:** single `kernel.cu`.
+**Headers:** `<torch/extension.h>`, `<cuda_fp8.h>`, `<cub/cub.cuh>`, `<tuple>`.
+**Helpers:** `cvt_fp8x4_to_float4(uint32_t)` inline device function (reuse parent's).
+**Entry point:** exact signature required by spec.
+**PYBIND11_MODULE:** exports both `topk_indexer_forward` and alias `dsa_forward` (as parent does).
+
+**Critical correctness guards:**
+1. `__syncthreads()` after Q preload and weights load.
+2. `__syncwarp()` between K load and dot-product within each warp.
+3. Skip early return when `p*64 >= seq_len`, but still write -1e20/-1 into the score/index buffer for those positions (parent wrote them because the buffer is pre-allocated; confirm: parent returns early and leaves buffer uninitialized → this works because CUB sort's begin/end offsets exclude them. Keep this behavior identical.)
+4. Alignment: `k_page_base + t*128 + lane_id*16` is 16-byte aligned since `k_index_cache_fp8` is a torch tensor (256-byte aligned) and strides are multiples of 16. Safe for `uint4`.
+5. Since only 8 lanes of each warp load, remaining 24 lanes must not execute the load (guard with `if (lane_id < 8)`).
+
+**Expected Performance Improvement:**
+- K-load instruction count: 32 → 8 per warp per token (4×). Combined with fewer address calculations, expect ~10–20% reduction in scoring-kernel latency.
+- Parent kernel: 0.097 ms. Target: ~0.085 ms → speedup ~48x (score ~4.8, up from 4.24).
+
+**Fallback:** If the uint4 path causes alignment or race issues, revert the K-load block to the parent's scalar-load version (one-line change) while keeping everything else. CUB sort guarantees correctness in either case.
+
+**Randomness:** None. Fully deterministic. No multi-start needed.
+
+**Library check:** Only `<cuda_fp8.h>` and `<cub/cub.cuh>` — both standard CUDA 12+ libraries already used by the parent. ✔

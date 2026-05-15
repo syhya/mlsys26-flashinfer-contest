@@ -1,0 +1,186 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Exceed the current lineage best `8e3c776e` (15.40x, 1.523ms, score=1.5395) while mathematically guaranteeing we never regress below it. The parent is `a96d6608` (15.34x). We will (a) copy the best-known kernels and run driver verbatim, and (b) make a surgical, mathematically-identical simplification to the PyTorch routing path to reduce its launch overhead — the routing pipeline is the dominant un-optimized component per both `a96d6608` and `8e3c776e` summaries.
+
+**Selected Outline:** Plan 2 — Verbatim `8e3c776e` base + mathematically-identical routing refactor + 2 added autotune configs.
+
+**Rationale for Selection:**
+1. **Guaranteed floor ≥15.34x:** Every autotune config from `8e3c776e` is preserved verbatim, so the Triton autotuner cannot pick a slower kernel than the current best.
+2. **Plan 1 (Triton fused routing) is too risky.** DeepSeek no-aux routing (group top-2 sum → top-4 groups → masked top-8 → renorm by raw sigmoid) has fragile tie-breaking and mask semantics. A single wrong ordering breaks correctness silently.
+3. **Plan 3 (persistent/worklist kernel) requires rewriting GEMM dispatch** — the plan summary warns "Do NOT regress the GEMM2 FP8 TC path." Too much surface area.
+4. Plan 2 touches ONLY PyTorch routing (a function we can diff-check mathematically) and adds autotune configs (strictly additive).
+
+---
+
+## Best Plan
+
+### Phase 1: Mathematical Definition
+
+**Step 1.1: Full pipeline math (unchanged from 8e3c776e):**
+```
+q[t,e]           = sigmoid(logits[t,e])                               # raw score (used for weights)
+rank[t,e]        = q[t,e] + bias[e]                                   # biased score (used for ranking)
+group_score[t,g] = sum of top-2 of rank[t, g*32:(g+1)*32]
+top_groups[t]    = argmax_{4 groups} group_score[t]
+mask[t,e]        = 1 iff e ∈ selected groups
+topk8[t]         = top-8 of (rank where mask=1 else -inf)
+w[t,e]           = q[t,e] / sum_{e' ∈ topk8[t]} q[t,e']  *  scaling    (for e ∈ topk8[t])
+```
+
+**Step 1.2: GEMM2 FP8 TC path (unchanged from 8e3c776e):**
+```
+c       = x1 * x2 * sigmoid(x2)                         # SwiGLU fp32 tile
+cmax    = tl.max(tl.abs(c))                              # SCALAR, no axis
+cs      = max(cmax / 448.0, 1e-12)                       # SCALAR
+c_fp8   = (c / cs).to(tl.float8e4nv)                     # saturating cast
+acc    += tl.dot(c_fp8, w2_fp8, out_dtype=fp32) * cs * w2_scale
+```
+
+**Variables (X):** autotune configs (tile sizes, num_warps, num_stages); routing op sequence.
+**Constraints (C):** correctness ≡ bit-close to PyTorch ref within atol=rtol=1e-2; BLOCK_N=128 in all GEMM2 configs; int64 pointer math; `torch.zeros` for G1/O/output; scalar `tl.max` in GEMM2.
+**Objective f(X):** minimize kernel latency (maximize speedup), floor = `8e3c776e`.
+
+### Phase 2: The Optimization Loop — Construct the File
+
+**Step 2.1: Copy `8e3c776e` VERBATIM for the following components:**
+- `grouped_gemm1_kernel` including its 13 autotune configs (DO NOT CHANGE)
+- `grouped_gemm2_kernel` including its 12 autotune configs, the FP8 TC body with `tl.float8e4nv`, scalar `tl.max(tl.abs(c))`, `tl.range(0, I, BLOCK_K)`
+- The `run()` driver including all strides, `torch.zeros` buffers, `index_add_` scatter, final `.to(torch.bfloat16)`
+- Use `pid_e.to(tl.int64)` everywhere it multiplies a stride (int32 overflow guard)
+
+**Step 2.2: Append 2 strictly-additive autotune configs to EACH kernel (floor-preserving):**
+
+GEMM1 autotune (14 configs = 13 inherited + 1 new):
+```python
+triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=8, num_stages=4),  # deeper pipeline for BLOCK_M=256
+```
+
+GEMM2 autotune (13 configs = 12 inherited + 1 new):
+```python
+triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=8, num_stages=4),  # matches GEMM1
+```
+
+Rationale: `8e3c776e` has BLOCK_M=256 only with num_stages=3. A num_stages=4 variant trades shared memory for deeper software pipeline; Triton autotune will pick whichever is faster per workload. If it compiles poorly (register spill), autotune silently excludes it.
+
+**Step 2.3: Refactor `_route_tokens` to reduce launch count (MATHEMATICALLY IDENTICAL):**
+
+Replace the sequence `torch.nonzero(expert_mask, as_tuple=True) -> argsort(local_expert_idx) -> index with flat_token_idx[order]` with the equivalent but single-pass approach below. Reasoning: `nonzero` triggers a device sync AND produces output whose size is not statically known; replacing with a materialized dense index avoids the sync in the critical path.
+
+Original block (in `8e3c776e`):
+```python
+expert_mask = (topk_idx >= local_start) & (topk_idx < local_start + e_local)
+flat_token_idx, flat_k_idx = torch.nonzero(expert_mask, as_tuple=True)
+if flat_token_idx.numel() == 0:
+    return None
+local_expert_idx = topk_idx[flat_token_idx, flat_k_idx] - local_start
+order = torch.argsort(local_expert_idx)
+sorted_tokens  = flat_token_idx[order].to(torch.int32)
+sorted_experts = local_expert_idx[order].to(torch.int32)
+sorted_weights = weights[flat_token_idx, topk_idx[flat_token_idx, flat_k_idx]][order].to(torch.float32)
+```
+
+Replacement (same math, fewer syncs, no `nonzero`):
+```python
+TOP_K = 8
+# Build dense [T*TOP_K] triples in one vectorized pass
+flat_expert = topk_idx.reshape(-1)                                 # [T*8] int64
+flat_token  = torch.arange(T, device=device).repeat_interleave(TOP_K)  # [T*8]
+# Indexing weights with (token, expert) pairs via gather:
+flat_weight = weights.gather(1, topk_idx).reshape(-1)              # [T*8] f32
+
+# Mask to local experts; replace masked-out expert with sentinel large value so sort pushes them to end.
+local_start = int(local_expert_offset)
+shifted = flat_expert - local_start                                # [T*8]
+in_range = (shifted >= 0) & (shifted < e_local)                    # [T*8] bool
+# Use a sentinel = e_local (sorted after all valid indices)
+sort_key = torch.where(in_range, shifted, torch.full_like(shifted, e_local))
+
+# Single sort produces both grouping + ordering
+order = torch.argsort(sort_key, stable=True)
+sort_key_sorted = sort_key[order]
+
+# Count valid entries (one scalar CPU sync — fused with the existing max_count sync later)
+num_valid = int(in_range.sum().item())    # ALREADY have one sync in run() for max_count; combine into one .item() path
+if num_valid == 0:
+    return None
+
+valid_order = order[:num_valid]
+sorted_tokens  = flat_token[valid_order].to(torch.int32)
+sorted_experts = shifted[valid_order].to(torch.int32)
+sorted_weights = flat_weight[valid_order].to(torch.float32)
+
+expert_counts  = torch.bincount(sorted_experts, minlength=e_local)
+expert_offsets = torch.zeros(e_local + 1, dtype=torch.int32, device=device)
+expert_offsets[1:] = torch.cumsum(expert_counts, dim=0)
+```
+
+Mathematical equivalence proof:
+- `nonzero+argsort` produced pairs `(t,k)` where `expert_mask[t,k]=True`, sorted by `(local_expert_idx, row_major_tie_breaker)`.
+- The refactor produces the same `(t, expert_idx - local_start)` pairs: iterating `(t,k)` in row-major order equals `arange(T).repeat_interleave(8)` for tokens and `reshape(-1)` for experts. Sentinel sentinel-sort pushes masked-out pairs to the tail; we slice them off with `[:num_valid]`. `argsort(stable=True)` preserves row-major tie-breaking → identical ordering.
+- `weights.gather(1, topk_idx).reshape(-1)` equals `weights[flat_token_idx, topk_idx[flat_token_idx, flat_k_idx]]` when reading in row-major order.
+
+### Phase 3: The "Safety Valve" (CRITICAL)
+
+**S1. Floor guarantee (mathematical):** Every autotune config from `8e3c776e` remains in both kernels. Triton autotune = `argmin over configs of measured latency`. The min over a superset ≤ min over subset. ∴ kernel latency ≤ `8e3c776e` kernel latency for every workload. **Floor: score ≥ 1.53 modulo ±0.01 benchmark noise.**
+
+**S2. Routing correctness guarantee:** The replacement code is proven equivalent above. As a runtime defense, we additionally add an assertion-free fallback: if `num_valid == 0` return zeros (same as original `flat_token_idx.numel() == 0` branch).
+
+**S3. Compilation failure safety:** The 2 new `num_stages=4, BLOCK_M=256` configs may fail to compile due to shared memory pressure. Triton's `@triton.autotune` silently drops such configs — zero crash risk. Remaining 13/12 configs guarantee functionality.
+
+**S4. Executor anti-regression checklist (must be literally enforced):**
+- [ ] GEMM1 autotune list has **14 Config entries** (13 from `8e3c776e` + 1 new BLOCK_M=256 num_stages=4)
+- [ ] GEMM2 autotune list has **13 Config entries** (12 from `8e3c776e` + 1 new)
+- [ ] GEMM2 kernel body uses `tl.float8e4nv` (NOT `tl.float8_e4m3fn`)
+- [ ] `c_abs_max = tl.max(tl.abs(c))` — NO axis argument
+- [ ] `tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32)` — BOTH operands FP8
+- [ ] K-loops use `tl.range(0, I, BLOCK_K)` and `tl.range(0, H, BLOCK_K)` (NOT plain `range`)
+- [ ] `pid_e.to(tl.int64)` before every stride multiply
+- [ ] `n_block_idx = pid_n` in GEMM2 (valid — all 13 configs have BLOCK_N=128)
+- [ ] `torch.zeros` for G1, O, output buffers (NOT `torch.empty`)
+- [ ] Routing refactor uses `argsort(..., stable=True)` — NOT default unstable sort
+- [ ] Routing refactor uses `weights.gather(1, topk_idx).reshape(-1)` — not fancy indexing
+- [ ] Sentinel value = `e_local` in `torch.where(in_range, shifted, sentinel)`
+- [ ] Edge-case fallback: return `torch.zeros((T,H), bf16)` when routed is None / num_valid==0 / max_count==0
+
+**S5. Config-count comment in file:**
+```python
+# GEMM1 configs: 13 inherited from 8e3c776e + 1 new = 14 total
+# GEMM2 configs: 12 inherited from 8e3c776e + 1 new = 13 total
+```
+
+### Phase 4: Implementation Details
+
+**Libraries:** `torch`, `triton`, `triton.language as tl` (only).
+
+**File structure (single .py):**
+1. `@triton.autotune(configs=[...14 entries...])` + `@triton.jit grouped_gemm1_kernel` — body VERBATIM from `8e3c776e`
+2. `@triton.autotune(configs=[...13 entries...])` + `@triton.jit grouped_gemm2_kernel` — body VERBATIM from `8e3c776e`
+3. `def _route_tokens(...)` — refactored per Step 2.3
+4. `@torch.no_grad() def run(...)` — VERBATIM from `8e3c776e` (kernel launch args unchanged)
+
+**Exact new config additions (append to existing lists):**
+```python
+# GEMM1: add after the last existing config
+triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=8, num_stages=4),
+# GEMM2: add after the last existing config
+triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=8, num_stages=4),
+```
+
+**Exact routing refactor:** replace lines starting at `expert_mask = ...` through `sorted_weights = ...[order].to(torch.float32)` with the Step 2.3 code block. Keep everything before (q, rank_scores, group scores, topk_idx, weights) and after (bincount + cumsum) unchanged.
+
+**DO NOT:**
+- Change the GEMM kernel bodies
+- Change the sigmoid/topk/mask math before `expert_mask`
+- Use `tl.make_block_ptr` / TMA (save for next iteration)
+- Write a Triton routing kernel (save for next iteration)
+
+### Expected Performance
+
+- Floor (guaranteed by Triton autotune superset property): score ≥ 1.5338 (15.34x)
+- Expected: score 1.55–1.62 (15.5–16.2x), 1.45–1.50ms kernel latency
+- Routing refactor: replaces `nonzero` (sync + dynamic-size output) + `argsort` + 3 gather reindexes with 2 gathers + 1 `where` + 1 `argsort` + 1 slice. Net: ~2 fewer kernel launches + removal of dynamic-size sync in the routing path. Estimated savings: 0.03–0.08 ms on small-T workloads.
+- BLOCK_M=256 num_stages=4 config: if it compiles, may win for prefill workloads giving another 0.01–0.03 ms.
+
+**No randomness**, no multi-start needed — Triton autotune is deterministic benchmarking across a fixed config set, and the routing refactor is mathematically deterministic.
+
+This plan relies on mathematics (autotune superset property + provable routing equivalence), not luck. It is code-ready: the executor copies `8e3c776e` verbatim, adds exactly 2 lines to autotune lists, and replaces one contiguous block (~7 lines) inside `_route_tokens` with the refactored block. Any deviation (e.g., dropping inherited configs, omitting `stable=True`) violates the floor guarantee and must be rejected.

@@ -1,0 +1,29 @@
+### Outline 3: Sparse-index dedup/compression before fused attention
+
+**Mathematical Formulation**
+- **Variables (X):**
+  1. For each token, a compressed ordered list of unique valid rows `U_t` derived from `sparse_indices[t]`.
+  2. Multiplicity map `c_t(r)` counting occurrences of row `r` in the original sparse list.
+  3. Per-(token, head) online softmax state `(m, l, O)`.
+- **Constraints (C):**
+  1. Compression must preserve exact multiset semantics: repeated index `r` contributes `c_t(r)` separate softmax terms.
+  2. Padding `-1` ignored.
+  3. Logits and output must be equivalent to iterating original 2048 entries in order or through multiplicity-aware grouped update.
+  4. FP32 accumulation and base-2 `lse` preserved.
+- **Objective f(X):** Reduce redundant cache loads and dot products when sparse indices contain duplicates by preprocessing indices into unique groups.
+
+**Solver Strategy**
+- Deterministic preprocessing using sort or hash-based grouping per token.
+- For each unique row with count `c`, update softmax using repeated-contribution closed form:
+  `beta_total = c * exp(x - m')`, `l' = l*alpha + beta_total`, `O' = O*alpha + beta_total*V`.
+- Use exact integer multiplicities rather than approximation.
+
+**Validity Mechanism**
+- Grouped update is mathematically identical because duplicates share the same key/value and logit for fixed `(token, head)`.
+- Stable fallback: if preprocessing overhead is too high or uniqueness ratio is poor, revert to baseline fused kernel.
+- Final repair handles all-invalid case deterministically.
+
+**Why this solution?**
+- **Expected improvement:** Could drastically reduce work on workloads with many repeated sparse indices.
+- **Advantages:** Novel algorithmic optimization, exact under duplicate grouping.
+- **Disadvantages:** Data-dependent; if duplicates are rare, preprocessing overhead likely hurts. Higher risk because benchmark duplicate statistics are unknown.

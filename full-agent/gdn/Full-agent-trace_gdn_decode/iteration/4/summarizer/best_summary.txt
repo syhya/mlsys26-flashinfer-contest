@@ -1,0 +1,18 @@
+**1. Executive Summary:**
+This iteration was a regression because shifting to a 1D thread mapping scheme (1 thread per K element) destroyed memory access vectorization and caused massive intra-warp branch divergence, resulting in drastically lower performance compared to the multi-block V-dimension baseline.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   **Sibling Rank:** N/A (1 out of 1 child evaluated so far, assuming baseline comparison). Top sibling score: 88.29% (from historical context).
+*   **Score Delta:** From parent (97.00%) to child (54.76%).
+*   **Key Change:** Completely re-architected thread mapping to a 1D block mapping where each block handles a single V-row and each thread handles a single K-element (`dim3 block(128)`), eliminating `float4` vectorized memory accesses.
+*   **Core Metrics:** Execution time degraded from 0.0240ms to 0.0345ms. Total executed instructions exploded from 164,352 to 623,616. Achieved occupancy increased artificially to ~40.4%, but average active threads per warp dropped to 22.18. Average divergent branches spiked from 0.43 to 10.38 per kernel execution.
+
+**3. Strategic Analysis (The "So What?"):**
+*   **Root Cause:** The regression is a direct result of a fundamentally flawed architectural plan. By mapping 1 thread to 1 K-element, the plan sacrificed 128-byte vectorized memory loads (`float4`) for scalar `float` loads. Furthermore, the complex inter-warp reduction scheme introduced massive control flow divergence and synchronization overhead, destroying warp efficiency.
+*   **Key Insight:** Higher SM occupancy is only beneficial if the warps are doing useful, efficient work. This iteration proves that sacrificing memory vectorization and warp-level instruction uniformity (introducing heavy divergence) to artificially inflate occupancy results in a net performance loss. The 4x increase in instruction count negates any latency-hiding benefits.
+*   **Identified Risk:** The inter-warp reduction strategy utilizing shared memory (`sh_qk`, `sh_qh`, `sh_kh`) with complex lane ID conditional logic (`if (lane_id == 0)`, `if (warp_id == 0)`) is highly inefficient for small dimension reductions ($K=128$) and creates severe warp divergence traps.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   **Recommend Stripping:** Completely discard this 1D block mapping (1 thread per K element) architecture. The inter-warp reduction logic and scalar memory accesses are inherently detrimental to performance for this specific tensor shape.
+*   **Recommend Fusion:** Return immediately to the parent's architectural foundation: 32 threads per warp processing 128 K-elements using `float4` vectorized loads. This is the proven optimal method for memory bandwidth utilization.
+*   **Recommend Exploration:** To address the remaining L1TEX latency from the parent (97.0% score), explore software pipelining or asynchronous memory copies (`cuda::memcpy_async`) to prefetch the `state` tensor into shared memory *while* maintaining the `float4` vectorization strategy. Do not sacrifice vectorization for occupancy.

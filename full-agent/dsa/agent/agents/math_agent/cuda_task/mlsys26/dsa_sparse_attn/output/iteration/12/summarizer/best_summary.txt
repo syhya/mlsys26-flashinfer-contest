@@ -1,0 +1,20 @@
+## 1. Executive Summary
+This iteration was a severe regression because the attempted low-workload redesign was abandoned in execution and replaced with a single all-size fused kernel that removed the parent’s high-performing dynamic dispatch, performing 1 out of 1 among siblings.
+
+## 2. Data-Driven Findings (Facts ONLY)
+- **Sibling Rank:** 1 out of 1 children. Top sibling score: 0.8458.
+- **Score Delta:** From parent (10.3997) to child (0.8458).
+- **Key Change:** Removed the parent’s small-workload split-K compute+reduce path and temporary FP32 workspaces, dispatching all workloads to the single `dsa_forward_kernel`.
+- **Core Metrics:** Correctness 1.0 -> 1.0; speedup 103.9971x -> 8.4580x; kernel latency 0.0283 ms -> 0.5400 ms; baseline latency 2.9036 ms -> 3.1851 ms; max absolute error 0.015625 -> 0.015625; max relative error 1.7666 -> 0.2315; total workloads 23 in both evaluations.
+
+## 3. Strategic Analysis (The "So What?")
+- **Root Cause:** Primarily execution quality, with a secondary planning mismatch. The plan targeted replacing the low-workload path with a better fused alternative, but the delivered code did not implement that replacement; instead it deleted the parent’s specialized small-workload path and fell back to one generic kernel for every case. That execution choice directly discarded the parent’s strongest architectural advantage.
+- **Key Insight:** The parent’s dynamic dispatch was not incidental overhead; it was a major contributor to fitness. Even though the split-K path looked architecturally inelegant, the measured population data shows it was economically superior to a naive “simplification.” The salvageable concept here is not the child code itself, but the negative lesson: in this family, removing workload-sensitive specialization without a strictly better small-token kernel is catastrophically expensive.
+- **Identified Risk:** The biggest trap is optimization by aesthetic simplification—collapsing multi-path logic into one kernel because it appears cleaner or safer. In this search space, that creates a local optimum of maintainability but a large global performance loss. A second risk is overreacting to a possibly bad prototype result and shipping a score-protection fallback that actually destroys the parent’s benchmark-winning dispatch behavior.
+
+## 4. Actionable Guidance (The "What's Next?")
+- **Recommend Fusion:** Restore the parent’s exact dynamic dispatch as the baseline and fuse only narrowly targeted improvements into each path independently. Keep the large-workload fused kernel unchanged, and experiment only on the small-workload path behind a guarded threshold comparison.
+- **Recommend Exploration:** Explore a true one-block-per-(token,head) low-token kernel only as an additive third path, benchmarked against the parent split-K path at `num_tokens <= {8,16,32,64}`. The next child should select the fastest of these paths by deterministic threshold, not by replacing the old path wholesale.
+- **Recommend Stripping:** Strip any code-change pattern whose only effect is architectural simplification without new parallelism or memory-traffic reduction. In this lineage, deleting `O_tmp/m_tmp/l_tmp` is beneficial only if the replacement also restores enough grid-level parallelism for tiny workloads.
+- **Recommend Fusion:** Combine the parent’s proven split-K small-workload path with a lighter-weight reduction strategy from future experiments, such as reducing workspace dimensionality or storing only partial normalized accumulators, rather than eliminating split-K entirely.
+- **Warn:** Do not interpret correctness-preserving fallback-to-single-kernel as score protection. The population data from this iteration shows that such fallback is itself a high-risk regression mechanism and should be treated as an experimental branch, not a safe default.

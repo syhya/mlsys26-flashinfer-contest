@@ -1,0 +1,20 @@
+1. Executive Summary:
+This iteration was a regression because the TMA/block-pointer GEMM2 experiment and fallback wrapper added complexity without delivering a faster active execution path, performing 2nd out of 2 siblings.
+
+2. Data-Driven Findings (Facts ONLY):
+- **Sibling Rank:** 2 out of 2 children of parent `a96d6608`. Top sibling score: `1.5517` (`302d2eb3`); this child score: `1.4867`.
+- **Score Delta:** From parent `a96d6608` (`1.5338`) to child (`1.4867`). Absolute change: `-0.0471`.
+- **Key Change:** Added a second GEMM2 kernel `grouped_gemm2_kernel_tma` using `tl.make_block_ptr`/`tl.advance` for W2 loads, plus `try/except` dispatch that attempts this kernel before falling back to the original GEMM2 kernel.
+- **Core Metrics:** Correctness `1.0`; speedup `14.8671x`; exec time `1.6001 ms`; baseline time `17.1550 ms`; eval time `130.43 s`; max absolute error `33024.0`; max relative error `257599995904.0`; total workloads `19`.
+
+3. Strategic Analysis (The "So What?"):
+- **Root Cause:** Primarily plan quality, secondarily execution fidelity. The plan chose a low-certainty structural modification on GEMM2 load mechanics while explicitly depending on a runtime fallback to preserve performance. That safety valve preserves validity, but it does not create an evolutionary gain. The executor implemented the plan faithfully, but the chosen direction did not improve the winning path.
+- **Key Insight:** A fallback-backed kernel variant is not a free optimization. If the new path does not outperform the incumbent, the extra dispatch and code-path complexity merely protects correctness while consuming iteration budget. The valuable concept to salvage is narrower: block-pointer/TMA loading may still matter, but it should be tested in the dominant kernel or in a way that isolates whether it is actually selected and beneficial.
+- **Identified Risk:** The lineage is at risk of local wandering through "safe structural experiments" that preserve correctness but fail to beat the incumbent. This is especially dangerous when modifications target a non-dominant bottleneck or when the new path may not be the one actually delivering measured performance.
+
+4. Actionable Guidance (The "What's Next?"):
+- **Recommend Stripping:** Remove the speculative `try/except` dual-path GEMM2 structure for the next child and rebase directly on the strongest proven child `302d2eb3`, which already beats both this solution and the parent.
+- **Recommend Fusion:** Combine `302d2eb3`’s proven routing refactor with the best verified FP8 TC GEMM2 core from `a96d6608`/this branch, keeping only a single active GEMM2 implementation. This merges the best routing-side gain with the established compute-side core.
+- **Recommend Exploration:** If pursuing block-pointer/TMA again, move the experiment to GEMM1 or design a single-path A/B replacement where performance attribution is unambiguous. GEMM1 is more likely to reward memory-traffic improvements than the already highly optimized GEMM2 path.
+- **Warn:** Do not rely on fallback as a performance strategy. It is a correctness shield, not an optimization. Future plans should require a clear hypothesis about why the new path beats the incumbent on measured bottlenecks, not just why it is mathematically equivalent.
+- **Warn:** Avoid rebasing rhetorically on a stronger global-best design unless that design is actually copied into the child. Plan/implementation mismatch wastes iterations and obscures causal learning.

@@ -1,0 +1,14 @@
+PLAN 2: Reducer-Native Workspace Layout (low-risk targeted change)
+Keep parent code byte-identical EXCEPT change O_tmp layout from [T,S,16,512] to [T,16,S,512] (or [T,16,512,S]) so that the reducer reads contiguous 64 partitions per (t,h). Currently the reducer at fixed (t,h,d_idx) strides through s by 16*512 floats = 32KB → terrible cache behavior. New layout makes per-(t,h) all-S contiguous.
+
+Variables: O_tmp layout = [T,16,S,512] flattened.
+Constraints: exact merge math unchanged; producer/consumer indexing matched.
+Objective: reduce L2/HBM stride pattern in reducer hot loop.
+
+Producer write index: t*16*S*512 + h*S*512 + s*512 + j*64 + lane*2
+Consumer read index: same base, contiguous over s for fixed (t,h,d_idx).
+
+Validity: math is identical; only memory address mapping changes. LSE/output formulas unchanged.
+
+Pros: pure layout change, near-zero correctness risk, addresses real bottleneck noted in summary as "high-leverage unresolved concept".
+Cons: small benefit if reducer is not the critical path.

@@ -1,0 +1,13 @@
+Plan 3: Take a96d6608 foundation + add BLOCK_M=256 and num_warps=16 autotune configs + per-row (not per-tile) FP8 quantization for tighter numerical precision.
+
+Variables: per-row c_scale[BLOCK_M] vector, c_fp8.
+Constraints: BLOCK_N=128, per-row c_scale requires dot epilogue to multiply by c_scale[:, None] scalar-broadcast.
+Objective: reduce kernel latency + improve numerical error to give headroom for more aggressive quantization.
+
+Solver: Triton autotuner + per-row reduction tl.max(tl.abs(c), axis=1, keep_dims=True).
+
+Validity:
+- Per-row c_scale is a [BLOCK_M] vector; mathematically: sum_k(c[m,k]*W2[k,n]) = sum_k(c_fp8[m,k]*c_scale[m]*W2[k,n]) = c_scale[m]*dot[m,n]. After dot: acc += dot_result * c_scale[:, None] * w2_scale. Still exact (per-row scalar broadcast valid).
+
+Expected: Tighter precision could unlock BLOCK_M=256 without correctness regression. But adds tl.max axis reduction overhead (~2-3%) in K-loop. Net: probably neutral to slightly positive ~15.5-16x.
+Advantages: Addresses max_abs_error=36864 concern from a96d6608 summary. Disadvantages: Added per-iteration reduction cost; needs careful broadcast semantics.

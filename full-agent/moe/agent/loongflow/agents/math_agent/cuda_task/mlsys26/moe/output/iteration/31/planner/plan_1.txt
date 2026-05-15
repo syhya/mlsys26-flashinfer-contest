@@ -1,0 +1,9 @@
+Plan 1: FP8 TC GEMM2 + tl.range() pipelining (FORCE executor to use FP8 cast)
+- Variables: BLOCK_M ∈ {16,32,64,128}, BLOCK_N=128, BLOCK_K=128, num_stages ∈ {3,4,5}, num_warps ∈ {4,8,16}
+- Constraints: BLOCK_N=128 enforced; c_scale = tl.max(tl.abs(c)) (NO axis); int64 pointer arithmetic; saturating FP8 cast
+- Objective: min kernel latency subject to correctness (rtol=1e-2, atol=1e-2)
+- Solver strategy: Triton autotuner over finite config set (deterministic benchmarking)
+- Validity mechanism: c_scale = tl.maximum(c_abs_max/448.0, 1e-12) prevents div-by-zero; saturating .to(tl.float8_e4m3fn) clamps; scalar post-dot multiply is mathematically exact
+- Advantages: FP8 TC throughput ~2x BF16 TCs; combines 2 proven techniques (ff4217c7 FP8 + b550fc5e pipelining) never before combined
+- Disadvantages: Per-tile tl.max adds small overhead; ~0.4% precision loss bounded
+- Expected: 13-14x speedup (score ~1.30)

@@ -1,0 +1,34 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Maximize the execution speed of the Top-K Indexer Kernel while strictly maintaining numerical correctness and handling variable sequence lengths.
+
+**Selected Outline:** Quarter-Warp Vectorized Memory Access & Unrolled Reduction (Algorithmically Robust)
+
+**Rationale for Selection:**
+1. **Mathematical Certainty**: The memory layout of 128 channels exactly matches 8 threads loading `uint4` (16 bytes each). This guarantees perfect coalescing and alignment without edge cases.
+2. **Instruction Reduction**: By grouping 8 threads per token (a "quarter-warp"), we mathematically reduce warp shuffles per head from 5 to 3, and global memory K-loads per token from 32 scalar loads to 8 vectorized `uint4` loads.
+3. **Decoupled Structure**: It separates the "Hard Part" (computing exact mathematical dot products rapidly via `uint4` vectorization) from the "Easy Part" (guaranteeing exact Top-K selection via standard CUB sorting).
+
+**Best Plan:**
+1.  **Phase 1: Mathematical Definition & Helper Functions**
+    *   **Variables ($X$)**: Threads per block $N_t = 256$, Warps $N_w = 8$, Tokens per warp $T_w = 4$, Threads per token $T_k = 8$.
+    *   **Constraints ($C$)**: Shared memory capacity $\le 48$ KB. `q_smem` requires 64 heads $\times$ 32 `float4` $\times$ 16 bytes = 32 KB. This constraint is strictly satisfied.
+    *   **Function**: `cvt_fp8x4_to_float4` unpacking a 32-bit integer into a `float4` vector for arithmetic.
+    
+2.  **Phase 2: The Optimization Loop (Execution Strategy)**
+    *   **Step 2.1 (Pre-Dequantization)**: Initialize block. Have all 256 threads cooperatively load the $Q$ tensor for the current batch into the 32 KB shared memory array `q_smem_f4`.
+    *   **Step 2.2 (Thread Mapping)**: Calculate `warp_id = threadIdx.x / 32`, `token_in_warp = (threadIdx.x % 32) / 8`, and `thread_in_token = threadIdx.x % 8`.
+    *   **Step 2.3 (Vectorized K-Load)**: For each valid token $t$, the 8 threads use `uint4` to load the 128-channel K tensor in a single perfectly coalesced memory transaction. The scale factor is read by `thread_in_token == 0` and mathematically broadcast to the other 7 threads using `__shfl_sync(0xffffffff, scale, token_in_warp * 8)`.
+    *   **Step 2.4 (Fused Dot-Product)**: Loop over the 64 heads, unrolled by a factor of 4. Each thread computes the dot product of its 16 channels (4 `float4`s). Use `#pragma unroll` and explicitly scope the `float4` variables in block statements to ensure registers are reused and prevent spilling.
+    *   **Step 2.5 (Quarter-Warp Reduction)**: Reduce the partial sums using `__shfl_down_sync` with offsets 4, 2, and 1. The final scalar score for the head is accumulated in `thread_in_token == 0`.
+
+3.  **Phase 3: The "Safety Valve" (CRITICAL)**
+    *   **Logic**: After computing the scores, write them to a global memory buffer of size `batch_size * N` where $N = \text{max\_num\_pages} \times 64$.
+    *   **Strict Masking**: For any token index $t$ that exceeds the valid sequence length `seq_lens[b]`, strictly write $-1\text{e}20\text{f}$ for the score and $-1$ for the index.
+    *   **Final Check (CUB Radix Sort)**: Invoke `cub::DeviceSegmentedRadixSort::SortPairsDescending`. This is the deterministic safety valve that guarantees the exact Top-2048 elements are sorted correctly without relying on heuristics or arbitrary thread block scheduling.
+    *   **Extraction**: A final extraction kernel mathematically guarantees that exactly `min(topk, seq_len)` elements are retrieved, filling the rest with `-1` to ensure strict format compliance.
+
+4.  **Phase 4: Implementation Details**
+    *   **Library Check**: ONLY uses standard CUDA headers (`<cuda_fp8.h>`, `<cub/cub.cuh>`) and PyTorch Extension C++ API. No obscure or experimental packages.
+    *   **Data Types**: `uint4` (128-bit) memory loads. `float4` for mathematical accumulation.
+    *   **Deterministic Parallelization**: Since the algorithm relies entirely on deterministic reductions rather than stochastic search, the "Multi-Start" requirement is fulfilled by the parallel unrolling over heads and warps, guaranteeing the exact same optimal result every run without random variance.

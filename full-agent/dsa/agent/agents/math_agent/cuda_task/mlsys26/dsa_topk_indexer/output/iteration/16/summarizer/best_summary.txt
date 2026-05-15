@@ -1,0 +1,22 @@
+### Strategic Analysis Report
+
+**1. Executive Summary:**
+This iteration was a surprising regression because although the child faithfully reverted to the grandparent's proven 3-tier architecture (which previously scored 9.564), the benchmark's reference-latency instability (ref dropped from 3.245ms → 2.533ms, ~−22%) caused the speedup-denominated score to fall to 8.601 despite the kernel itself being *faster in absolute terms* (0.0326ms vs 0.0366ms parent).
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   **Sibling Rank:** 1 of 1 child of parent `f22893c8` (sole sibling).
+*   **Score Delta:** Parent **9.364** → Child **8.601** (−0.763, ≈ −8.1%). Note: grandparent `dc51d5fc` scored 9.564 with the exact same algorithm.
+*   **Key Change:** Strict revert — removed the speculative TIER-L2 `block_topk_kernel_large<512,24>` kernel and all its plumbing (constants `L_L2_MAX`, static_assert, the kernel launch, the 160KB smem config, the raised CUB threshold). Source is byte-equivalent to grandparent `dc51d5fc`.
+*   **Core Metrics:** Kernel latency **0.0366 → 0.0326 ms (−11%, actual improvement!)**; reference baseline **3.245 → 2.533 ms (−22%)**; speedup 93.64× → 86.01×; correctness=1.0; 12/12 workloads; max abs/rel error = 0; eval time 319s → 163s (faster eval run).
+
+**3. Strategic Analysis (The "So What?"):**
+*   **Root Cause:** **Neither plan nor execution was flawed.** The plan was a mathematically-guaranteed restoration, and the Executor produced code functionally identical to grandparent `dc51d5fc` (which scored 9.564). The kernel actually ran **faster** than the parent in absolute wall-clock time (0.0326ms vs 0.0366ms). The score dropped purely because the **PyTorch reference baseline ran ~22% faster this eval** (2.533ms vs 3.245ms), and score = speedup = ref/kernel. This is **measurement/environment noise**, not an algorithmic regression.
+*   **Key Insight:** **The score metric is non-stationary due to volatile reference baseline measurements.** The grandparent's identical code scored 9.564 (ref=3.256ms); this child scores 8.601 (ref=2.533ms). A ~0.7-point band of noise exists purely from reference-latency variance. Optimization decisions made on single-run score deltas below this threshold (~±1.0 point) are statistically meaningless. The parent's "regression" (9.564→9.364) likely also fell within this noise band.
+*   **Identified Risk:** **Evolution is being misled by score noise.** If the framework penalizes/rewards solutions based on deltas smaller than the reference-latency variance (~7-10%), it will make pathological decisions — e.g., this iteration correctly restored the best-known algorithm but will be logged as a failure. The absolute kernel latency (0.033 ms) is at a hard floor dominated by launch overhead (~6-7 kernel launches per call).
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   **Recommend Exploration (highest leverage — attack the launch-overhead floor via Fusion):** The kernel is now at 0.033ms with ~7 launches. Fuse `compute_scores_kernel` + `block_topk_kernel` into a single persistent per-batch kernel that produces scores directly into registers/shared memory and sorts in-place without `scores_buf`/`indices_buf` HBM round-trip. This is the only path to break through the launch-overhead floor.
+*   **Recommend Exploration (radix-select for long tail):** For L>6144, replace `cub::DeviceSegmentedRadixSort` + `extract_topk` with a single-block radix-select (find K-th score threshold, filter ≥threshold). Eliminates the device-wide sort launch and its temp-storage allocation — both currently on the critical path for long-L workloads.
+*   **Warn:** Treat the current 3-tier code (this solution, functionally = `dc51d5fc`) as the **empirical baseline floor at ~8.6–9.6 depending on eval noise**. Do NOT interpret a future −0.5 score delta as a regression; re-evaluate 2-3× before acting. Consider promoting this solution despite the nominal regression label — it is the known-good algorithm.
+*   **Recommend Fusion:** Preserve this solution as a "safe base" in the database. Any future fused-kernel experiments should keep this 3-tier pipeline as a one-line fallback so a failed fusion attempt cannot push the population below 8.6.
+*   **Warn (ordering / smem pairing invariants):** Keep the strided-load + `SortDescendingBlockedToStriped` + strided-write pairing in any future block-sort variant — it remains correctness-critical per the inherited lineage summary.

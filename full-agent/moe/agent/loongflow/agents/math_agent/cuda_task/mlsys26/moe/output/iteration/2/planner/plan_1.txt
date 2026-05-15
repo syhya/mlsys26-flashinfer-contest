@@ -1,0 +1,50 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized FP8 block-scale MoE, improving on the previous iteration by fixing numerical bugs (pointer overflow) and improving hardware utilization (FP8 GEMM2).
+
+**Selected Outline:** Refined Two-Stage Triton Grouped GEMM with Explicit int64 Pointers and FP8 GEMM2
+
+**Rationale for Selection:**
+1.  **Bug Fixes**: Explicit `tl.int64` casting directly addresses the `int32` pointer overflow that caused the massive max absolute error (8192.0) in the previous iteration.
+2.  **Performance Uplift**: Re-quantizing intermediate activations to FP8 enables `tl.dot` in GEMM2 to use Tensor Cores, offering a massive speedup over the previous FP32 fallback.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Definition & Setup**
+    *   **Variables**:
+        *   Triton Grid parameters (BLOCK_M, BLOCK_N, BLOCK_K).
+        *   Routing parameters identically defined as the parent.
+    *   **Mathematical Operations**:
+        *   Routing: Sigmoid + Grouping + TopK + Normalization.
+        *   GEMM1: $G1 = \text{Activation} \times \text{Weight1}$.
+        *   Activation/Quantization: $C = \text{SwiGLU}(G1)$. $C_{fp8} = \text{quantize}(C)$.
+        *   GEMM2: $O = C_{fp8} \times \text{Weight2} \times \text{routing\_weight}$.
+    *   **Constraints**:
+        *   Strictly prevent int32 overflow in pointer arithmetic.
+        *   Maintain FP8 block-scale consistency.
+
+2.  **Phase 2: The Optimization Loop (Triton Autotuning)**
+    *   **Autotuning (Multi-Start Equivalent)**: Use `@triton.autotune` with multiple configuration parameters to sweep the space of tile sizes and warp counts.
+        *   `BLOCK_M` $\in \{32, 64, 128\}$, `BLOCK_N` $\in \{64, 128\}$, `BLOCK_K = 128`.
+        *   `num_warps` $\in \{4, 8\}$, `num_stages` $\in \{2, 3, 4\}$.
+    *   This acts as a search mechanism to implicitly find the optimal execution parameters over varying token counts `T`.
+
+3.  **Phase 3: The "Safety Valve" (CRITICAL)**
+    *   **Pointer Cast Enforcement**: Every single term in a pointer arithmetic expression that involves strides MUST be cast to `tl.int64` before multiplication. Specifically: `idx.to(tl.int64) * stride.to(tl.int64)`.
+    *   **Fallback Mechanism**: If the local expert token count is 0, return immediately to prevent errors.
+
+4.  **Phase 4: Implementation Details**
+    *   **Step 4.1: Routing (PyTorch)**: Maintain the exact vectorized routing as the parent solution.
+    *   **Step 4.2: Token Sorting**: Maintain the exact vectorized token grouping and offset generation using `torch.bincount` and `torch.cumsum`.
+    *   **Step 4.3: Triton Grouped GEMM1**:
+        *   Perform standard grouped GEMM in Triton.
+        *   CRITICAL: Apply `.to(tl.int64)` to `e_idx`, `n_offs`, `tl.arange`, etc., before multiplying by strides.
+    *   **Step 4.4: Fused SwiGLU + Quantization Kernel**:
+        *   Write a custom Triton kernel (or PyTorch equivalent) that reads G1, computes SwiGLU, and quantizes the result to `float8_e4m3fn` while computing block scales (`max(abs(x)) / 448.0`).
+        *   *Alternative*: Perform SwiGLU in PyTorch and use `torch.amax` for block scaling, then cast.
+    *   **Step 4.5: Triton Grouped GEMM2**:
+        *   Input: `C_fp8`, `W2_fp8`.
+        *   Perform `tl.dot(c_fp8, w_fp8, out_dtype=tl.float32)`.
+        *   Scale post-dot using both the `W2_scale` and the dynamically computed `C_scale`.
+        *   Multiply by `routing_weights`.
+    *   **Step 4.6: Scatter Add**: Accumulate into final output.

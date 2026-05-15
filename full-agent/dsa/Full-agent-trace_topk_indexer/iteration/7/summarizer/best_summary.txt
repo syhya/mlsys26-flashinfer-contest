@@ -1,0 +1,19 @@
+### Strategic Analysis Report
+
+**1. Executive Summary:**
+This iteration was a successful optimization because bounding the CUB segmented radix sort to only process valid tokens drastically reduced sorting overhead, advancing the baseline as the sole child of this generation.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   `**Sibling Rank:**` 1 out of 1 children. Top sibling score: 4.10%.
+*   `**Score Delta:**` From parent (3.75) to child (4.10).
+*   `**Key Change:**` Replaced uniform CUB sorting offsets with `begin_offsets` and `end_offsets` strictly bounded by `seq_lens[b]`, ensuring CUB only sorts the valid tokens instead of the full padded array. Additionally, inner loop unrolling over heads was increased from 4 to 8.
+*   `**Core Metrics:**` Execution time improved to ~0.108ms, yielding a speedup of 41.06x while maintaining 1.0 correctness.
+
+**3. Strategic Analysis (The "So What?"):**
+*   `**Root Cause:**` The outcome was driven by a high-quality execution that optimized the Top-K sorting bottleneck. While the plan focused heavily on complex memory loading (which was only partially implemented via increased loop unrolling), the executor implemented a critical fix to the sorting stage, preventing CUB from sorting thousands of `-1e20f` padded elements.
+*   `**Key Insight:**` Global sorting operations over padded tensors are a major hidden bottleneck in variable-length batched workloads. Bounding operations strictly to the valid sequence lengths using `begin_offsets` and `end_offsets` is an extremely effective way to reclaim performance without algorithmic complexity.
+*   `**Identified Risk:**` The kernel still relies on a global memory round-trip and a full segmented sort of `seq_lens` elements to find the Top-2048. As sequence lengths grow, the global memory bandwidth for the `scores_buf` and the `O(N log N)` sort complexity will become the dominant bottlenecks again.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   `Recommend Fusion:` The sorting logic is currently decoupled from the scoring logic. Recommend fusing a block-level or warp-level Top-K selection (e.g., using a shared memory priority queue, radix select, or local filtering) directly into the `compute_scores_kernel`. This would eliminate the need to write the entire $N$-sized score matrix to global memory and bypass the CUB sort entirely.
+*   `Recommend Exploration:` The planner's original idea of vectorized K-cache loads (`uint4`) was not fully realized because the thread mapping still assigns 32 threads per token instead of 8. Recommend explicitly rewriting the thread mapping to use 128-bit `uint4` memory loads for the FP8 KV cache, dramatically increasing memory bandwidth utilization during the `q @ K.T` phase.

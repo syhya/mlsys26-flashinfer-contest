@@ -1,0 +1,19 @@
+**1. Executive Summary:**
+This iteration was a marginal improvement because it replaced FP8 tensor-core dot with explicit FP32 dequantization before matmul in GEMM1, performing as the only child of this parent.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* **Sibling Rank:** 1 out of 1 child (no siblings).
+* **Score Delta:** From parent (27.73%) to child (27.91%).
+* **Key Change:** Modified GEMM1 kernel to dequantize FP8 activations and weights to FP32 before `tl.dot`, replacing the parent's `tl.dot(fp8, fp8) * scale` pattern with `tl.dot(fp32, fp32)`.
+* **Core Metrics:** Kernel latency changed from 7.576ms to 7.825ms; speedup changed from 2.77x to 2.79x; max absolute error changed from 4096.0 to 8192.0; max relative error changed from 3.047e7 to 1.425e9; correctness check passed; eval time changed from 140.88s to 93.69s.
+
+**3. Strategic Analysis (The "So What?"):**
+* **Root Cause:** Execution quality issue masquerading as a plan issue. The child's GEMM1 modification was intended to improve numerical stability by avoiding FP8 tensor-core accumulation, but it actually degraded both error metrics and latency. The 0.18% score improvement is noise-level and comes entirely from reduced eval time (likely infrastructure variance), not from algorithmic progress. The plan's core hypothesis—that dequant-before-dot improves correctness—was falsified by the data.
+* **Key Insight:** The parent's FP8 tensor-core path in GEMM1 was not the primary error source. Replacing it with FP32 dequant increased both absolute error (4096→8192) and relative error (3e7→1.4e9), proving that the FP8 dot with post-multiply scaling was actually more numerically stable than eager FP32 conversion. The real pathology remains in GEMM2's per-expert eager dequantization or in accumulated floating-point error from the scatter-add path.
+* **Identified Risk:** This lineage is trapped in a correctness-first local minimum where every "safe" change either regresses performance or fails to move the needle on score. The 8192.0 absolute error ceiling suggests a structural mismatch (likely quantization boundary effects or routing weight precision loss) that cannot be fixed by swapping GEMM implementations alone.
+
+**4. Actionable Guidance (The "What's Next?"):**
+* **Recommend Stripping:** Revert the GEMM1 dequant-before-dot change. The parent's FP8 tensor-core path was superior in both speed and accuracy. Future descendants should preserve `tl.dot(fp8, fp8, out_dtype=tl.float32) * scale` for GEMM1.
+* **Recommend Exploration:** The error signature points to GEMM2 or final accumulation as the remaining bottleneck. Investigate whether the per-expert `torch.mm` in GEMM2 is accumulating error due to repeated FP32 materialization, or whether the `index_add_` scatter has precision loss from non-deterministic summation order.
+* **Recommend Fusion:** Explore a hybrid GEMM2 path that uses `torch._scaled_mm` for large expert batches (leveraging cuBLAS FP8 kernels with exact block-scale support) while keeping the current eager fallback only for tiny `Tk_e < 16`. This could recover speed without sacrificing the block-scale correctness semantics.
+* **Warn:** Do not continue down the "dequant everything to FP32" path. This child empirically demonstrated that eager FP32 conversion in GEMM1 is counterproductive. The next planner should treat FP8 tensor-core operations as a strength to preserve, not a risk to eliminate.

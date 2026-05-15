@@ -1,0 +1,30 @@
+Outline 1: Fused one-pass online sparse attention with warp-specialized dispatch
+
+Mathematical Formulation
+- Variables X:
+  1. Dispatch threshold tau separating low-latency and throughput kernels.
+  2. Tile size Bk over sparse positions, chosen from {16, 32}.
+  3. Per-(token, head) online softmax state (m, l, O), where m is running max, l is running denominator, O is unnormalized output accumulator in R^512.
+  4. Shared-memory staging buffers for gathered keys Kc_tile[Bk,512], Kp_tile[Bk,64], idx_tile[Bk].
+- Constraints C:
+  1. Only sparse_indices >= 0 contribute; -1 entries are masked exactly.
+  2. All dot products and softmax recurrences are accumulated in FP32.
+  3. Final output store is BF16 only; lse is FP32.
+  4. lse must be base-2: lse = m * log2(e) + log2(l) when l > 0.
+  5. If no valid sparse index exists, output = 0 and lse = -INF.
+  6. Only explicit BF16 conversion intrinsics may be used.
+- Objective f(X): minimize end-to-end runtime by eliminating intermediate HBM workspace and maximizing occupancy while preserving exact online softmax invariants.
+
+Solver Strategy
+- Deterministic dynamic programming style recurrence: FlashAttention-style online softmax recurrence is the solver for normalization.
+- Deterministic discrete dispatch over a tiny parameter set {tau, Bk}; no random search.
+
+Validity Mechanism
+- Hard constraints are enforced structurally: masked indices are skipped before all math; online recurrence runs only on valid keys.
+- Final repair branch: if valid_count == 0 or l <= 0, write zero output and -INF lse.
+- Explicit BF16 convert intrinsics guarantee compatibility with build flags.
+
+Why this solution?
+- Expected improvement: remove the parent small-workload split-K workspace writes/reads and reduce launch overhead.
+- Advantages: mathematically exact, low crash risk, directly builds on the currently best-performing parent.
+- Disadvantages: still memory-gather dominated; does not fully exploit tensor cores for irregular gather pattern.

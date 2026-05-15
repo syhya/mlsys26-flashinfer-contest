@@ -1,0 +1,48 @@
+{
+  "total_generated_solutions": 3,
+  "total_valid_solutions": 2,
+  "island_feature_map": [
+    {
+      "2-0-2": "4a126571",
+      "3-0-3": "c9eb9072"
+    }
+  ],
+  "islands": [
+    [
+      "4a126571",
+      "c9eb9072"
+    ]
+  ],
+  "elites": [
+    "4a126571",
+    "c9eb9072"
+  ],
+  "best_solution_id": "c9eb9072",
+  "island_best_solution": [
+    "c9eb9072"
+  ],
+  "last_iteration": 3,
+  "current_island": 0,
+  "island_capacity": [
+    2
+  ],
+  "last_migration_generation": 0,
+  "feature_stats": {
+    "complexity": {
+      "min": 10182.0,
+      "max": 10614.0,
+      "values": [
+        10182.0,
+        10614.0
+      ]
+    },
+    "score": {
+      "min": 0.8348522707379195,
+      "max": 0.8626026011044661,
+      "values": [
+        0.8348522707379195,
+        0.8626026011044661
+      ]
+    }
+  }
+}

@@ -1,0 +1,18 @@
+**1. Executive Summary:**
+This iteration was a performance regression because replacing dynamic FP8 quantization with exact BF16 upcasting in GEMM2 reduced Tensor Core throughput, performing 1st out of 1 siblings.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* `**Sibling Rank:**` 1 out of 1 children. Top sibling score: 81.28%.
+* `**Score Delta:**` From parent (86.26%) to child (81.28%).
+* `**Key Change:**` Replaced dynamic block-wise FP8 quantization with exact BF16 upcasting (`c_bf16`, `w_bf16`) in `grouped_gemm2_kernel` to utilize BF16 Tensor Cores instead of FP8.
+* `**Core Metrics:**` Kernel execution time regressed from 2.810ms to 3.022ms; max absolute error decreased from 33280.0 back to 8192.0.
+
+**3. Strategic Analysis (The "So What?"):**
+* `**Root Cause:**` The execution plan successfully reversed the extreme numerical noise introduced by the parent's naive dynamic FP8 quantization by switching to mathematically safer BF16 Tensor Cores. However, this precision upgrade halved the theoretical throughput of the second GEMM, causing the latency regression.
+* `**Key Insight:**` Although the BF16 upcasting mitigated the parent's quantization damage, the absolute error merely returned to the grandparent's baseline level of 8192.0. This proves definitively that the fundamental correctness bug lies in structural memory handling or reduction logic, not in the precision of the GEMM dot products.
+* `**Identified Risk:**` Focusing on precision types (FP8 vs BF16) is a distraction from the true bottleneck. The persistence of the massive 8192.0 error indicates a critical flaw such as unhandled out-of-bounds indices, uninitialized memory reads in masked rows, or incorrect token accumulation during the scatter-add phase.
+
+**4. Actionable Guidance (The "What's Next?"):**
+* `Recommend Exploration:` Halt modifications to the GEMM precision types and focus purely on debugging the structural 8192.0 absolute error. Audit all `m_mask` usages during `tl.load` and `tl.store` operations, ensure `expert_offsets_ptr` indices do not drift out of bounds, and verify the correct initialization of the intermediate tensors `G1` and `O`.
+* `Recommend Fusion:` Once the underlying memory or masking bug is identified and the absolute error is brought down to the target range (`atol=1e-2`), fuse the parent's ultra-fast FP8 dynamic quantization strategy back into the pipeline to recapture the sub-3ms latency safely.
+* `Warn:` Do not pursue further latency optimizations until mathematical correctness is verified. An output with an 8192.0 absolute error is fundamentally broken and cannot be trusted, regardless of its execution speed.

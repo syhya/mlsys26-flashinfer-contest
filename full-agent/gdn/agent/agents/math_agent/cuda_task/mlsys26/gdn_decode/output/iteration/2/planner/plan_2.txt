@@ -1,0 +1,18 @@
+### Plan 2: Shared Memory State Tiling
+
+**Mathematical Formulation:**
+* **Variables:** Shared memory allocation size $S_{state} = B_{size} \times K \times \text{sizeof(float)}$.
+* **Constraints:** $S_{state} \le 48 \text{ KB}$ (standard shared memory limit per block).
+* **Objective:** Minimize global memory repeated reads by caching hot data in Shared Memory.
+
+**Solver Strategy:**
+* **Tile-Based Loading:** Preload a $B_{size} \times K$ tile of the `state` tensor from global memory into `__shared__` memory using `async` copies or vectorized loads.
+* **Compute:** Perform all read-modify-write operations on the shared memory tile.
+* **Writeback:** Write the updated tile back to global memory.
+
+**Validity Mechanism:**
+* **Thread Synchronization:** Strict `__syncthreads()` before and after shared memory modifications to guarantee no race conditions.
+
+**Why this solution?**
+* **Advantages:** Addresses L1TEX stalls by moving the memory operations to lower-latency Shared Memory.
+* **Disadvantages:** The `state` tensor is actually only read once and written once per row of $V$. Caching it in Shared Memory provides zero data reuse, strictly adding instruction overhead and barrier synchronization delays without reducing global memory traffic. Occupancy remains an issue.

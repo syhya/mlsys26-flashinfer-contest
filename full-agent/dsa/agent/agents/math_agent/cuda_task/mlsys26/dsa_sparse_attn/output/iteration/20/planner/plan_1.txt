@@ -1,0 +1,21 @@
+### Outline 1: Large-Path Exploitation with Safer Early-Exit Compression
+
+**Mathematical Formulation**
+- **Variables (X):** dispatch threshold tau; tile validity bitmap layout B; fused-kernel tile size Tq=1, Tk=32 fixed; shared-memory staging policy S in {full_k, direct_stream}; output vector pack width v=4.
+- **Constraints (C):** exact attention semantics for all valid sparse entries; entries with sparse_indices=-1 contribute zero; all dot products and softmax statistics in FP32; final output BF16; lse = m*log2(e)+log2(l); ABI and tensor shapes fixed.
+- **Objective f(X):** minimize end-to-end latency subject to correctness >= 1.0.
+
+**Solver Strategy**
+- Deterministic finite design search over a tiny discrete set of kernel organizations, effectively a bounded combinatorial optimization.
+- Choose the safest member: keep the current fused algorithm but replace the shared-index overwrite trick by a separate validity flag and add a whole-row fast path when all 2048 sparse slots are invalid.
+
+**Validity Mechanism**
+- Online softmax remains unchanged.
+- Invalid slots are masked before any cache read.
+- Empty rows are forced to output=0 and lse=-INF.
+- If any optimized fast path predicate is false, execution falls back to the current parent fused loop.
+
+**Why this solution?**
+- **Expected improvement:** small constant-factor gain by removing fragile shared-state mutation and skipping obviously empty rows/tiles safely.
+- **Advantages:** lowest correctness risk; minimal compile risk; likely preserves 115x-class speed.
+- **Disadvantages:** may yield only marginal speedup; does not materially change small-token under-occupancy.

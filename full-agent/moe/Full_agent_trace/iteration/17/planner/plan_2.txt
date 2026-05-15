@@ -1,0 +1,38 @@
+### Outline 2: Robust Triton Grouped GEMM with Fused GEMM1+SwiGLU+GEMM2 by Expert and Deterministic CPU-Free Repair
+
+**Mathematical Formulation**
+- **Variables (X):**
+  - Routing tensors `idx[T,8]`, `w[T,8]`.
+  - Local dispatch tensors: `tok[Tk_total]`, `exp[Tk_total]`, `ofs[E_local+1]`.
+  - Kernel tile variables `(BM, BN, BK, num_warps, num_stages)` chosen from a finite autotune set.
+  - Intermediate accumulation tensors held in registers/shared memory, not materialized globally when possible.
+- **Constraints (C):**
+  - `BK = 128` exactly to align with FP8 scale blocks.
+  - All pointer arithmetic in Triton must be int64.
+  - Accumulation in both GEMMs is FP32.
+  - SwiGLU is exact in FP32: `silu(x2) * x1`.
+  - Scatter-add must sum into output at original token indices.
+- **Objective (f(X))**
+  - Minimize total HBM traffic and launch overhead while preserving exact mathematical semantics.
+
+**Solver Strategy**
+- Use a **finite discrete autotuning strategy** over Triton configs (deterministic search over candidate kernels).
+- Main algorithm:
+  1. Compute routing and CSR dispatch using vectorized PyTorch ops.
+  2. Run grouped GEMM1 Triton kernel using FP8 `tl.dot`, scaling each K-block by `a_scale * w_scale` after accumulation of the 128-wide block.
+  3. Fuse SwiGLU with GEMM2 in Triton, but keep activations in FP32 and cast GEMM2 weights to FP32 inside the dot path if needed for correctness.
+  4. Use a second optimized path only for large `Tk` experts to exploit FP8 weight loads efficiently.
+- The solver is deterministic autotuned kernel selection across a bounded search space.
+
+**Validity Mechanism**
+- Safety repair stack:
+  1. Mask all stores for `n_offs < N/H` to prevent OOB writes; parent currently misses this on tail tiles.
+  2. Grid second dimension must be `ceil_div(max_tokens_per_expert, BM)` or guarded by `Tk`, never `ceil_div(T, BM)` without full tail masks.
+  3. For GEMM2, remove dynamic FP8 quantization of SwiGLU activations; compute in FP32 to eliminate catastrophic error.
+  4. If fused kernel fails on tiny `Tk`, route expert to a safe fallback kernel or `torch.mm` path.
+- Deterministic correctness check inside code can use shape-based path selection only, no randomness.
+
+**Why this solution?**
+- **Expected improvement:** best chance to exceed parent by fixing structural bugs and reducing tail inefficiency while preserving most Triton speed.
+- **Advantages:** preserves grouped expert parallelism, removes the known numerical failure source, fixes likely OOB tail bugs, no CPU sync.
+- **Disadvantages:** more implementation complexity than PyTorch-native path; fused kernel may still need temporary staging for simplicity.

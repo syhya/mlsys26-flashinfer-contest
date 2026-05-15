@@ -1,0 +1,37 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized CUDA kernel for the GDN decode step that maximizes GPU SM occupancy and perfectly hides L1TEX memory latencies, significantly outperforming the 705x baseline while maintaining strict numerical correctness (Score >= 1.0).
+
+**Selected Outline:** Multi-Block V-Dimension Parallelization with Exact Algebraic Reordering
+
+**Rationale for Selection:**
+1.  **Data-Driven Resolution:** The parent's NCU profiling explicitly identified a critical bottleneck: 6.2% SM occupancy due to launching only 8 blocks for 148 SMs.
+2.  **Mathematical Guarantee:** By expanding the grid across the $V$ dimension, we mathematically guarantee sufficient active warps (256 blocks vs 8 blocks) to hide the 73.9% L1TEX memory fetch stalls without altering the mathematically proven decoupled algebraic formulas.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Definition & Algebraic Model**
+    *   **Variables:** Define Grid configuration $G = (B, HV, V / V_{PB})$ and Block configuration $B_{dim} = (32, V_{PB})$, where $V_{PB}$ (V-rows per block) is set to 4. 
+    *   **Objective Function:** Maximize SM occupancy $\mathcal{O}(G) \approx 100\%$ to minimize global memory fetch latency stall time.
+    *   **Constraints:** Tensor sizes are fixed ($K=128$, $V=128$). Thread mapping must satisfy $T_x = 32$ (one warp) perfectly mapping to $K/4$ via `float4` vectorized loads.
+    *   **Mathematical State Update:** Retain the exact algebraically decoupled equations from the parent:
+        *   $qh_v = \sum (q \cdot state_v)$, $kh_v = \sum (k \cdot state_v)$
+        *   $old\_v_v = g \cdot kh_v$
+        *   $dv_v = \beta \cdot (v_v - old\_v_v)$
+        *   $output_v = scale \cdot (g \cdot qh_v + dv_v \cdot qk\_dot)$
+        *   $new\_state_v = g \cdot state_v + dv_v \cdot k$
+
+2.  **Phase 2: The Optimization Loop (Kernel Execution Strategy)**
+    *   **Grid Expansion (Multi-Start Analogue):** Instead of looping over all 128 elements of $V$ within a single block (which limits the scheduler), distribute the workload. Launch `dim3 grid(B, num_v_heads, V / 4)`. This spawns 256 independent block "starts", allowing the hardware scheduler to optimally distribute the workload across all available SMs.
+    *   **Warp Processing:** Within each block, launch `dim3 block(32, 4)`. The `threadIdx.y` dictates which of the 4 assigned $V$-rows the warp will process.
+    *   **Register Hoisting:** Each block will independently fetch its necessary $128$-element `q` and `k` vectors once into local thread registers and reuse them for its 4 assigned $V$ rows.
+
+3.  **Phase 3: The "Safety Valve" (CRITICAL)**
+    *   **Deterministic State Initialization:** The PyTorch `state` tensor is optional. The C++ wrapper MUST enforce a deterministic validity check: `if (state.defined() && state.numel() > 0)`. If true, pass the raw pointer. If false, pass `nullptr`.
+    *   **Kernel-Level Fallback:** Inside the CUDA kernel, implement a strict conditional safety valve: `float4 st = make_float4(0,0,0,0); if (state_ptr != nullptr) { st = load_float4(...) }`. This guarantees the kernel will never segfault on undefined memory and mathematically correctly defaults to a zero-state.
+    *   **Contiguity Enforcement:** The C++ wrapper MUST call `.contiguous()` on all input tensors before extracting data pointers to prevent silent memory offset corruption.
+
+4.  **Phase 4: Implementation Details**
+    *   **Libraries:** Strictly use `<cuda_bf16.h>` for hardware-accelerated types (`__nv_bfloat16`, `__bfloat162float`, `__float2bfloat16`) and `<torch/extension.h>` for the binding.
+    *   **Intra-Warp Reduction:** Do NOT use `__shared__` memory for the $K$-dimension reduction, as it causes barrier overhead. Use the mathematically exact `__shfl_down_sync(0xffffffff, val, offset)` loop to sum variables (`qk_local`, `qh_local`, `kh_local`) across the 32 threads in the warp.
+    *   **Vectorization:** Cast pointers to `float4*` for the $FP32$ `state` tensor and `float2*` for the $BF16$ `q` and `k` tensors to guarantee maximum 128-byte transaction efficiency on the memory bus.

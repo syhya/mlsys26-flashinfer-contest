@@ -1,0 +1,20 @@
+**Objective:** Minimize HBM write traffic and instruction overhead by enforcing 128-bit (`float4`) vectorized stores for the intermediate output `O_tmp`.
+
+**Mathematical Formulation:**
+* **Variables ($X$):** Thread-to-memory address mapping function $M(lane, j)$ where $lane \in [0, 31]$ and $j \in [0, 3]$.
+* **Constraints ($C$):** 
+  1. $M(lane, j)$ must map exactly to 16-byte aligned addresses (i.e., offset $\equiv 0 \pmod 4$).
+  2. Intermediate shared memory usage must be $\le 32$ KB (can reuse `smem_Kc` which is $32 \times 512 \times 2$ bytes).
+  3. No race conditions: mapping must be bijective for a given token, chunk, and head.
+* **Objective ($f(X)$):** Minimize total global memory store instructions $N_{stores} = \sum_{lane=0}^{31} \text{Instructions}(lane)$.
+
+**Solver Strategy:** 
+Deterministic Algebraic Mapping. We mathematically solve for the optimal indices by projecting the $8 \times \text{float2}$ thread-local registers into a shared memory array, and then applying a linear transformation to read them back as $4 \times \text{float4}$.
+
+**Validity Mechanism:**
+The "Safety Valve" uses an explicit `__syncthreads()` barrier before and after the shared memory transposition to guarantee no RAW/WAR hazards. Address calculations strictly enforce `d_idx = j * 128 + lane * 4`, mathematically guaranteeing 16-byte alignment.
+
+**Why this solution?:**
+* **Expected Performance:** Halves the global store instructions in `split_k_compute_kernel`, directly addressing the parent's identified bottleneck.
+* **Advantages:** 100% coalesced writes, maximizing bus utilization.
+* **Disadvantages:** Adds a slight overhead of writing and reading from shared memory, but L1/SMEM bandwidth vastly exceeds HBM bandwidth.

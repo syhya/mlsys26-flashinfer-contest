@@ -1,0 +1,26 @@
+Outline 3: Architecture-guarded cp.async double-buffered tiled kernel with conservative fallback
+
+Mathematical Formulation:
+- Variables X:
+  1. Tile size T_s over sparse entries and double-buffer depth d in {2}.
+  2. Shared-memory swizzled layout parameters for K_nope and K_pe staging.
+  3. Dispatch condition arch >= SM80 and workload size threshold tau_tc.
+- Constraints C:
+  1. Same exact attention and base-2 lse semantics as reference.
+  2. Invalid idx=-1 masked before contribution.
+  3. FP32 accumulation for logits/softmax/output accumulation.
+  4. Use architecture guard: if not SM80+, or if compile fragility arises, fall back to parent kernel.
+- Objective f(X): overlap global-memory movement with compute to reduce memory stall cycles.
+
+Solver Strategy:
+- Rule-based constrained optimization: use cp.async only when hardware and tile alignment constraints are satisfied; else deterministic fallback.
+- Small finite sweep over tile sizes {16,32} chosen statically.
+
+Validity Mechanism:
+- Conservative compile-time guards and fallback path.
+- Exact online softmax remains unchanged mathematically.
+- Final repair identical to parent for empty rows and normalization.
+
+Why this solution?
+- Advantages: highest potential throughput improvement if memory staging is the bottleneck.
+- Disadvantages: most fragile plan, highest compile risk, architecture-dependent, and unnecessary given current benchmark already strong.

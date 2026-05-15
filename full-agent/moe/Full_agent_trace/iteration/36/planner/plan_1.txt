@@ -1,0 +1,13 @@
+Plan 1: Fused Epilogue with Atomic Scatter-Add (eliminate O scratch + index_add_)
+
+Objective: Beat parent 1.5517. The current pipeline allocates an O[Tk_total, 7168] fp32 scratch (~8MB for Tk=300), then runs torch.zeros + index_add_ + cast to bf16. This is 3 kernel launches and ~16MB HBM traffic for the output epilogue.
+
+Modify GEMM2 kernel to do tl.atomic_add directly into a global fp32 output[T, 7168] buffer, gated by sorted_tokens lookup. Then a tiny kernel converts fp32->bf16. This eliminates O scratch entirely and the index_add_ launch.
+
+Math: same. Variables: keep all autotune configs from parent. Constraint: atomics on fp32 are deterministic-modulo-ordering but for ~8 contributors per row the precision is fine.
+
+Validity Mechanism: pre-zero output buffer with torch.zeros (fp32). Atomic_add is associative within fp32 precision. Final cast to bf16 is one launch.
+
+Why: removes 1 full kernel (index_add_) + halves HBM traffic for the epilogue. Expected: 1-3% speedup. Risk: low — atomic on fp32 supported on B200, and accumulation count per row ≤ 8 (top-k).
+
+Disadvantage: marginal gain; output buffer must be pre-zeroed (already done).

@@ -1,0 +1,17 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_e56",
+        "solution_file_path": "output/fdce148c-632f-4f5a-943f-f39a5d830b80/1/executor/0_0/solution_e56.py",
+        "evaluation_file_path": "output/fdce148c-632f-4f5a-943f-f39a5d830b80/1/executor/0_0/evaluation_e56.json",
+        "score": 0.8348522707379195,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 8.35x (ref: 18.614ms, kernel: 3.024ms)\",\n  \"score\": 0.8348522707379195,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 8.348522707379194,\n    \"exec_time_ms\": 3.023719728070175,\n    \"baseline_time_ms\": 18.614325342105264,\n    \"compile_time\": 0.0,\n    \"eval_time\": 107.80677127838135\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"107.81s\",\n    \"kernel_latency_ms\": \"3.024ms\",\n    \"reference_latency_ms\": \"18.614ms\",\n    \"speedup\": \"8.35x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 18.614325342105264,\n      \"max_relative_error\": 19262.458984375,\n      \"max_absolute_error\": 8192.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\",\n    \"ncu_profile\": {\n      \"ncu_set\": \"full\",\n      \"ncu_page\": \"details\",\n      \"ncu_kernel_name\": null,\n      \"rows\": [\n        {\n          \"workload_uuid\": \"b8f4f012-a32e-4356-b4e1-7665b3d598af\",\n          \"axes\": {\n            \"seq_len\": 7\n          },\n          \"output\": \"[NCU timeout after 900s]\"\n        }\n      ]\n    }\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

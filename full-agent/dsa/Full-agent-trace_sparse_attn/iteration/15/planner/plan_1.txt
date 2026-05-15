@@ -1,0 +1,31 @@
+Outline 1: Two-path fused sparse attention with occupancy-first small-token kernel
+
+Mathematical Formulation
+- Variables X:
+  1. Dispatch threshold tau separating small-token and large-token regimes.
+  2. Tile size B over sparse key list (candidate values 16, 32, 64).
+  3. Thread/block decomposition for a token-head work unit: warps_per_block, heads_per_block, dims_per_lane.
+  4. Online softmax state per (token, head): m, l, and accumulator O in FP32.
+- Constraints C:
+  1. Exact semantics: for each valid sparse index s != -1, logit = sm_scale * dot([q_nope,q_pe],[k_nope,k_pe]).
+  2. Masking: sparse_indices == -1 contributes nothing to m, l, O.
+  3. Accumulation and reduction are FP32 only.
+  4. Output dtype is BF16; lse = log2(sum(exp(logit))) exactly in base 2 at the end.
+  5. Entry point and module binding must match required ABI.
+- Objective f(X): minimize total latency while preserving correctness; secondary objective is reducing kernel launches and temporary HBM traffic.
+
+Solver Strategy
+- Use deterministic discrete design search by hand-coded dispatch, equivalent to selecting argmin over a small finite candidate set {small-path, large-path} using runtime token count. No stochastic optimizer.
+- Small path: occupancy-first persistent/overdecomposed kernel where one block handles one (token, subset-of-heads) rather than one token. Increase grid size and reduce launch underfill.
+- Large path: retain single-pass fused online softmax but improve vectorized output/temporary handling and block mapping.
+
+Validity Mechanism
+- Hard-mask all -1 entries before loading caches.
+- Maintain m/l/O using deterministic online softmax recurrence in FP32.
+- Final safety fallback: if no valid indices exist for a head, store zero output and lse=-INFINITY.
+- Keep all BF16 conversions explicit via __bfloat162float / __float2bfloat16 / __bfloat1622float2 equivalents.
+
+Why this solution?
+- Expected performance improvement: large gain on num_tokens=1..small regimes by fixing severe grid underfill shown in profile; maintain strong large-regime baseline.
+- Advantages: low implementation risk, preserves known-correct algorithm, directly addresses measured bottleneck of tiny-grid kernels.
+- Disadvantages: may not beat baseline further on already-fast large-token workloads if tensor cores are not added.

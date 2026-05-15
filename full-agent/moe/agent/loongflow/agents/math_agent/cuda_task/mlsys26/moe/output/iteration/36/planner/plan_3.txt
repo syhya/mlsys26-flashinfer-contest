@@ -1,0 +1,13 @@
+Plan 3: tl.make_block_ptr for weight loads in GEMM1 (TMA enablement on Blackwell)
+
+Objective: GEMM1 is ~55% of latency. Use tl.make_block_ptr for W1 weight tile loads to enable Blackwell TMA bulk-async copy. Expected 5-10% on GEMM1.
+
+Math: identical. Variables: replace raw pointer arithmetic for W with block_ptr; preserve A and scale loads.
+
+Solver: code refactor — replace `w_ptrs = W_ptr + ... ; w_fp8 = tl.load(w_ptrs, ...)` with `W_block = tl.make_block_ptr(base=W_ptr + pid_e*stride_we, shape=(2I, H), strides=(stride_wn, stride_wk), offsets=(pid_n*BLOCK_N, 0), block_shape=(BLOCK_N, BLOCK_K), order=(0,1))` and `tl.advance(W_block, (0, BLOCK_K))` per iter.
+
+Validity: keep parent kernel as fallback path; if compilation fails on certain configs, autotune drops them.
+
+Why: only untapped Blackwell-specific feature. Could push 16x→17x.
+
+Disadvantage: HIGH risk of subtle correctness bugs (block_ptr semantics for transposed FP8 layout). Has never been tried in this lineage. The transposition (W stored as [2I, H], we load as [BLOCK_K, BLOCK_N] with K from H-axis) makes block_ptr setup error-prone. If buggy: full regression.

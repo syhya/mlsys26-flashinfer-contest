@@ -1,0 +1,34 @@
+Outline 1: Exact small-path partition + deterministic merge, preserve large fused path
+
+Mathematical Formulation
+- Variables X:
+  1. tau_small: dispatch threshold for small-token path.
+  2. P: number of sparse partitions over 2048 slots.
+  3. hg: heads per block in the small path.
+  4. Workspace layouts for m_tmp[T,16,P], l_tmp[T,16,P], O_tmp[T,16,P,512].
+- Constraints C:
+  1. Exact ABI: output [T,16,512] bf16 and lse [T,16] fp32.
+  2. All online-softmax state and reductions in fp32.
+  3. sparse_indices == -1 contributes zero and must not read invalid cache rows.
+  4. lse must be base-2: m*log2(e)+log2(l).
+  5. Explicit bf16 conversion intrinsics only.
+  6. Complexity polynomial and practical: O(T*16*2048*576).
+- Objective f(X): minimize end-to-end latency while preserving correctness >= 1.0, with focus on tiny-T occupancy and low-risk implementation.
+
+Solver Strategy
+- Deterministic finite design search, not stochastic optimization.
+- Fix large path exactly as parent.
+- For small path choose one robust static candidate from a tiny candidate family: P in {32,64}, hg in {4,8}, tau_small in {64,96}.
+- Use exact online-softmax partial states (m,l,O) and exact merge equations as the mathematical solver for partition composition.
+
+Validity Mechanism
+- Each partition computes a neutral state if it has no valid sparse entries: m=-INF, l=0, O=0.
+- A separate reduction kernel merges partial states exactly:
+  m=max(m_p), l=sum(l_p*exp(m_p-m)), O=sum(O_p*exp(m_p-m)), out=O/l.
+- Empty-row fallback forces output=0 and lse=-INF.
+- Preserve the parent large fused kernel unchanged as a safe fallback for large workloads.
+
+Why this solution?
+- Expected performance improvement: better occupancy for num_tokens very small without risking the already-strong large path.
+- Advantages: mathematically exact, low crash risk, isolated change, easy A/B attribution.
+- Disadvantages: extra workspace traffic; improvement may be modest if current split-K path is already near optimal.

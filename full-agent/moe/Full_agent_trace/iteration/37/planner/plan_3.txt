@@ -1,0 +1,6 @@
+Plan 3: Base on 302d2eb3. Add 2D-blocked (BLOCK_M=128 rows × per-col group) FP8 quantization for SwiGLU output in GEMM2 to reduce max_abs_error trajectory while not hurting performance, AND add 2 BLOCK_M=256 num_stages=4 configs.
+
+Risk: medium. Per-row quant is slightly more compute, may not improve speed.
+Upside: precision insurance + maybe marginal speed.
+
+Probably not the best path: parent summary says autotune expansion saturated and FP8 path is performant enough.

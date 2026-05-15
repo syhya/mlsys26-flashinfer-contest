@@ -1,0 +1,132 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Beat parent (score 4.02, kernel 0.085ms) by fusing the proven short-sequence fast-path bypass (from sibling `2fb50fd2`, score 8.97) with the parent's uint4 vectorized K-cache load. Target score: 9.0–10.5x.
+
+**Selected Outline:** Plan 1 — Fast-Path Short-Sequence Bypass + uint4 K-Load (Orthogonal Fusion)
+
+**Rationale for Selection:**
+1. The parent currently scores 4.02, but sibling `2fb50fd2` (also descended from the same grandparent `9c9e445c`) scored **8.97** using a short-sequence fast path. The parent's uint4 K-load is orthogonal and independently validated (0.085ms kernel latency). Fusing them is additive.
+2. Both components are proven correct (1.0 correctness in both sibling evaluations).
+3. Zero risk of regression: if all sequences are long, performance equals parent; if any are short, we win big.
+4. Deterministic, no randomness.
+
+---
+
+### Phase 1: Mathematical Definition
+
+- Per batch `b`: `L = seq_lens[b]`, `K = 2048`, `P = 64`. `actual_topk = min(K, L)`.
+- Output `topk_indices[b, 0..actual_topk-1]` = set of valid token indices mapped through `block_table`; remaining = -1.
+- **Short-path correctness proof**: When `L <= K`, the required set is ALL valid positions. Task spec permits arbitrary ordering. Direct enumeration `block_table[b, i/64]*64 + (i%64)` for `i < L` is provably correct.
+- **Long-path scoring (unchanged semantics)**:
+  - `K[t,d] = fp8_to_float(bytes[t,d]) * scale[t]`
+  - `score[b,p*64+t] = sum_h ReLU(sum_d Q[b,h,d]*K[t,d]) * weights[b,h]`
+  - NaN → -1e20.
+
+---
+
+### Phase 2: Kernel Architecture
+
+**Grid/Block (long path):** `grid(max_num_pages, batch_size)`, `block(256)` = 8 warps.
+
+**Step 2.1 — Short-path kernel `emit_short_topk_kernel` (from sibling 2fb50fd2, verbatim):**
+```cpp
+__global__ void emit_short_topk_kernel(
+    const int32_t* seq_lens, const int32_t* block_table,
+    int32_t* topk_indices, int max_num_pages, int topk) {
+    int b = blockIdx.x;
+    int L = seq_lens[b];
+    if (L > topk) return;
+    for (int i = threadIdx.x; i < topk; i += blockDim.x) {
+        int out_val;
+        if (i < L) {
+            int p = i >> 6, t = i & 63;
+            int page = block_table[b * max_num_pages + p];
+            out_val = page * 64 + t;
+        } else out_val = -1;
+        topk_indices[b * topk + i] = out_val;
+    }
+}
+```
+Launch: `<<<batch_size, 256>>>`.
+
+**Step 2.2 — Long-path `compute_scores_kernel` (parent's uint4 version + short-path guard):**
+- Add at top: `if (seq_len <= 2048) return;` (short path handles it).
+- Keep parent's proven shared memory layout: `q_smem_f[128][65]`, `k_smem[8][128]`, `scale_smem[8]`, `weights_smem[64]`.
+- Q preload: 256 threads cooperatively dequantize 2048 FP8 → transposed Q.
+- **K load (uint4 vectorized, parent's design):**
+```cpp
+if (lane_id < 8) {
+    uint4 kv = *reinterpret_cast<const uint4*>(k_page_base + t*128 + lane_id*16);
+    float4 f0 = cvt_fp8x4_to_float4(kv.x);
+    float4 f1 = cvt_fp8x4_to_float4(kv.y);
+    float4 f2 = cvt_fp8x4_to_float4(kv.z);
+    float4 f3 = cvt_fp8x4_to_float4(kv.w);
+    float* dst = &k_smem[warp_id][lane_id*16];
+    ((float4*)dst)[0]=f0; ((float4*)dst)[1]=f1;
+    ((float4*)dst)[2]=f2; ((float4*)dst)[3]=f3;
+}
+if (lane_id == 0) scale_smem[warp_id] = *(const float*)(k_page_base + 8192 + t*4);
+__syncwarp();
+```
+- Dot-product: each lane owns 2 heads (h=lane_id, h=lane_id+32); 128-channel unrolled loop; multiply scale; ReLU × weights; warp reduce; lane 0 writes score and index.
+
+**Step 2.3 — `generate_offsets_begin_end` (MODIFIED):**
+```cpp
+int L = seq_lens[b];
+begin_offsets[b] = b * segment_size;
+end_offsets[b] = (L <= 2048) ? b * segment_size : (b * segment_size + L);
+```
+Short batches → empty segment, CUB skips them.
+
+**Step 2.4 — `extract_topk_kernel` (MODIFIED):**
+Early return if `seq_lens[b] <= 2048` (already written by short path).
+
+---
+
+### Phase 3: The "Safety Valve" (CRITICAL)
+
+1. **Partition correctness:** `seq_lens[b] <= 2048` cleanly partitions batches. Short path writes `topk_indices[b,:]` completely; long path writes only if `L > 2048`. No overlap, no race.
+2. **Long-path deterministic top-K:** `cub::DeviceSegmentedRadixSort::SortPairsDescending` with bounded begin/end offsets guarantees exact top-K over valid tokens only.
+3. **NaN guard:** Preserved in long-path scoring (`if (isnan(x)) x = -1e20f`).
+4. **Alignment:** `k_page_base + t*128 + lane*16` is 16B-aligned (torch tensor base is 256B-aligned, per-page offset is multiple of 132*64 = 8448 → divisible by 16, and t*128 + lane*16 also aligned). uint4 safe.
+5. **Fallback:** If benchmark only has long sequences, emit_short_topk is a no-op and performance equals parent's 0.085ms. Zero downside.
+
+---
+
+### Phase 4: Implementation Details
+
+**Single file:** `kernel.cu`.
+**Headers:** `<torch/extension.h>`, `<cuda_fp8.h>`, `<cub/cub.cuh>`, `<tuple>`.
+
+**Functions in order:**
+1. `cvt_fp8x4_to_float4(uint32_t)` — inline device helper from parent.
+2. `emit_short_topk_kernel(...)` — from sibling 2fb50fd2.
+3. `compute_scores_kernel(...)` — parent's uint4 version + `if (seq_len <= 2048) return;` guard.
+4. `generate_offsets_begin_end(...)` — modified to emit empty segments for short batches.
+5. `extract_topk_kernel(...)` — early-return for short batches.
+6. `topk_indexer_forward(...)` — host entry:
+   - A) Launch `emit_short_topk_kernel<<<batch_size, 256>>>`.
+   - B) Launch `compute_scores_kernel<<<grid(max_num_pages, batch_size), 256>>>`.
+   - C) Launch `generate_offsets_begin_end<<<(batch_size+255)/256, 256>>>`.
+   - D) Two CUB `DeviceSegmentedRadixSort::SortPairsDescending` calls (size query + actual).
+   - E) Launch `extract_topk_kernel<<<batch_size, 1024>>>`.
+   - Return `topk_indices`.
+
+**PYBIND11_MODULE:** export `topk_indexer_forward` and alias `dsa_forward`.
+
+**Randomness:** None. Fully deterministic. No Multi-Start needed.
+
+**Library check:** Only `<cuda_fp8.h>` + `<cub/cub.cuh>` — standard CUDA 12+.
+
+**Expected Performance:**
+- For short-sequence-heavy workloads (most of the 12 bench workloads based on sibling's 8.97): ~0.04-0.05ms kernel → score ~9.0-10.0x.
+- For long-sequence workloads: ~0.085ms (parent's uint4 benefit) → marginally better than pre-uint4.
+- Averaged target: **score ≥ 9.0** (beats current best sibling 8.97).
+
+**Critical correctness guards (DO NOT VIOLATE):**
+- Every batch handled by exactly ONE path. The `if (L <= 2048) return` guard in `compute_scores_kernel` AND the empty-segment in `generate_offsets_begin_end` AND the early-return in `extract_topk_kernel` must ALL be present simultaneously; missing any one introduces races or wrong output.
+- uint4 K-load guard: `if (lane_id < 8)` — only 8 lanes load, rest must not execute the load.
+- `__syncwarp()` after K load before dot-product.
+- `__syncthreads()` after Q preload and weights load.
+
+**Fallback:** If benchmark reveals correctness issue, keep emit_short_topk_kernel exactly as in sibling 2fb50fd2 and revert `compute_scores_kernel` K-load to the scalar `uint32_t` path from sibling 2fb50fd2 (still scores 8.97) — guaranteed-working baseline.

@@ -1,0 +1,10 @@
+[solution]
+name = "ML Team-dsa-topk-indexer"                   # Customize before submitting
+definition = "dsa_topk_indexer_fp8_h64_d128_topk2048_ps64"
+author = "ML Team"                                  # Customize before submitting
+
+[build]
+language = "cuda"                                      # python | triton | cuda
+entry_point = "kernel.cu::dsa_forward"
+destination_passing_style = false
+binding = "torch"                                     # torch | tvm-ffi

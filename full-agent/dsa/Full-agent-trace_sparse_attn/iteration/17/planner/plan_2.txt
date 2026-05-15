@@ -1,0 +1,28 @@
+Outline 2: Workspace-layout-only optimization for current split-K path
+
+Mathematical Formulation
+- Variables X:
+  1. O_tmp memory layout and vector packing granularity.
+  2. Read/write traversal order for split_k_compute and split_k_reduce.
+  3. Small-path threshold tau_small.
+- Constraints C:
+  1. Keep decomposition identical to parent: 64 split-K tiles over 32 sparse slots each.
+  2. Keep exact fp32 online softmax state per tile and exact reduction.
+  3. No changes to final mathematical operator.
+  4. All bf16 conversions explicit; output dtype/shape unchanged; base-2 lse unchanged.
+- Objective f(X): minimize workspace write/read overhead and alignment penalties under exact same computation graph.
+
+Solver Strategy
+- Deterministic memory-layout optimization.
+- Treat this as a constrained data-layout problem: choose a flattened indexing function that makes producer writes and consumer reads contiguous in the same order.
+- Use float4-packed storage O_tmp[T,16,S,128] logically, with identical arithmetic state.
+
+Validity Mechanism
+- Since math is unchanged, correctness is guaranteed by preserving the same recurrence and same exact reducer.
+- Safety repair step: if any packed alignment assumption is not naturally satisfied in implementation, fall back to scalar float indexing while preserving exact math.
+- Large fused path remains untouched.
+
+Why this solution?
+- Expected performance improvement: small but reliable reduction in temporary-memory inefficiency for tiny workloads.
+- Advantages: least invasive, strongest compile safety, easiest to implement correctly.
+- Disadvantages: likely lower upside than a structural redesign; may produce only marginal gains.

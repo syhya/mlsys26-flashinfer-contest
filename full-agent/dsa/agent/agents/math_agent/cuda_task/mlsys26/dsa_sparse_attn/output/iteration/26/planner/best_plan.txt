@@ -1,0 +1,235 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Beat the lineage best (iter20, score 12.63, sol `94736692`) — and definitively beat the parent (9.21) — by attacking the root-cause bottleneck identified in the parent's summary: **SM under-occupancy at T=1**. The dominant benchmark workload has `num_tokens=1`, so the split-K grid `(S=64, T=1) = 64 blocks` is occupancy-bound. We will multiply grid parallelism by **16x** by splitting per-head into separate blocks, taking the grid from 64 to 1024 blocks at T=1.
+
+**Selected Outline:** Plan 1 — Per-(token, partition, head) split-K with 1-warp-per-block.
+
+**Rationale for Selection:**
+1. **Root-cause attack:** The parent summary explicitly diagnosed: "in the dominant T=1 workload the split-K grid is `(S, T)`, so reducing S directly reduces SM occupancy ... small-T regime is grid-occupancy-bound." Increasing parallelism (the opposite of what the parent did) is the validated next move.
+2. **Math is byte-for-byte identical:** Each warp/head independently runs the exact same online-softmax recurrence over the same 32 sparse slots. The reducer math is unchanged. No new numerical paths.
+3. **Low risk:** This is a pure parallelization refactor of the iter20 winning kernel. No new dtypes, no new algorithms, no new libraries.
+4. **Determinism:** No randomness, no autotuning. One fixed grid/block geometry change.
+
+---
+
+## Phase 1: Mathematical Definition
+
+For each `(t, h)`:
+- `q = concat(q_nope[t,h], q_pe[t,h]) ∈ R^576`
+- For `j ∈ [0, 2048)`: `raw = sparse_indices[t,j]`. If `raw == -1`, neutral. Else `v_j = ckv_cache[raw/64, raw%64, :]`, `kpe_j = kpe_cache[raw/64, raw%64, :]`, `z_j = sm_scale * (<q_nope, v_j> + <q_pe, kpe_j>)`.
+- `out[t,h] = Σ softmax(z)_j v_j`, `lse[t,h] = log2(Σ exp(z_j))`.
+
+**Online softmax state** `(m, l, O ∈ R^512)`. Neutral = `(-INF, 0, 0)`.
+
+**Partitioning:** Split 2048 slots into S=64 partitions of 32 slots each. Each partition produces `(m_p, l_p, O_p)`. Exact merge:
+- `m = max_p m_p`
+- `scale_p = exp(m_p - m) if m_p ≠ -INF else 0`
+- `l = Σ l_p * scale_p`, `O = Σ O_p * scale_p`
+- `out = O/l if l > 0 else 0`; `lse = m·log2(e) + log2(l) if l>0 else -INF`
+
+**Variables X (the structural change):**
+- Compute grid: `(S=64, T, H=16)` instead of `(S=64, T)`.
+- Compute block: `(32, 1)` = 32 threads (1 warp) instead of `(32, 16)` = 512 threads.
+- Each block now handles exactly ONE `(t, s, h)` tuple.
+- At T=1: grid = 64*1*16 = **1024 blocks** vs previous 64 blocks (16x boost).
+
+**Constraints C:** Exact `-1` masking; FP32 accumulation; BF16 store; base-2 lse; explicit BF16 intrinsics; preserve ABI + `PYBIND11_MODULE`.
+
+---
+
+## Phase 2: The Optimization Loop (Deterministic Refactor)
+
+This is a deterministic structural refactor; no search. **Start from solution `94736692` (iter20, score 12.63), NOT from the parent (9.21).**
+
+### Step 1: Refactor `split_k_compute_kernel` — change launch geometry
+```cpp
+// Host-side launch:
+constexpr int S = 64;
+dim3 compute_grid(S, num_tokens, 16);   // was (S, num_tokens, 1)
+dim3 compute_block(32, 1, 1);           // was (32, 16, 1)
+split_k_compute_kernel<<<compute_grid, compute_block>>>(...);
+```
+
+### Step 2: Rewrite kernel body — single-warp, single-head
+```cpp
+__global__ void split_k_compute_kernel(...) {
+    int s = blockIdx.x;          // partition [0, 64)
+    int t = blockIdx.y;          // token
+    int h = blockIdx.z;          // head [0, 16)
+    int lane = threadIdx.x;      // [0, 32)
+
+    __shared__ alignas(16) int idx_shared[32];
+    __shared__ alignas(16) __nv_bfloat16 smem_Kc[32 * 512];   // 32KB
+    __shared__ alignas(16) __nv_bfloat16 smem_Kp[32 * 64];    // 4KB
+    // Total smem ≈ 36KB — fits comfortably.
+
+    // ---- Load q for this single head into registers ----
+    float2 q_n_f32[8];
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        __nv_bfloat162 q_val = *reinterpret_cast<const __nv_bfloat162*>(
+            &q_nope_ptr[t * 16 * 512 + h * 512 + j * 64 + lane * 2]);
+        q_n_f32[j] = __bfloat1622float2(q_val);
+    }
+    __nv_bfloat162 q_pe_v = *reinterpret_cast<const __nv_bfloat162*>(
+        &q_pe_ptr[t * 16 * 64 + h * 64 + lane * 2]);
+    float2 q_p_f32 = __bfloat1622float2(q_pe_v);
+
+    float2 O_reg[8];
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) O_reg[j] = make_float2(0.0f, 0.0f);
+    float m = -INFINITY;
+    float l = 0.0f;
+
+    // ---- Load 32 sparse indices (one warp covers all 32) ----
+    if (lane < 32) idx_shared[lane] = sparse_indices_ptr[t * 2048 + s * 32 + lane];
+    __syncwarp();
+
+    // ---- Stage 32 keys' Kc into smem ----
+    // 32 keys × 512 bf16 = 16384 bf16 = 1024 float4. Per warp = 1024/32 = 32 float4 per lane.
+    // Layout per lane: lane handles loads strided by 32.
+    #pragma unroll
+    for (int i = 0; i < 32; ++i) {
+        int idx = idx_shared[i];
+        if (idx != -1) {
+            // 32 lanes × float4 (8 bf16) = 256 bf16 per pass; need 2 passes per row
+            const float4* src = reinterpret_cast<const float4*>(&ckv_cache_ptr[idx * 512]);
+            float4* dst = reinterpret_cast<float4*>(&smem_Kc[i * 512]);
+            // 512 bf16 = 64 float4; 32 lanes × 2 = 64
+            dst[lane]      = src[lane];
+            dst[lane + 32] = src[lane + 32];
+        }
+    }
+    // ---- Stage Kp: 32 keys × 64 bf16 = 2048 bf16 = 128 float4. 32 lanes × 4 = 128 ----
+    #pragma unroll
+    for (int i = 0; i < 32; ++i) {
+        int idx = idx_shared[i];
+        if (idx != -1) {
+            const float4* src = reinterpret_cast<const float4*>(&kpe_cache_ptr[idx * 64]);
+            float4* dst = reinterpret_cast<float4*>(&smem_Kp[i * 64]);
+            // 64 bf16 = 8 float4; only need 8 lanes
+            if (lane < 8) dst[lane] = src[lane];
+        }
+    }
+    __syncwarp();
+
+    // ---- Online softmax over 32 keys (UNCHANGED math from iter20) ----
+    #pragma unroll
+    for (int i = 0; i < 32; ++i) {
+        if (idx_shared[i] == -1) continue;
+        float local_dot = 0.0f;
+        float2 k_f_reg[8];
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            __nv_bfloat162 k_n = *reinterpret_cast<const __nv_bfloat162*>(
+                &smem_Kc[i * 512 + j * 64 + lane * 2]);
+            float2 k_f = __bfloat1622float2(k_n);
+            k_f_reg[j] = k_f;
+            local_dot = fmaf(q_n_f32[j].x, k_f.x, local_dot);
+            local_dot = fmaf(q_n_f32[j].y, k_f.y, local_dot);
+        }
+        __nv_bfloat162 k_p = *reinterpret_cast<const __nv_bfloat162*>(
+            &smem_Kp[i * 64 + lane * 2]);
+        float2 k_pf = __bfloat1622float2(k_p);
+        local_dot = fmaf(q_p_f32.x, k_pf.x, local_dot);
+        local_dot = fmaf(q_p_f32.y, k_pf.y, local_dot);
+
+        // Warp reduction (single warp, no need for syncwarp before shfl)
+        #pragma unroll
+        for (int off = 16; off > 0; off /= 2)
+            local_dot += __shfl_down_sync(0xffffffff, local_dot, off);
+        float logit = __shfl_sync(0xffffffff, local_dot, 0) * sm_scale;
+
+        float m_new = fmaxf(m, logit);
+        float exp_diff = (m == -INFINITY) ? 0.0f : __expf(m - m_new);
+        float exp_logit = __expf(logit - m_new);
+        l = fmaf(l, exp_diff, exp_logit);
+        m = m_new;
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            O_reg[j].x = fmaf(exp_logit, k_f_reg[j].x, O_reg[j].x * exp_diff);
+            O_reg[j].y = fmaf(exp_logit, k_f_reg[j].y, O_reg[j].y * exp_diff);
+        }
+    }
+
+    // ---- Store partial state. Layout UNCHANGED: O_tmp[t, s, h, 512] ----
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        int base_idx = t * 64 * 16 * 512 + s * 16 * 512 + h * 512 + j * 64 + lane * 2;
+        *reinterpret_cast<float2*>(&O_tmp[base_idx]) = make_float2(O_reg[j].x, O_reg[j].y);
+    }
+    if (lane == 0) {
+        m_tmp[t * 16 * 64 + h * 64 + s] = m;
+        l_tmp[t * 16 * 64 + h * 64 + s] = l;
+    }
+}
+```
+
+### Step 3: Reducer kernel — UNCHANGED
+The `split_k_reduce_kernel` from iter20 (sol `94736692`) is byte-identical. Same `m_tmp[t,h,s]`, `l_tmp[t,h,s]`, `O_tmp[t,s,h,d]` layouts. Reducer reads partition_count=64. Use the iter20 version (no `l_s_smem`, inline `coeff = exp(m_s - m_max) / l_global` computed by lane 0).
+
+### Step 4: Large path (`dsa_forward_kernel` for num_tokens >= 128) — UNCHANGED
+Keep byte-identical to iter20.
+
+### Step 5: Host dispatch — UNCHANGED threshold
+```cpp
+if (num_tokens < 128) {
+    // small path with new (S, T, 16) grid
+} else {
+    // unchanged large fused path
+}
+```
+
+---
+
+## Phase 3: Safety Valve
+
+1. **Masking:** `if (idx_shared[i] == -1) continue;` and `if (idx != -1)` guards on all cache loads — preserved from iter20.
+2. **Empty partition:** If all 32 sparse slots in (t,s) are -1, kernel writes m=-INF, l=0, O=0 → reducer treats as neutral (already handled by `if (m_s_smem[i] != -INFINITY)` and `coeff > 0` checks).
+3. **Empty row:** Reducer writes 0 output and -INF lse if `m_max == -INFINITY || l_sum <= 0`.
+4. **Mathematical equivalence:** Each `(t, s, h)` computation is independent — no cross-thread dependence on the head axis existed before either (the previous block's 16 warps each computed a different head independently). This refactor is just relabeling `threadIdx.y` → `blockIdx.z`. **Bitwise-identical FP32 results guaranteed.**
+5. **Smem fits:** ~36KB per block, well under 48KB default limit. 32-thread blocks → very high theoretical occupancy.
+6. **Sync simplification:** Single warp = no `__syncthreads()` needed; use `__syncwarp()` (or none, since lane writes are read by same warp after the implicit warp-coherent ordering of shared memory writes within a warp — but `__syncwarp()` after the smem stores is safest).
+7. **ABI:** `dsa_forward` signature + `PYBIND11_MODULE` preserved exactly.
+8. **Fallback:** If anything goes wrong, the large path (num_tokens >= 128) is untouched; correctness can only be impacted on small-T which is the only regime we're modifying.
+
+---
+
+## Phase 4: Implementation Details
+
+**Headers:** `<torch/extension.h>`, `<cuda_bf16.h>`, `<cuda_fp16.h>`, `<tuple>`, `<math.h>`. No external deps.
+
+**Launch config:**
+- Small path: compute grid `(64, T, 16)`, block `(32, 1, 1)`. Reducer unchanged: `(T, 16)` × 128.
+- Large path (T≥128): unchanged.
+
+**Key constants:**
+- `S = 64` (NOT 32 — that regressed)
+- threshold = 128 (unchanged)
+
+**Smem per block:** `32*512*2 + 32*64*2 + 32*4 = 36992 bytes ≈ 36 KB`. Fits in 48KB default; allows ~1 block per SM at minimum (likely 2 with 36KB).
+
+**Grid size at T=1:** `64 × 1 × 16 = 1024 blocks`. With ~108 SMs on H100 / ~80 on A100, this gives ≥10 blocks per SM — finally well-saturated.
+
+**Expected gain:** Parent regressed to 9.21 because grid shrank to 32 blocks. Iter20 had 64 blocks → 12.63. This plan: **1024 blocks → expected score 14-18+**.
+
+**Executor instructions (be explicit):**
+1. **START from solution_id `94736692` (iter20, score 12.63), NOT from parent `1ca1abe1` (9.21).**
+2. Keep `S = 64` in host code. Restore all `* 64 *` strides.
+3. Change ONLY the compute kernel launch:
+   - Grid: `dim3(64, num_tokens, 16)` (was `dim3(64, num_tokens, 1)`)
+   - Block: `dim3(32, 1, 1)` (was `dim3(32, 16, 1)`)
+4. Inside `split_k_compute_kernel`: read `h = blockIdx.z` (was `threadIdx.y`). Remove all `tid = threadIdx.y * 32 + threadIdx.x` — there's only one warp now, so `tid == lane`.
+5. Adjust the smem load loops for Kc and Kp: previously 16 warps cooperated to stage 32 keys. Now ONE warp must stage them. Use the per-key inner loop shown above (each lane loads 2 float4 of Kc per key, 8 total lanes load Kp per key).
+6. Replace `__syncthreads()` with `__syncwarp()` (cheaper, same correctness for single-warp blocks).
+7. Reducer kernel and large-path fused kernel: byte-identical to iter20.
+8. Preserve `PYBIND11_MODULE` footer exactly.
+
+**Review checklist:**
+- Math: bitwise-equivalent to iter20 (just relabels parallel axis). ✓
+- Libraries: Standard CUDA only. ✓
+- Randomness: None. ✓
+- Implementable: Mechanical refactor of one kernel. ✓
+- Constraints preserved: BF16 intrinsics, FP32 accum, base-2 lse, -1 masking, ABI. ✓
+- Attacks the validated bottleneck (T=1 grid occupancy). ✓
+- Decouples structure (grid geometry) from parameters (math unchanged). ✓

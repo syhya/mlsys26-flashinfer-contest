@@ -1,0 +1,76 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Maximize the performance of the GDN prefill forward pass kernel. The prior iteration's executor failed to fully remove `v`, `a`, and `b` from shared memory despite the planner's intent. This iteration will strictly enforce the hybrid register/shared memory model, utilize `__shfl_sync` for scalar broadcasting, and introduce Instruction-Level Parallelism (ILP) reordering to hide arithmetic latency.
+
+**Selected Outline:** Strict Register-Level Double Buffering with ILP Staggering
+
+**Rationale for Selection:**
+1.  **Mathematical Optimization:** Removing `v`, `a`, and `b` from the `SharedMem` struct reduces shared memory footprint, avoids L1 bank conflicts entirely for scalars, and eliminates unnecessary `__syncthreads()` dependencies.
+2.  **Instruction-Level Parallelism (ILP):** In the inner `#pragma unroll 32` loop, computing `o_val0 = fmaf(q_vec.x, s_vec.x, o_val0)` immediately after `s_vec.x = fmaf(...)` causes a 4-cycle Read-After-Write (RAW) hardware stall. Staggering the independent calculations breaks this dependency chain and increases IPC (Instructions Per Cycle).
+
+**Best Plan:**
+
+1.  **Phase 1: Strict Memory Model Enforcement**
+    *   **Shared Memory Restructuring**: You MUST redefine the `SharedMem` union to strictly exclude `v`, `a`, and `b`. Use this exact definition:
+        ```cpp
+        union SharedMem {
+            float state_transpose[128][33]; // Padded for initialization
+            struct alignas(16) {
+                alignas(16) float q[2][128];
+                alignas(16) float k[2][128];
+            } tokens;
+        };
+        ```
+    *   **Register Variables**: Declare thread-local registers for double-buffering the scalars before the loop:
+        ```cpp
+        float v_val, next_v_val;
+        float a_val, next_a_val;
+        float b_val, next_b_val;
+        ```
+
+2.  **Phase 2: The Optimization Loop (Register Pipelining & Warp Broadcast)**
+    *   **Prologue ($t = seq\_start$)**:
+        *   Load `q` and `k` into `smem.tokens.q[0]` and `smem.tokens.k[0]` as before.
+        *   Load `v` directly into the register: `v_val = __bfloat162float(v[v_idx]);`.
+        *   **Warp-Shuffle Broadcast**: The warp leader (lane 0) loads `a` and `b` from global memory and broadcasts them to all threads using explicit synchronisation. MUST use this exact pattern:
+            ```cpp
+            if (tid % 32 == 0) { // Warp leader
+                size_t ab_idx = (size_t)t * 8 + h;
+                a_val = __bfloat162float(a[ab_idx]);
+                b_val = __bfloat162float(b[ab_idx]);
+            }
+            a_val = __shfl_sync(0xffffffff, a_val, 0);
+            b_val = __shfl_sync(0xffffffff, b_val, 0);
+            ```
+    *   **Prefetching ($t+1 < seq\_end$)**: Apply the exact same pattern to load `next_v_val`, `next_a_val`, and `next_b_val` directly into registers, avoiding shared memory.
+
+3.  **Phase 3: The "Safety Valve" - ILP Reordering (CRITICAL)**
+    *   **Logic**: During the state update and output computation, you MUST reorder the FMA instructions to prevent hardware stalls. Do not compute `o_val` immediately after its corresponding `s_vec` component.
+    *   **Execution**: Inside the `#pragma unroll 32` loop:
+        ```cpp
+        // 1. Compute all new state components FIRST (independent operations)
+        float s_new_x = fmaf(k_vec.x, delta_v, g * s_vec.x);
+        float s_new_y = fmaf(k_vec.y, delta_v, g * s_vec.y);
+        float s_new_z = fmaf(k_vec.z, delta_v, g * s_vec.z);
+        float s_new_w = fmaf(k_vec.w, delta_v, g * s_vec.w);
+
+        // 2. Compute all output components SECOND (hides latency of step 1)
+        o_val0 = fmaf(q_vec.x, s_new_x, o_val0);
+        o_val1 = fmaf(q_vec.y, s_new_y, o_val1);
+        o_val2 = fmaf(q_vec.z, s_new_z, o_val2);
+        o_val3 = fmaf(q_vec.w, s_new_w, o_val3);
+
+        // 3. Write back to state register
+        s_vec.x = s_new_x; s_vec.y = s_new_y; 
+        s_vec.z = s_new_z; s_vec.w = s_new_w;
+        state_reg_f4[k_idx_4] = s_vec;
+        ```
+
+4.  **Phase 4: Implementation Details & Boundary Fallbacks**
+    *   **Math Intrinsics**: Retain the stable softplus projection: `float sp_x = (x > 20.0f) ? x : log1pf(__expf(x));`.
+    *   **Advance Pipeline**: At the end of the loop, perform register shifting: `v_val = next_v_val; a_val = next_a_val; b_val = next_b_val;` and toggle `buffer_idx ^= 1;`.
+    *   **Safety Fallbacks**: Keep the C++ `.contiguous()` checks to guarantee 16-byte alignment. Retain the fallback `if (scale == 0.0f) { scale = 1.0f / std::sqrt(128.0f); }`. Ensure `__shfl_sync` uses the full mask `0xffffffff`.
+
+**Expected Performance Improvement:**
+1.  Elimination of scalar shared memory transactions reduces L1 bandwidth pressure.
+2.  ILP FMA reordering hides the 4-cycle RAW latency, significantly increasing the IPC of the arithmetic-heavy inner loop, pushing the speedup beyond 500x.

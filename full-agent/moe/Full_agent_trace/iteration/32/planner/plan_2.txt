@@ -1,0 +1,15 @@
+Plan 2: Take a96d6608 foundation + fuse routing pipeline into Triton kernel to reduce small-T launch overhead.
+
+Variables: per-token expert assignment, weights, CSR offsets.
+Constraints: DeepSeek topology (sigmoid→group top-2 sum→top-4 groups→global top-8), weights normalized from raw sigmoid.
+Objective: reduce host-side kernel launches (~8 PyTorch ops) to 1-2 Triton kernels.
+
+Solver: Custom Triton kernels with per-token processing + atomic CSR construction.
+
+Validity:
+- Keep Python fallback if T > threshold
+- Unit-test routing output matches torch.topk implementation
+- Preserve all FP8 TC GEMMs unchanged
+
+Expected: Small-T workloads (decode, T=7) dominated by CPU launch overhead. Routing takes ~200-400μs out of ~1.5ms total. Fused routing could save 0.2-0.4ms → potentially 17-18x.
+Advantages: High upside for decode workloads. Disadvantages: High implementation complexity, correctness risk for routing math (floating-point topk ties, bias handling, group scoring). HIGH RISK of regression.

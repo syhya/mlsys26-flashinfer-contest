@@ -1,0 +1,30 @@
+### Outline 3: Two-Path Adaptive Algorithm with Exact Small-Batch Fallback and Large-Batch Triton Bucketing
+
+**Mathematical Formulation**
+- **Variables (X):**
+  - Routing/dispatch tensors as in other plans.
+  - Batch regime partition variable `r_e in {small, large}` for each expert based on token count `Tk_e`.
+  - For large experts, tile config variables from a finite candidate set.
+- **Constraints (C):**
+  - Exact routing semantics and FP32 accumulation.
+  - Small-batch path must avoid under-occupied grouped kernels.
+  - Large-batch path must honor block-scale FP8 scaling with `BK=128`.
+- **Objective (f(X))**
+  - Minimize `sum_e time_e(r_e)` subject to exactness.
+
+**Solver Strategy**
+- Use a **rule-based deterministic partition solver**:
+  1. Compute `Tk_e` for each expert.
+  2. If `Tk_e < threshold`, process with safe exact dequant + `torch.mm` path.
+  3. Else use Triton grouped kernels.
+- Threshold can be tuned deterministically from a tiny candidate set `[8,16,32,64]`.
+
+**Validity Mechanism**
+- Exact fallback for small `Tk_e` guarantees correctness on the hardest regime.
+- Large-path kernels include strict masks, int64 pointer math, and bounded tile candidates.
+- Final output always assembled with `index_add_` into FP32 then cast to BF16.
+
+**Why this solution?**
+- **Expected improvement:** may improve decode/small-T behavior where grouped Triton kernels underperform.
+- **Advantages:** robust across variable `T`, decouples structure finding from parameter tuning.
+- **Disadvantages:** threshold heuristic may leave performance on the table; more branching complexity.

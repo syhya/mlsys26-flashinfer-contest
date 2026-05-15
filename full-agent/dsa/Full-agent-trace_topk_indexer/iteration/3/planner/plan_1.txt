@@ -1,0 +1,7 @@
+Mathematical Formulation:
+- Variables (X): Tile sizes (T_q, T_k), thread block dimensions.
+- Objective (f(X)): Minimize HBM read/write traffic.
+- Constraints (C): Shared memory capacity <= 100KB, max threads per block <= 1024.
+Solver Strategy: Fused FP8 Matmul with Warp-Level Top-K Reduction. Use CUTLASS/CuTe for MMA, and a thread-local priority queue for Top-K.
+Validity Mechanism: Strict bounds checking against `seq_lens` to mask out invalid tokens before reduction.
+Why this solution?: Fusing reduces HBM roundtrips, but a 2048-element TopK queue per warp is memory-intensive and may cause register spilling.

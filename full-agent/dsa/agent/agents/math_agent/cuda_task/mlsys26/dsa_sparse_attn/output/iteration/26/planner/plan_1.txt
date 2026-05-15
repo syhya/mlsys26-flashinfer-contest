@@ -1,0 +1,9 @@
+Plan 1: Per-head split-K — increase grid from (S,T) to (S,T,H)
+- Start from iter20 baseline (score 12.63, sol 94736692).
+- Change compute kernel grid from (S=64, T) with 16 warps/block to (S=64, T, 16) with 1 warp/block (32 threads).
+- Each block now handles ONE (t, s, h). T=1 → 1024 blocks instead of 64. ~16x grid parallelism boost on small-T.
+- Drastically reduces shared memory per block (only 32 keys' Kc/Kp staged once for that single head).
+- Reducer kernel updated for new layout with same (t, h) merge but indexing partition_count=64 unchanged.
+- Risk: per-block smem now redundant across heads of same (t,s). Still small per-block (32*512*2 = 32KB BF16 + 32*64*2 = 4KB).
+- Math: identical online-softmax per partition. No change to reduce kernel logic.
+- Expected: large speedup on T=1 dominant workload.

@@ -1,0 +1,13 @@
+**Mathematical Formulation**:
+Variables $X$: Grid size multiplier (splitting 16 heads into $X$ groups).
+Constraints $C$: Block size $128 \le threads \le 1024$. Shared memory $\le 48$ KB.
+Objective $f(X)$: Maximize SM occupancy (minimize empty SMs).
+
+**Solver Strategy**:
+Use a deterministic grid search (conceptually equivalent to `scipy.optimize.brute`) to find $X=4$ as the optimal split, giving 4 heads per block and 128 threads.
+
+**Validity Mechanism**:
+A mathematical modulo check: `threadIdx.y` must strictly bound to $0 \le y < 4$ and `h_group` to $0 \le z < 4$, guaranteeing no out-of-bounds access on the 16 heads.
+
+**Why this solution?**:
+Dramatically increases waves per SM from 0.22 to 0.88+, hiding latency. No randomness needed, strictly analytical.

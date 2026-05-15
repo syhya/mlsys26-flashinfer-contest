@@ -1,0 +1,30 @@
+Outline 1: Robust fused online-softmax kernel with early-exit compaction and safer dispatch
+
+Mathematical Formulation:
+- Variables X:
+  1. Dispatch threshold tau between single-pass fused path and split/reduction path.
+  2. Tile size B over sparse slots (candidate B in {16,32,64}).
+  3. Per-block head grouping g in {1,2,4,8,16} warps/block.
+  4. Shared-memory staging decision s in {stage_keys, direct_load}.
+- Constraints C:
+  1. Exact semantics: for each valid sparse index idx != -1, score z_j = sm_scale * (q_nope·k_nope + q_pe·k_pe).
+  2. Invalid idx = -1 contributes zero and is excluded from softmax normalization.
+  3. All accumulators m,l,O are FP32; output cast to BF16 only on final store.
+  4. lse = log2(sum_j exp(z_j)).
+  5. Entry point signature and PYBIND11 binding fixed.
+- Objective f(X): minimize latency while preserving correctness score >= 1.0.
+
+Solver Strategy:
+- Deterministic finite search over a tiny candidate set of (tau,B,g,s).
+- This is a bounded discrete optimization solved by exhaustive enumeration over a handful of architecture-safe options, not random tuning.
+
+Validity Mechanism:
+- Use exact online-softmax recurrence per row/head.
+- Safety repair: if a row has no valid indices, force output=0 and lse=-INF.
+- Enforce explicit BF16 conversion intrinsics only.
+- If any optimized path is risky, fall back to the known-good parent fused kernel.
+
+Why this solution?
+- Advantages: lowest implementation risk, directly builds on the current best kernel, likely preserves score >= 1.0.
+- Expected improvement: reduce wasted work on padded rows by compacting valid chunks / early-exit when all 32 indices in a tile are -1; tighten dispatch for tiny token counts.
+- Disadvantages: likely incremental rather than transformational speedup; may not beat current best if overheads are already tiny.

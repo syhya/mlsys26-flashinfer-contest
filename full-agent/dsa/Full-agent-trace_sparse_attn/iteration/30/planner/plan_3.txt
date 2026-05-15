@@ -1,0 +1,10 @@
+Plan 3: Adopt the proven best-in-database refinements onto the parent.
+- The parent (score 4.51) is missing key refinements present in the lineage's best (score 12.63):
+  (a) tile_has_valid early-skip flag in fused path (avoids loading empty tiles)
+  (b) Reducer eliminates l_s_smem; computes coeff = scale/l_global directly in lane-0 loop
+  (c) lse base-2 boundary check (m==-INF || l<=0) for safety
+  (d) Use #pragma unroll 1 on the tile loop with explicit early-skip
+- Apply these to the parent. Pure cherry-pick; mathematically identical except added masking branches.
+- Validity: All changes preserve exact online-softmax math. Empty rows handled.
+- Expected: jump from 4.51 → 11+ (matching siblings in database).
+- Library: standard CUDA only.

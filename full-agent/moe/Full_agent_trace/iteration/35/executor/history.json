@@ -1,0 +1,557 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_402",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/solution_402.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/evaluation_402.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 31.827069520950317\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"31.83s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_49e",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/solution_49e.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/evaluation_49e.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 307.28169322013855\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"307.28s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_660",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/solution_660.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/evaluation_660.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 34.49695110321045\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"34.50s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_6f7",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/solution_6f7.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/evaluation_6f7.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 37.800023555755615\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"37.80s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_9fc",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/solution_9fc.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/evaluation_9fc.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 44.33888006210327\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"44.34s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_d85",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/solution_d85.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/evaluation_d85.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 38.85400748252869\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"38.85s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_e57",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/solution_e57.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/evaluation_e57.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 38.22859597206116\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"38.23s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_fc2",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/solution_fc2.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/evaluation_fc2.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 31.975421667099\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"31.98s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_ffe",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/solution_ffe.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/0_0/evaluation_ffe.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 46.075987815856934\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"46.08s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  },
+  {
+    "round": 1,
+    "candidates": [
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_18b",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/solution_18b.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/evaluation_18b.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 55.64054608345032\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"55.64s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_19a",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/solution_19a.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/evaluation_19a.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 43.57395672798157\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"43.57s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_253",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/solution_253.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/evaluation_253.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 50.212395668029785\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"50.21s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_554",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/solution_554.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/evaluation_554.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 43.75576615333557\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"43.76s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_5c0",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/solution_5c0.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/evaluation_5c0.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 44.085716247558594\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"44.09s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_95d",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/solution_95d.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/evaluation_95d.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 78.96643447875977\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"78.97s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_a32",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/solution_a32.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/evaluation_a32.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 48.990495681762695\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"48.99s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_e16",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/solution_e16.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/evaluation_e16.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 48.22335600852966\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"48.22s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_fe2",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/solution_fe2.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_0/evaluation_fe2.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 46.5886332988739\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"46.59s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_08d",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/solution_08d.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/evaluation_08d.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 36.25361204147339\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"36.25s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_0ee",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/solution_0ee.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/evaluation_0ee.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 111.77401065826416\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"111.77s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_0ff",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/solution_0ff.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/evaluation_0ff.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 46.38470816612244\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"46.38s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_362",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/solution_362.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/evaluation_362.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 53.36124348640442\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"53.36s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_4c8",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/solution_4c8.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/evaluation_4c8.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 48.82237792015076\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"48.82s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_586",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/solution_586.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/evaluation_586.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 50.937659740448\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"50.94s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_82a",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/solution_82a.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/evaluation_82a.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 47.84019660949707\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"47.84s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_db5",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/solution_db5.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/evaluation_db5.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 38.78771710395813\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"38.79s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_e33",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/solution_e33.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/1_1/evaluation_e33.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 53.49695825576782\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"53.50s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  },
+  {
+    "round": 2,
+    "candidates": [
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_18c",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/solution_18c.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/evaluation_18c.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 62.8203387260437\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"62.82s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_206",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/solution_206.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/evaluation_206.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 110.2081949710846\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"110.21s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_45c",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/solution_45c.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/evaluation_45c.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 62.47277879714966\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"62.47s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_6c0",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/solution_6c0.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/evaluation_6c0.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 54.37777042388916\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"54.38s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_704",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/solution_704.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/evaluation_704.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 70.24874758720398\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"70.25s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_c65",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/solution_c65.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/evaluation_c65.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 64.30069947242737\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"64.30s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_da1",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/solution_da1.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/evaluation_da1.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 60.105058431625366\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"60.11s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_eca",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/solution_eca.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/evaluation_eca.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 58.180490255355835\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"58.18s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_f08",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/solution_f08.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_0/evaluation_f08.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 64.65819096565247\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"64.66s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_026",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/solution_026.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/evaluation_026.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 65.91293215751648\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"65.91s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_0a6",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/solution_0a6.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/evaluation_0a6.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 60.11761283874512\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"60.12s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_2b2",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/solution_2b2.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/evaluation_2b2.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 59.90337514877319\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"59.90s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_392",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/solution_392.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/evaluation_392.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 62.544909715652466\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"62.54s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_6bc",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/solution_6bc.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/evaluation_6bc.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 67.59147381782532\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"67.59s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_835",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/solution_835.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/evaluation_835.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 57.458521366119385\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"57.46s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_c74",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/solution_c74.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/evaluation_c74.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 106.8971586227417\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"106.90s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_d89",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/solution_d89.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/evaluation_d89.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 48.77285385131836\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"48.77s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_eea",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/solution_eea.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_1/evaluation_eea.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 59.018524169921875\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"59.02s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_216",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/solution_216.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/evaluation_216.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 66.77478694915771\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"66.77s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_358",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/solution_358.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/evaluation_358.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 69.65769052505493\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"69.66s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_558",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/solution_558.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/evaluation_558.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 60.62950253486633\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"60.63s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_607",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/solution_607.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/evaluation_607.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 62.822216510772705\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"62.82s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_adf",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/solution_adf.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/evaluation_adf.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 62.19979238510132\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"62.20s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_b2b",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/solution_b2b.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/evaluation_b2b.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 61.14793944358826\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"61.15s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_c8d",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/solution_c8d.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/evaluation_c8d.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 68.6666259765625\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"68.67s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_cb6",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/solution_cb6.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/evaluation_cb6.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 80.91138362884521\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"80.91s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_d3b",
+        "solution_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/solution_d3b.py",
+        "evaluation_file_path": "output/6cb8b0be-5c2c-4a4c-a122-94d99455d289/35/executor/2_2/evaluation_d3b.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: \",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 50.9551568031311\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"50.96s\",\n    \"error\": \"INCORRECT_NUMERICAL: \"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

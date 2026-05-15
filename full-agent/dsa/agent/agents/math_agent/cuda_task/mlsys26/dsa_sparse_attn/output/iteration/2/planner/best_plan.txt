@@ -1,0 +1,34 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a Dynamic Multi-path Dispatch CUDA kernel (Split-K Sequence-Level Parallelism) to solve the severe SM underutilization at small batch sizes while preserving the highly optimized Tiled FlashAttention architecture for large batches.
+
+**Selected Outline:** Outline 2: Dynamic Multi-path Dispatch (Split-K Sequence-Level Parallelism)
+
+**Rationale for Selection:**
+1. Directly addresses the NCU profiler's critical finding: small batch sizes launch too few blocks (e.g., 1 token = 1 block = 0.05 waves), leaving up to 99% of SMs idle.
+2. Mathematically guarantees numerical correctness by exactly reproducing the associative FP32 online softmax reduction across multiple thread blocks.
+3. Decouples structural scheduling (dispatch logic) from dense computation (vectorized tiling).
+
+**Best Plan:**
+1. **Phase 1: Mathematical Definition & Hardware Mapping (Dynamic Dispatch)**
+    * **Inputs:** Tensors $Q_{nope}$, $Q_{pe}$, $K$, $K_{pe}$, and sparse indices.
+    * **Variables:** Batch size/Token count ($N$), Split Factor ($S$).
+    * **Function:** `dispatch_logic(N)`
+    * **Constraints:** To fill ~100 SMs, $N \times S \ge 128$. If $N \ge 128$, $S=1$ (Single-pass). If $N < 128$, $S=16$ or $S=32$ (Split-K). Let's define $S=32$ for the Split-K path to process $2048/32 = 64$ keys per block.
+    * **Objective:** Ensure the total grid size fully saturates the GPU's multiprocessors regardless of the input token count.
+
+2. **Phase 2: The Optimization Loop (Split-K Implementation)**
+    * **Algorithm:** Two-Pass FlashAttention.
+    * **Step 1 (Workspace Allocation):** In the C++ entry point, dynamically allocate intermediate tensors using PyTorch if $N < 128$: `O_tmp` ($[N, S, 16, 512]$) and `lse_tmp` ($[N, S, 16]$). Both MUST be `float32` to prevent precision loss.
+    * **Step 2 (Compute Pass):** Launch the `split_k_compute_kernel` with grid $(S, N, 1)$ and block $(32, 16, 1)$. Each block computes its specific sub-chunk of the 2048 keys. It calculates the unnormalized local attention sum $O_s$ and the local log-sum-exp tracking states $m_s$ and $l_s$. It stores these mathematically exact FP32 states into the workspace.
+    * **Step 3 (Reduction Pass):** Launch the `split_k_reduce_kernel` with grid $(N, 16, 1)$ and block $(32, 1, 1)$. This kernel reads the $S$ sub-chunks for a specific token and head, computes the global maximum $m_{global} = \max_s(m_s)$, normalizes the outputs $O = \frac{\sum_s O_s \exp(m_s - m_{global})}{\sum_s \exp(lse_s - m_{global})}$, and writes the final BF16 output.
+
+3. **Phase 3: The "Safety Valve" (CRITICAL)**
+    * **NaN Guard (Padding):** In the reduction pass, properly handle $-\infty$ from padding. If all $S$ chunks are padded, the global max is $-\infty$. The computation `expf(-INFINITY - -INFINITY)` produces NaN, so strictly enforce an explicit check: `if (m_global == -INFINITY) { /* write zero */ }`.
+    * **Base-2 LSE Conversion:** The reduction pass must strictly compute the LSE in base-2 mathematically at the very end: $LSE = m_{global} \times 1.44269504f + \log_2(\sum \dots)$ to match PyTorch perfectly.
+    * **Exact Match Fallback:** Retain the original single-pass kernel (`dsa_forward_kernel`) exactly as it is from the parent for the $N \ge 128$ case, ensuring performance is not degraded for large workloads.
+
+4. **Phase 4: Implementation Details**
+    * **Libraries:** Standard `<torch/extension.h>`, `<cuda_bf16.h>`, `<cuda_fp16.h>`.
+    * **Dispatch Logic:** Inside the `dsa_forward` entry function, add explicit branching: `if (num_tokens < 128) { /* execute Split-K */ } else { /* execute single-pass */ }`.
+    * **Vectorization:** Keep the 128-bit `float4` vectorized loads for the KV caches and `__nv_bfloat162` register blocking for the queries, as they successfully maximized cache bandwidth in the parent. Convert to `__nv_bfloat162` only at the very end of the Reduction Pass.

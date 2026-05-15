@@ -1,0 +1,34 @@
+### Outline 1: Frontier Rebase + Worklist GEMM2 + Exact Fallback
+
+Mathematical Formulation
+- Variables X:
+  - Routing outputs: topk expert ids E[t, r], routing weights W[t, r]
+  - Dispatch structure: sorted token list S, expert offsets P, worklist L = {(e, tile_start)}
+  - GEMM1 tile params theta1 = (BM1, BN1, BK1, warps1, stages1)
+  - GEMM2 tile params theta2 = (BM2, BN2, BK2, warps2, stages2)
+  - Intermediate tensors G1 and Y
+- Constraints C:
+  - Exact DeepSeek routing semantics must match reference topology.
+  - FP32 accumulation for GEMM1/GEMM2 accumulators.
+  - Output dtype bfloat16, shape [T, 7168].
+  - FP8 dequant uses per-128 block scales with original global token indices for A scales.
+  - No CPU loops over GPU tensors except at most one scalar sync for grid sizing.
+- Objective f(X): minimize total latency = routing + dispatch + GEMM1 + SwiGLU + GEMM2 + scatter, subject to correctness score >= 1.0.
+
+Solver Strategy
+- Deterministic algorithm engineering with finite candidate selection:
+  1. Rebase on global frontier code pattern.
+  2. Replace expert-grid GEMM2 with worklist-based grouped kernel to eliminate empty CTAs.
+  3. Keep routing in PyTorch vectorized form for safety.
+  4. Use Triton autotune over a finite config set as the solver for tile parameters.
+
+Validity Mechanism
+- Safety fallback path: if worklist kernel preconditions fail or any tensor is empty, fall back to the parent grouped_gemm2 path.
+- Preserve exact routing equations from proven lineage.
+- Keep GEMM1 body and index_add scatter semantics unchanged.
+- Use zeros initialization for all outputs to avoid uninitialized tail errors.
+
+Why this solution?
+- Expected improvement: medium to high, because parent summary identifies empty-CTA overhead as an untapped lever.
+- Advantages: changes are localized to GEMM2 dispatch, preserving correctness-critical routing/math.
+- Disadvantages: more implementation complexity than pure autotune expansion; worklist indexing bugs are possible.

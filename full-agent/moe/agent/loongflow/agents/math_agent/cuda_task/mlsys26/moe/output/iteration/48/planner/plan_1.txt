@@ -1,0 +1,30 @@
+Outline 1: Worklist-based grouped GEMM2 + parent GEMM1/routing preservation
+
+Mathematical Formulation
+- Variables (X):
+  1. Routing outputs X_r = {sorted_tokens, sorted_experts, sorted_weights, expert_counts, expert_offsets}.
+  2. GEMM1 activations X_g1 in R^[Tk_total, 4096].
+  3. Compact GEMM2 worklist X_w = {(e, tile_m)} over active expert-token tiles only.
+  4. Output tensor X_o in R^[T,7168].
+- Constraints (C):
+  1. Numerical correctness: all accumulations in fp32; final cast only to bf16.
+  2. Routing constraints: exact DeepSeek top-4 groups, top-8 experts, local expert filter.
+  3. FP8 dequant constraints: use block size 128; hidden state and weight scales must be looked up by correct block index and global token id.
+  4. Dispatch validity: worklist contains exactly all active (expert, token_tile) pairs and no empty tiles.
+  5. Memory validity: int64 pointer arithmetic for expert-strided weights.
+- Objective f(X): minimize runtime latency by reducing empty CTAs and preserving proven-correct parent kernels where possible.
+
+Solver Strategy
+- Use deterministic combinational optimization, not stochastic search.
+- Build dispatch structures using vectorized tensor operations: torch.bincount, cumsum, repeat_interleave, integer division for tile ids.
+- Use a compact worklist as the discrete solver output for GEMM2 scheduling.
+
+Validity Mechanism
+- Safety valve: if worklist construction fails or active_tile_count == 0, fall back to parent expert-grid GEMM2 launch exactly.
+- Enforce constraints by deriving worklist only from expert_offsets/counts; no Python loops over GPU tensors.
+- Keep routing and GEMM1 identical to parent to preserve known-correct behavior.
+
+Why this solution?
+- Expected improvement: parent wastes CTAs on experts with few/no tokens because grid uses all E_local experts and all row tiles up to max_count. Worklist removes empty launches, especially on skewed routing.
+- Advantages: low algorithmic risk; avoids atomic scatter regression from failed child; directly targets task hint #7.
+- Disadvantages: added launch-prep code and one extra small buffer; speedup may be modest if routing is already balanced.

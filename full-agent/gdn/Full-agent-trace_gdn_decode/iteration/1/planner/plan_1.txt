@@ -1,0 +1,8 @@
+Plan 1: Fully Parallelized V-Dimension Mapping with Algebraic Reordering
+
+Mathematical Formulation:
+Variables (X): GPU Grid size, Block size, memory read pattern.
+Objective f(X): Maximize parallelization across the V dimension to hide latency and minimize kernel execution time.
+Constraints: Maintain strict correctness (r_tol=1e-2), respecting the `k-last` state update dependencies.
+Solver Strategy: Mathematical algebraic simplification of `h_state` update. Since `dv` only depends on `v_idx` (derived from `beta * (v_h[v] - old_v[v])`), the V dimension is completely independent.
+Validity Mechanism: Exact algebraic rearrangement `scale * (qh + dv * qk_dot)` strictly enforces correctness while decoupling the inner loop.

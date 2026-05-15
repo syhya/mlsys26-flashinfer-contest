@@ -1,0 +1,6 @@
+Plan 2: Software-pipelined K-load with cp.async + activate idle lanes.
+- Use 32 lanes per warp (full warp) cooperatively to load 2 tokens per warp per iteration via uint4 (16 lanes per token).
+- Use cp.async to overlap K-load of iter+1 with dot-product of iter.
+- Keep parent's transposed Q smem layout for head-parallel dot product.
+- Use scale_smem array. Single CUB segmented sort unchanged.
+- Risk: cp.async correctness; complex but high upside (~15-25% kernel reduction).

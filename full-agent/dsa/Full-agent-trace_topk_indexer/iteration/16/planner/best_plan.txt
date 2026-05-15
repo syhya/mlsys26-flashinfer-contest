@@ -1,0 +1,209 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Recover from the parent's regression (9.364, current) by reverting to the proven 3-tier configuration that scored 9.564, then add ONE small low-risk micro-optimization with a hard fallback. Preserve correctness=1.0.
+
+**Selected Outline:** Plan 2 — Strict Revert to grandparent `dc51d5fc` (3-tier S/M/L, no TIER-L2). This is the **algorithmically most robust** option because the exact source code is known to score 9.564 with correctness=1.0 across 12 workloads. Risk = effectively zero.
+
+**Rationale for Selection:**
+1. **Mathematical guarantee:** The grandparent solution `dc51d5fc` (3-tier dispatch S/M/L) is empirically proven (correctness=1.0, score 9.564, 12/12 workloads passed). Re-emitting it byte-equivalent gives a deterministic +2.1% over the current regressed parent (9.364).
+2. **Per parent summary's TOP recommendation:** *"Recommend Stripping: Remove the unconditional TIER-L2 launch and revert to the 3-tier parent. This alone should restore 9.564."*
+3. **Zero new code paths** = zero new failure modes. The previous iteration regressed precisely because TIER-L2 was launched unconditionally without workload evidence; removing it is the surgical, mathematically-correct fix.
+4. **Decouples Structure (3 disjoint tiers by L) from Parameters (CUB primitives are exact algorithms)**: each tier handles its L-band via a deterministic, exact top-K primitive.
+5. **Downside-protected:** worst-case = 9.564 (matches grandparent). No fusion / radix-select speculation that could regress further.
+
+---
+
+### Phase 1: Mathematical Definition
+
+For each batch `b`:
+- Let `L = seq_lens[b]`, `K = TOPK = 2048`, `P = page_size = 64`, `N = max_num_pages * 64`.
+- Per-token score: `score[b, p·64 + t] = Σ_h ReLU(scale[t] · Σ_d Q[b,h,d] · fp8(K[t,d])) · weights[b,h]`, valid iff `p·64 + t < L`.
+- Output `topk_indices[b, 0..min(K,L)-1]` = any permutation of indices of top-`min(K,L)` scores; remaining positions = -1.
+- Global index encoding: `block_table[b, p] · 64 + t`.
+
+**Strict 3-tier partition (mutually exclusive, exhaustive):**
+
+| Tier | Condition           | Kernel                                              |
+|------|---------------------|-----------------------------------------------------|
+| S    | `L ≤ 2048`          | `emit_short_topk_kernel` (direct enumeration)       |
+| M    | `2048 < L ≤ 6144`   | `block_topk_kernel<256, 24>` (CUB BlockRadixSort)   |
+| L    | `L > 6144`          | `cub::DeviceSegmentedRadixSort` + `extract_topk`    |
+
+Constants:
+```cpp
+constexpr int TOPK_CONST = 2048;
+constexpr int L_MED_MAX  = 6144;
+constexpr int BT_THREADS = 256;
+constexpr int BT_ITEMS   = 24;   // 256 * 24 = 6144
+static_assert(BT_THREADS * BT_ITEMS >= L_MED_MAX, "TIER-M buffer too small");
+```
+
+---
+
+### Phase 2: The Optimization Loop (Kernel Architecture — exact replica of `dc51d5fc`)
+
+**A. `cvt_fp8x4_to_float4(uint32_t)`** — inline device helper. Converts packed 4× FP8-e4m3 to float4 via `__nv_fp8_e4m3` union cast.
+
+**B. `emit_short_topk_kernel`** (TIER-S):
+```cpp
+__global__ void emit_short_topk_kernel(
+    const int32_t* seq_lens, const int32_t* block_table,
+    int32_t* topk_indices, int max_num_pages, int topk)
+{
+    int b = blockIdx.x; int L = seq_lens[b];
+    if (L > topk) return;
+    for (int i = threadIdx.x; i < topk; i += blockDim.x) {
+        int v = -1;
+        if (i < L) {
+            int p = i >> 6, t = i & 63;
+            v = block_table[b * max_num_pages + p] * 64 + t;
+        }
+        topk_indices[b * topk + i] = v;
+    }
+}
+```
+Launch: `<<<batch_size, 256>>>`.
+
+**C. `compute_scores_kernel`** — verbatim from grandparent. 256 threads/block, grid `(max_num_pages, batch_size)`. Guards: `if (seq_len <= topk) return;` and `if (p*64 >= seq_len) return;`. Uses `q_smem_f[128][65]` (transposed-Q with +1 padding to avoid bank conflicts), `k_smem[8][128]`, `weights_smem[64]`. 8 warps each handle 8 token rows; per-row dot-product against 64 heads, ReLU, weighted reduction via `__shfl_down_sync`. NaN-guarded: `if (isnan(s)) s = -1e20f`. Writes `scores_buf[b*N + p*64+t]` and `indices_buf[b*N + p*64+t] = global_page_idx*64 + t`.
+
+**D. `block_topk_kernel<256, 24>`** (TIER-M) — verbatim from grandparent:
+```cpp
+template <int BLOCK_THREADS, int ITEMS_PER_THREAD>
+__global__ void block_topk_kernel(
+    const float* scores_buf, const int32_t* indices_buf,
+    const int32_t* seq_lens, int32_t* topk_indices,
+    int N, int topk, int l_med_max)
+{
+    int b = blockIdx.x; int L = seq_lens[b];
+    if (L <= topk) return;          // TIER-S handles
+    if (L > l_med_max) return;      // TIER-L handles
+
+    using BlockRadixSort = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int32_t>;
+    __shared__ typename BlockRadixSort::TempStorage temp_storage;
+
+    float keys[ITEMS_PER_THREAD]; int32_t vals[ITEMS_PER_THREAD];
+    int base = b * N;
+    #pragma unroll
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) {
+        int idx = i * BLOCK_THREADS + threadIdx.x;     // STRIDED LOAD
+        if (idx < L) { keys[i] = scores_buf[base + idx]; vals[i] = indices_buf[base + idx]; }
+        else        { keys[i] = -1e30f; vals[i] = -1; }
+    }
+    BlockRadixSort(temp_storage).SortDescendingBlockedToStriped(keys, vals);
+    #pragma unroll
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) {
+        int out_pos = i * BLOCK_THREADS + threadIdx.x;  // STRIDED WRITE matching BlockedToStriped
+        if (out_pos < topk) topk_indices[b * topk + out_pos] = vals[i];
+    }
+}
+```
+**CRITICAL CORRECTNESS PAIRING (per grandparent summary):** strided load (`i*BLOCK_THREADS + threadIdx.x`) MUST be paired with `SortDescendingBlockedToStriped` AND strided write of the same form. Do NOT change to `SortDescending` (which uses blocked layout) without also changing both load and write patterns.
+
+Launch: `<<<batch_size, BT_THREADS=256>>>`.
+
+**E. `generate_offsets_begin_end`** — uses `L_MED_MAX` threshold; produces empty CUB segment for any batch with `L ≤ L_MED_MAX`:
+```cpp
+int L = seq_lens[b];
+begin_offsets[b] = b * segment_size;
+end_offsets[b]   = (L > L_MED_MAX) ? (b * segment_size + L) : (b * segment_size);
+```
+
+**F. `extract_topk_kernel`** — early-return if `L ≤ L_MED_MAX` (handled by S/M):
+```cpp
+if (seq_lens[b] <= L_MED_MAX) return;
+int actual = min(topk, seq_lens[b]);
+for (int tid = threadIdx.x; tid < topk; tid += blockDim.x) {
+    topk_indices[b*topk + tid] = (tid < actual) ? indices_sorted[b*segment_size + tid] : -1;
+}
+```
+Launch: `<<<batch_size, 1024>>>`.
+
+**G. Host pipeline `topk_indexer_forward`:**
+1. Make all inputs contiguous; allocate `scores_buf[batch_size, N]` (float32), `indices_buf[batch_size, N]` (int32), `topk_indices[batch_size, 2048]` (int32).
+2. Launch `emit_short_topk_kernel<<<batch_size, 256>>>` (TIER-S).
+3. Launch `compute_scores_kernel<<<dim3(max_num_pages, batch_size), 256>>>`.
+4. **One-time** dynamic-smem config (idempotent via `static bool`):
+   ```cpp
+   static bool smem_set = false;
+   if (!smem_set) {
+       cudaFuncSetAttribute((const void*)block_topk_kernel<BT_THREADS, BT_ITEMS>,
+           cudaFuncAttributeMaxDynamicSharedMemorySize, 98304);
+       smem_set = true;
+   }
+   ```
+5. Launch `block_topk_kernel<256,24><<<batch_size, 256>>>` (TIER-M).
+6. Allocate `scores_sorted`, `indices_sorted`, `begin_offsets[batch_size]`, `end_offsets[batch_size]`.
+7. Launch `generate_offsets_begin_end<<<(batch_size+255)/256, 256>>>`.
+8. CUB size query: `cub::DeviceSegmentedRadixSort::SortPairsDescending(nullptr, temp_storage_bytes, ...)`.
+9. Allocate temp_storage (uint8); CUB actual call.
+10. Launch `extract_topk_kernel<<<batch_size, 1024>>>` (TIER-L).
+11. Return `topk_indices`.
+
+---
+
+### Phase 3: The "Safety Valve" (CRITICAL — non-negotiable)
+
+1. **Strict partition invariant (mathematical):** Each batch `b` falls into exactly one of {S, M, L} via `L = seq_lens[b]`. Each kernel writes `topk_indices[b,:]` only for its tier and early-returns otherwise. No race possible. Proof by case enumeration on `L`.
+2. **Exact top-K guarantee in every tier:**
+   - S: enumeration of all valid tokens (set-correct since `L ≤ K` ⇒ all valid positions ARE the top-K).
+   - M: `cub::BlockRadixSort` is a deterministic exact sort.
+   - L: `cub::DeviceSegmentedRadixSort` is deterministic exact.
+3. **Padding sentinel `-1e30f`** for out-of-range lanes in TIER-M load — strictly more negative than NaN sentinel `-1e20f`, so NaN-corrected scores still outrank padding (preserves the property that valid scores always beat padding).
+4. **NaN guard in scoring:** `if (isnan(head_score)) head_score = -1e20f;` retained.
+5. **`SortDescendingBlockedToStriped` pairing**: strided load + BlockedToStriped sort + strided write — flagged correctness-critical by the grandparent's strategic summary.
+6. **Dynamic-smem config**: `cudaFuncSetAttribute` set BEFORE first launch via static bool guard; idempotent.
+7. **Variable-axis support**: no hardcoded batch/page/max_num_pages assumptions; all derived from tensor shapes at runtime.
+8. **Compile-time invariant**: `static_assert(BT_THREADS * BT_ITEMS >= L_MED_MAX);` enforces buffer sufficiency.
+9. **CUB version compatibility**: Only uses `cub::BlockRadixSort` and `cub::DeviceSegmentedRadixSort::SortPairsDescending` — both stable APIs in CUDA 12+.
+
+---
+
+### Phase 4: Implementation Details
+
+**Single file:** `kernel.cu`.
+**Headers (exact):**
+```cpp
+#include <torch/extension.h>
+#include <cuda_fp8.h>
+#include <tuple>
+#include <cub/cub.cuh>
+#include <cub/block/block_radix_sort.cuh>
+```
+
+**Constants (top of file, after headers):**
+```cpp
+constexpr int TOPK_CONST = 2048;
+constexpr int L_MED_MAX  = 6144;
+constexpr int BT_THREADS = 256;
+constexpr int BT_ITEMS   = 24;
+```
+
+**Functions in order:**
+1. `inline __device__ float4 cvt_fp8x4_to_float4(uint32_t)`.
+2. `__global__ void emit_short_topk_kernel(...)`.
+3. `__global__ void compute_scores_kernel(...)`.
+4. `template<int BLOCK_THREADS, int ITEMS_PER_THREAD> __global__ void block_topk_kernel(...)`.
+5. `__global__ void generate_offsets_begin_end(...)`.
+6. `__global__ void extract_topk_kernel(...)`.
+7. `torch::Tensor topk_indexer_forward(...)`.
+8. `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("topk_indexer_forward", ...); m.def("dsa_forward", ...); }` — keep both names per grandparent.
+
+**Source reference:** Emit code that is functionally and structurally **byte-equivalent to grandparent solution_id `dc51d5fc`** (the proven 9.564 baseline). Do NOT add: TIER-L2, fused scoring, radix-select, host-side seq_lens inspection, or any new kernels.
+
+**Randomness:** None. Fully deterministic. No multi-start needed.
+**Library check:** Only `<cuda_fp8.h>` + `<cub/...>` — both standard CUDA 12+, both already validated by grandparent's successful evaluation.
+**Compile target:** SM90+ (Hopper). Already validated.
+
+**Expected Performance:**
+- Current parent (`f22893c8`): 0.0366 ms, score 9.364 (regressed).
+- This child: matches grandparent `dc51d5fc` exactly: **0.0356 ms, score 9.564** (+2.1% over current parent).
+- Worst case: 9.564 (this is the grandparent's actual measured score, statistically robust over 12 workloads).
+- Best case: 9.564 (no upside variance — that's the point of this safe-restoration plan).
+
+**Fallback:** None needed — the plan IS the fallback. If the build infrastructure or evaluation has noise, the absolute floor is the grandparent's empirically measured 9.564.
+
+**Correctness Verification:**
+- Grandparent `dc51d5fc` already passed: correctness=1.0, max_relative_error=0, max_absolute_error=0, 12/12 workloads. This child re-emits the same algorithm → same correctness guarantees by construction.
+
+**Why this is the right move now:**
+The current parent regressed because of speculative tier-extension without workload evidence. The summary explicitly recommends stripping. Adding any new optimization (fusion, radix-select, host-side dispatch) on TOP of the strip introduces NEW failure modes that have not been validated. Per the "decouple structure from parameters" principle and the "safety valve" mandate, restoration of the proven baseline is the algorithmically most robust action this iteration. Future iterations can then build incrementally on the restored 9.564 floor.

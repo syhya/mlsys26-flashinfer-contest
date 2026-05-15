@@ -1,0 +1,71 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized FP8 block-scale Mixture-of-Experts (MoE) operation (DeepSeek-V3 / R1 topology) that outperforms the PyTorch reference while maintaining strict numerical correctness ($rtol=1e-2, atol=1e-2$).
+
+**Selected Outline:** Two-Stage Triton Grouped GEMM with Vectorized Dispatch (Algorithmically Robust)
+
+**Rationale for Selection:**
+1.  **Guaranteed Correctness**: Decouples the exact mathematical routing (using standard PyTorch tensor ops) from the dense matrix multiplications.
+2.  **Maximal Hardware Utilization**: Replaces the serial expert loop with vector-parallel dispatch and Triton-based Grouped GEMM, ensuring SMs are kept fully busy.
+3.  **Optimal Memory Traffic**: Fuses block-scale dequantization directly into the GEMM accumulation step and avoids materializing massive FP32 weight tensors.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Definition & Setup**
+    *   **Variables**: 
+        *   Token to expert assignments.
+        *   Triton Grid parameters (BLOCK_M, BLOCK_N, BLOCK_K).
+    *   **Routing Logic**: Implement DeepSeek no-aux routing strictly using PyTorch vectorized operations:
+        *   Compute sigmoid and bias.
+        *   Use `view` to group, `topk(k=2, dim=2)` to sum group scores, and `topk(k=4, dim=1)` to pick top groups.
+        *   Mask out unselected groups, apply global `topk(k=8, dim=1)` to find final experts.
+        *   Normalize using $s$ without bias and apply `routed_scaling_factor`.
+    *   **Constraints**: 
+        *   GEMM tile sizes must align with FP8 block scales (i.e., $BLOCK\_K = 128$).
+        *   Memory usage must avoid allocating large intermediate FP32 tensors.
+
+2.  **Phase 2: The Optimization Loop (Vectorized Dispatch & Autotuning)**
+    *   **Vectorized Dispatch**: To avoid CPU-GPU synchronization, compute token-expert mapping entirely on the GPU.
+        *   Flatten the `topk_idx` and create an array of `token_ids`.
+        *   Use `torch.argsort` on the `topk_idx` to group tokens by expert.
+        *   Use `torch.bincount` to get the number of tokens per expert.
+        *   Use `torch.cumsum` to compute offsets (CSR format) for the Grouped GEMM.
+    *   **Autotuning (Multi-Start Equivalent)**: Use `@triton.autotune` to search for the best block sizes.
+        *   Provide multiple configs: e.g., `BLOCK_M` $\in \{16, 32, 64\}$, `BLOCK_N` $\in \{64, 128\}$, `BLOCK_K` $= 128$ (fixed for scale alignment).
+        *   Vary `num_warps` $\in \{4, 8\}$ and `num_stages` $\in \{2, 3, 4\}$.
+        *   Triton will run these configurations and select the fastest, implicitly acting as a multi-start optimization loop over the parameter space.
+
+3.  **Phase 3: The "Safety Valve" (CRITICAL)**
+    *   **Fallback Mechanism**: In the `run` function, check if the calculated number of tokens for local experts is 0. If so, return early with zeros to prevent division-by-zero or kernel crashes.
+    *   **Scale Alignment Verification**: The Triton kernels MUST assert that `BLOCK_K` is exactly 128 to match the block-scale layout. 
+    *   **Datatype Enforcement**: Ensure all Triton GEMM accumulators are strictly `tl.float32`. Only cast to `bfloat16` at the very final memory write in GEMM2.
+
+4.  **Phase 4: Implementation Details**
+    *   **Step 4.1: Routing (PyTorch)**: Compute `weights` and `topk_idx` as per the reference, but optimized.
+    *   **Step 4.2: Token Sorting**: 
+        ```python
+        expert_mask = (topk_idx >= local_start) & (topk_idx < local_start + E_local)
+        flat_expert_idx = topk_idx[expert_mask] - local_start
+        flat_token_idx = torch.nonzero(expert_mask, as_tuple=True)[0]
+        sorted_indices = torch.argsort(flat_expert_idx)
+        sorted_tokens = flat_token_idx[sorted_indices]
+        sorted_experts = flat_expert_idx[sorted_indices]
+        expert_counts = torch.bincount(sorted_experts, minlength=E_local)
+        expert_offsets = torch.cat([torch.tensor([0], device=device), torch.cumsum(expert_counts, dim=0)])
+        ```
+    *   **Step 4.3: Triton Grouped GEMM1**:
+        *   Input: `A` (FP8), `W13` (FP8).
+        *   Pointer arithmetic: Use `sorted_tokens` to load `A` non-contiguously. Load `hidden_states_scale` using the original token index.
+        *   Dot product: `acc += tl.dot(a_fp8, b_fp8)` -> `acc = acc * scale_a * scale_b`.
+        *   Output: `G1` (FP32) of shape `[Total_Tokens, 2 * I]`.
+    *   **Step 4.4: SwiGLU & GEMM2**:
+        *   Instead of a standalone SwiGLU kernel, either fuse SwiGLU into the prologue of GEMM2 or run a highly optimized lightweight PyTorch operation `C = torch.nn.functional.silu(G1[:, I:]) * G1[:, :I]` before GEMM2.
+        *   Run Grouped GEMM2 (similar structure to GEMM1) mapping `[Total_Tokens, I]` to `[Total_Tokens, H]`.
+        *   In the epilogue of GEMM2, multiply by the routing `weights` (loaded via `sorted_tokens`) and cast to `bfloat16`.
+    *   **Step 4.5: Scatter Add**:
+        *   Use `torch.zeros((T, H))` and `output.index_add_(0, sorted_tokens, gemm2_out)` to accumulate the final result.
+
+**Expected Performance Improvement:**
+*   Eliminates all CPU-GPU synchronization loops.
+*   Reduces memory footprint by 90% (avoids ~14GB FP32 weight instantiation).
+*   Guarantees score >= 1.0 by strictly reproducing the mathematical operations using exact PyTorch routing and FP32 accumulators in Triton.

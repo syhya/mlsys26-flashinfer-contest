@@ -1,0 +1,199 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Produce a child `kernel.cu` for `dsa_forward` that improves performance beyond the parent (score 11.69) and ideally beyond the island best (score 12.63) by applying the single highest-leverage, repeatedly-identified, still-unimplemented optimization: **reducer-native workspace layout for the split-K path**. Keep all math and kernel structure byte-identical to the parent otherwise. This is an isolated A/B structural experiment, not a redesign.
+
+**Selected Outline:** Reducer-Native Workspace Layout — switch `O_tmp` from `[T, S, 16, 512]` to `[T, 16, S, 512]` (and matching layout for `m_tmp` / `l_tmp`: `[T,16,S]` — already compatible), updating both producer (`split_k_compute_kernel`) and consumer (`split_k_reduce_kernel`) consistently.
+
+**Rationale for Selection:**
+1. **This is the top explicit unresolved recommendation** in both parent and island-best summaries ("re-layout O_tmp in reducer-native contiguous order while preserving the exact same math and launch structure — target the unresolved optimization concept with much lower execution risk than a full decomposition rewrite").
+2. **Math is byte-identical to the parent** — correctness is guaranteed by equivalence of index transformation, not by heuristics.
+3. **Directly attacks the reducer memory-traffic bottleneck**: current reducer loop `for s in [0,64): val = O_tmp[t*S*16*512 + s*16*512 + h*512 + d_idx]` strides 32 KB between consecutive s iterations. After re-layout it strides 2 KB, making 16× better L2 locality and enabling memory-level parallelism.
+4. **Scope is narrowly bounded**: only two index expressions change. Executor cannot drift into a full small-path rewrite.
+5. **Large fused path is untouched** — no risk to the >126× speedup path.
+
+---
+
+## Phase 1: Mathematical Definition
+
+### 1.1 Operator (unchanged)
+For each token `t ∈ [0,T)` and head `h ∈ [0,16)`:
+- `s_j = dot(q_nope[t,h], k_nope(raw_j)) + dot(q_pe[t,h], k_pe(raw_j))` for each valid `raw_j = sparse_indices[t,j] ≠ -1`.
+- `z_j = sm_scale * s_j`.
+- `out[t,h,:] = Σ_j softmax(z)_j * k_nope(raw_j)`.
+- `lse[t,h] = log2(Σ_j exp(z_j))`.
+
+### 1.2 Split-K FP32 partial state (unchanged)
+Partition 2048 slots into `S=64` chunks of 32 slots each. For each `(t,h,s)` compute exact FP32 online-softmax partial state `(m_s, l_s, O_s ∈ R^512)`.
+
+### 1.3 Exact merge (unchanged)
+- `m_global = max_s m_s`.
+- `scale_s = 0 if m_s == -INF else exp(m_s - m_global)`.
+- `l_global = Σ_s l_s * scale_s`.
+- `O_global = Σ_s O_s * scale_s`.
+- `out = O_global / l_global`; `lse = m_global * log2(e) + log2(l_global)`.
+
+### 1.4 Variables X (the only thing changing)
+- **Old layout:** `O_tmp[T, S, 16, 512]`, offset `= t*S*16*512 + s*16*512 + h*512 + d`.
+- **New layout:** `O_tmp[T, 16, S, 512]`, offset `= t*16*S*512 + h*S*512 + s*512 + d`.
+- `m_tmp[T,16,S]` — unchanged from parent (already reducer-native).
+- `l_tmp[T,16,S]` — unchanged from parent (already reducer-native).
+- `S = 64`, threshold = 128 tokens (unchanged).
+
+### 1.5 Constraints C
+1. Output shapes/dtypes identical; ABI identical; PYBIND11_MODULE footer preserved.
+2. All accumulation in FP32; BF16 only at input/output boundaries; explicit BF16 intrinsics.
+3. `sparse_indices == -1` produces neutral contribution.
+4. `lse` in base 2.
+
+### 1.6 Objective f(X)
+Minimize reducer memory-read latency under unchanged compute cost. Expected: reducer is currently the bottleneck for small-token path due to poor `O_tmp` access stride; after re-layout, inner `for s` loop reads 64 consecutive `float4`s at stride 2 KB instead of 32 KB, fitting well in L2.
+
+---
+
+## Phase 2: The "Optimization Loop" (Deterministic — No Randomness)
+
+This is a deterministic code transformation. No multi-start needed.
+
+### 2.1 Branch decision
+Global perspective:
+- 1 island, iteration 27, best_score 12.635 (iter 20), current parent 11.69 (iter 17).
+- Exploitation lineage with clear layout bottleneck repeatedly flagged but never implemented.
+- Decision: apply the layout transform on top of the current parent, which already has the `tile_has_valid` cleanup.
+
+### 2.2 Candidate is unique
+There is only one deterministic implementation: swap the two middle axes of `O_tmp` everywhere it is read/written. No tuning space.
+
+### 2.3 Kernel changes (exact, code-ready)
+
+**Change A — `split_k_compute_kernel` write (lines writing `O_tmp`):**
+```cpp
+// OLD: int base_idx = t * 64 * 16 * 512 + s * 16 * 512 + h * 512 + j * 64 + lane * 2;
+// NEW:
+int base_idx = t * 16 * 64 * 512 + h * 64 * 512 + s * 512 + j * 64 + lane * 2;
+```
+Do this for each of the 8 unrolled `j` iterations writing `float2`.
+
+**Change B — `split_k_reduce_kernel` read:**
+```cpp
+// OLD: int base_idx = t * 64 * 16 * 512 + s * 16 * 512 + h * 512 + d_idx;
+// NEW:
+int base_idx = t * 16 * 64 * 512 + h * 64 * 512 + s * 512 + d_idx;
+```
+
+**Change C — `dsa_forward` host allocation:**
+```cpp
+// OLD: auto O_tmp = torch::empty({num_tokens, S, 16, 512}, float32_opts);
+// NEW:
+auto O_tmp = torch::empty({num_tokens, 16, S, 512}, torch::dtype(torch::kFloat32).device(q_nope.device()));
+```
+
+All other code (large fused kernel, reducer math, `m_tmp`/`l_tmp` layout, dispatch logic) is **byte-identical to the parent**.
+
+### 2.4 Reducer micro-improvement (bundled, optional but recommended)
+Since re-layout already makes the reducer loop contiguous, keep the parent's fused `coeff = exp(m_s - m_global) / l_global` formulation (from island best iter 20) in lane-0 setup, to avoid the double-read of `l_s_smem`. This combines two validated wins.
+
+Specifically, in the reducer:
+- lane-0 computes `m_max`, `l_sum`, and then writes `scale_smem[i] = (m_s_smem[i] != -INF) ? exp(m_s_smem[i] - m_max) : 0` (unnormalized scale).
+- After `__syncthreads`, compute `inv_l = 1/l_global` once and use `coeff = scale_smem[s] * inv_l` in the inner loop. (Parent already has this pattern; just keep it.)
+
+---
+
+## Phase 3: The "Safety Valve" (CRITICAL)
+
+### 3.1 Mathematical equivalence
+Both producer and consumer use identical offset formula `t*16*S*512 + h*S*512 + s*512 + d`. This is a pure permutation of a 4D tensor — no data is reinterpreted, no reduction order changed. The exact same FP32 bits are written and read. Therefore correctness is preserved **by equivalence of indexing**, not by approximation.
+
+### 3.2 Neutral-state masking (unchanged from parent)
+`sparse_indices == -1` paths skip `O_reg` updates; empty partitions store `m = -INF`, `l = 0`, `O = 0`. Reducer's `m_s_smem[i] != -INF` check and final `(m_max == -INF || l_sum <= 0.0f) ? -INFINITY` branch prevent NaNs.
+
+### 3.3 Alignment safety
+- `s * 512` is a multiple of 512 floats = 2048 bytes, well-aligned for `float4` (16B) and `float2` (8B).
+- `j * 64 + lane * 2` offset within 512 preserves `float2` alignment (parent invariant).
+- `d_idx = lane * 4` preserves `float4` alignment (parent invariant).
+- Total `t*16*S*512` base is a multiple of 512 — safe.
+No alignment regression possible.
+
+### 3.4 Dispatch fallback
+Large-token path (`num_tokens >= 128`) is byte-identical to parent's fused kernel — no possible regression. Only the split-K path (`num_tokens < 128`) is modified.
+
+### 3.5 Build-environment enforcement
+- `#include <torch/extension.h>` and `#include <cuda_bf16.h>` at top.
+- Only explicit BF16 intrinsics (`__bfloat1622float2`, `__floats2bfloat162_rn`).
+- Exact entry-point signature preserved.
+- Mandatory `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("dsa_forward", &dsa_forward, "DSA Forward"); }` at end.
+
+### 3.6 Correctness test reasoning
+The transformation is a tensor-layout permutation applied symmetrically on one writer and one reader. It is trivially equivalent to the parent at the bitwise level in FP32 workspace. Since parent correctness = 1.0, child correctness = 1.0 guaranteed.
+
+---
+
+## Phase 4: Implementation Details
+
+### 4.1 Starting code
+Take the parent solution (`bad043e5`) verbatim as the starting point. The parent already includes the `tile_has_valid` cleanup and the proven two-path architecture.
+
+### 4.2 Exact diff to apply
+1. In `split_k_compute_kernel`, replace the loop writing `O_tmp`:
+   ```cpp
+   #pragma unroll
+   for (int j = 0; j < 8; ++j) {
+       int base_idx = t * 16 * 64 * 512 + h * 64 * 512 + s * 512 + j * 64 + lane * 2;
+       *reinterpret_cast<float2*>(&O_tmp[base_idx]) = make_float2(O_reg[j].x, O_reg[j].y);
+   }
+   ```
+2. In `split_k_reduce_kernel`, replace the `O_tmp` read index:
+   ```cpp
+   int base_idx = t * 16 * 64 * 512 + h * 64 * 512 + s * 512 + d_idx;
+   float4 val = *reinterpret_cast<const float4*>(&O_tmp[base_idx]);
+   ```
+3. In `dsa_forward`, change allocation:
+   ```cpp
+   auto O_tmp = torch::empty({num_tokens, 16, S, 512}, torch::dtype(torch::kFloat32).device(q_nope.device()));
+   ```
+4. Add a brief comment: `// Reducer-native O_tmp layout [T,16,S,512]: inner s-loop reads stride 512 floats (2KB) instead of 8192 floats (32KB), maximizing L2 reuse.`
+
+### 4.3 Do NOT change
+- Large fused `dsa_forward_kernel` — keep byte-identical.
+- `m_tmp` / `l_tmp` shapes (`[T,16,S]` already reducer-native).
+- Warp reduction helper.
+- Dispatch threshold (`num_tokens < 128`).
+- BF16/FP32 boundary.
+- PYBIND11 footer.
+
+### 4.4 Libraries used
+- Standard CUDA / PyTorch extension only: `<torch/extension.h>`, `<cuda_bf16.h>`, `<cuda_fp16.h>`, `<tuple>`, `<math.h>`.
+- No CUB, no CUTLASS, no cooperative groups.
+
+### 4.5 Numerical rules (unchanged)
+- FP32 accumulators (`m`, `l`, `O_reg`).
+- `__expf` for exponentials.
+- `__log2f` for base-2 LSE.
+- BF16 only at final store.
+- `fmaf` for fused multiply-add.
+
+### 4.6 Randomness check
+No randomness used. Deterministic code transformation. No multi-start loop needed.
+
+---
+
+## Review Checklist
+
+- **Relies on math not luck?** Yes — pure tensor-layout permutation with identical arithmetic.
+- **Library check?** Only standard CUDA / PyTorch extension headers.
+- **Randomness check?** None. No multi-start needed.
+- **Implementable?** Trivially — it is a 3-location diff on a known-working parent.
+- **Large-path risk?** Zero — large path untouched.
+- **Small-path risk?** Zero algorithmic risk; only potential variance is minor compute-side write-pattern change, which is strictly improved (each block now writes contiguous 512 floats per j, better than the old stride-2048 cross-head pattern).
+
+---
+
+## Final Executor Instructions
+
+1. **Start from parent `bad043e5` verbatim.**
+2. **Apply exactly three edits** as specified in §4.2: producer index, consumer index, host allocation shape.
+3. **Do not touch** the large fused kernel, `m_tmp`/`l_tmp`, reducer math structure, dispatch threshold, or any other part of the file.
+4. **Preserve the `tile_has_valid` flag** pattern already in the parent.
+5. **Preserve ABI** and the mandatory `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)` footer.
+6. **Expected outcome:** correctness = 1.0 (guaranteed by layout equivalence), speedup ≥ 117× (parent), targeting ≥ 127× (beat island best) via L2-friendly reducer reads.
+
+This is the highest-leverage, lowest-risk child plan: it implements the single optimization the database has repeatedly identified as the top unresolved opportunity, and it does so via a mathematically exact layout transformation that cannot regress correctness.

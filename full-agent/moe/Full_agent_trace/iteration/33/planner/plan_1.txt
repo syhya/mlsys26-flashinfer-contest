@@ -1,0 +1,12 @@
+PLAN 1: Adopt 8e3c776e (current best 15.40x) verbatim + add BLOCK_M=256 num_stages=4 + per-row FP8 quantization for precision insurance.
+
+Mathematical Formulation:
+- Variables: GEMM tile dims (BLOCK_M, BLOCK_N=128, BLOCK_K=128), per-tile c_scale (scalar OR per-row vector).
+- Constraints: BLOCK_N=128 (n_block_idx=pid_n), BLOCK_K=128 (FP8 block scale alignment), int64 ptr arith, correctness tol rtol=1e-2.
+- Objective: minimize kernel_latency_ms subject to correctness=1.0.
+
+Solver: Triton autotune over expanded config space; deterministic benchmarking.
+
+Validity: Copy 8e3c776e exactly as a guaranteed floor (15.40x). New configs only ADD to autotune; if they spill registers, autotuner discards them — never regresses below floor.
+
+Why: Lowest risk, modest upside. Adds one new config (BLOCK_M=256, num_stages=4) and optional per-row scaling. Expected: 15.5-16.0x.

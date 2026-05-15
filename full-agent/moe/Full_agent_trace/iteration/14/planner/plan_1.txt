@@ -1,0 +1,35 @@
+Outline 1: Correctness-first hybrid using exact dequantized PyTorch GEMM2 oracle and Triton GEMM1
+
+Mathematical Formulation
+Variables (X):
+- Routing tensors q, rank_scores, top_groups, topk_idx, normalized routing weights.
+- CSR dispatch arrays: sorted_tokens, sorted_experts, sorted_weights, expert_offsets.
+- GEMM1 result G1 in R^(Tk_total x 4096).
+- Activated tensor C in R^(Tk_total x 2048).
+- Final expert outputs O in R^(Tk_total x 7168).
+Constraints (C):
+- Exact DeepSeek routing semantics: sigmoid for weights, bias only for ranking, top-2 per group, top-4 groups, top-8 experts globally within allowed groups.
+- Exact FP8 block-scale semantics with 128-element block scales.
+- All accumulations in FP32.
+- Final output shape [T,7168], dtype bfloat16.
+- No CPU-GPU sync dependent loops over routed rows.
+Objective f(X):
+- Minimize runtime subject to exact numerical agreement, with main target score >= 1.0 by removing persistent structural error.
+
+Solver Strategy
+- Deterministic staged solver.
+- Stage A: vectorized PyTorch routing/dispatch.
+- Stage B: Triton grouped GEMM1 with FP8 tensor-core dot and post-dot scale application.
+- Stage C: exact dequantization of per-expert W2 blocks and PyTorch matmul for GEMM2, using expert-wise batched processing as oracle-fast hybrid.
+- Stage D: index_add scatter accumulation.
+
+Validity Mechanism
+- Structural invariants on CSR: monotonic expert_offsets, last offset == Tk_total, bincount match.
+- Differential guard: optional tiny-sample per-expert compare between Triton GEMM1 tile result and exact PyTorch dequantized GEMM1 on first routed expert; if mismatch beyond tolerance, switch whole run to full PyTorch fallback.
+- GEMM2 uses exact dequantized semantics in PyTorch, eliminating Triton-side orientation/scale ambiguity on second projection.
+- Final output always produced through deterministic index_add and cast to bf16.
+
+Why this solution?
+- Expected performance improvement: likely lower than fully fused Triton, but stronger chance to remove the recurring 8192 absolute-error pathology by isolating the suspected faulty stage.
+- Advantages: highest semantic clarity; easiest to debug; likely to achieve correctness while keeping some acceleration from grouped GEMM1.
+- Disadvantages: GEMM2 may become bottleneck; may not beat current 8x speed unless dispatch locality is strong.

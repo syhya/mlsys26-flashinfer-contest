@@ -1,0 +1,40 @@
+Outline 2: Worklist-compacted GEMM2 with proven GEMM1 and deterministic dispatch optimization
+
+Mathematical Formulation
+Variables (X):
+- Exact routing outputs: topk_idx[t, r], route_w[t, r].
+- Local routed rows J of size Tk with arrays sorted_tokens[j], sorted_experts[j], sorted_weights[j].
+- CSR expert offsets expert_offsets[e].
+- Worklist variables U = {(exp_u, tile_u)} for active GEMM2 row tiles only.
+- Intermediate tensors G1 in R^(Tk x 2I), C in R^(Tk x I), O in R^(Tk x H), Y in R^(T x H).
+Constraints (C):
+- C1: Preserve exact DeepSeek routing semantics.
+- C2: BLOCK_K = 128 in both GEMMs so scale blocks align exactly.
+- C3: GEMM1 and GEMM2 accumulations remain FP32.
+- C4: hidden_states_scale is indexed by original token id.
+- C5: Output Y has shape [T,7168] and bf16 dtype.
+- C6: Worklist covers exactly all active GEMM2 row tiles and no inactive tiles.
+- C7: If worklist invariants fail, execution must revert to known-correct dense expert-grid GEMM2.
+Objective f(X):
+- Minimize L_gemm2_dispatch + L_gemm2_compute while preserving all other costs and constraints.
+- Equivalent dispatch objective: minimize number of launched GEMM2 CTAs subject to covering all active output tiles.
+
+Solver Strategy
+- Build CSR by vectorized torch.bincount + cumsum.
+- Solve dispatch compaction exactly using tensor arithmetic:
+  tiles_per_expert[e] = ceil(expert_counts[e] / BM).
+  total_tiles = sum_e tiles_per_expert[e].
+- Build a compact worklist via repeat_interleave / prefix sums.
+- Launch Triton worklist GEMM2 over active tiles only.
+- Deterministic regime selector compares active_tiles vs dense_tiles and chooses the lower-overhead formulation.
+
+Validity Mechanism
+- Safety valve checks expert_offsets monotonicity, expert_offsets[-1] == Tk, tiles_per_expert >= 0, and worklist size consistency.
+- If any check fails, fallback to parent grouped_gemm2_kernel.
+- c_scale in GEMM2 is clamped to >= 1e-12 before FP8 cast.
+- Final scatter-add done in FP32, then cast to bf16.
+
+Why this solution?
+- Expected performance improvement: remove empty expert CTAs, especially under skewed routing, matching the task’s strongest optimization hint.
+- Advantages: preserves proven routing and GEMM1 math; only dispatch changes; high robustness due to exact fallback.
+- Disadvantages: more code complexity; may show limited gains when routing is uniformly dense.

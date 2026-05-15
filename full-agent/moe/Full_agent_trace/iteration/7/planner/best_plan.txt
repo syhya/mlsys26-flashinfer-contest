@@ -1,0 +1,31 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized FP8 block-scale Mixture-of-Experts (MoE) operation that significantly outperforms the PyTorch reference latency while guaranteeing strict numerical correctness ($rtol=1e-2, atol=1e-2$), specifically fixing the massive absolute error (33280.0) introduced by the parent's dynamic FP8 quantization.
+
+**Selected Outline:** Precision-First Triton Grouped GEMM with FP32 SwiGLU-GEMM2 (Plan 3)
+
+**Rationale for Selection:**
+1.  **Directly Addresses the Failure:** The parent solution achieved an 8.6x speedup but failed numerically due to naive, in-kernel dynamic FP8 quantization of the SwiGLU activations. This outline strictly follows the "Safety Valve" principle by removing the destructive dynamic quantization and reverting to mathematically safe FP32 accumulation for the second GEMM.
+2.  **Maintains Structural Speed:** Retains the highly optimized vectorized GPU dispatch and Triton Grouped GEMM structure that eliminates Python loops and CPU-GPU syncs.
+3.  **Algorithmically Robust:** Decouples the "Structure Finding" (the vectorized routing and token grouping) from the "Parameter Tuning" (Triton kernel autotuning via multi-start).
+
+**Best Plan:**
+
+*   **Phase 1: Mathematical Definition & Deterministic Routing**
+    *   **Variables**: Token-expert assignments, Triton grid configurations ($BLOCK\_M, BLOCK\_N$).
+    *   **Routing Logic**: Implement DeepSeek no-aux routing using standard PyTorch vectorized ops. Compute `s = 1.0 / (1.0 + torch.exp(-logits))` and add bias.
+    *   **Constraint Enforcement**: Use `sorted=True` in all `torch.topk` calls to ensure exact deterministic behavior matching the reference mathematically, preventing arbitrary tie-breaking errors.
+
+*   **Phase 2: The Optimization Loop (Vectorized Dispatch & Autotuning)**
+    *   **GPU Dispatch**: Build dispatch structures entirely on the GPU. Identify valid tokens using a mask, flatten them, and use `torch.argsort` to group tokens by expert. Calculate CSR offsets using `torch.bincount` and `torch.cumsum`.
+    *   **Multi-Start Optimization**: Apply `@triton.autotune` to `grouped_gemm1_kernel` and `grouped_gemm2_kernel`. Provide multiple configuration starts (e.g., `BLOCK_M` $\in \{32, 64, 128\}$, `BLOCK_N` $\in \{64, 128\}$). Triton will execute this multi-start loop to empirically find the optimal tile sizes for the given sequence length $T$.
+
+*   **Phase 3: The "Safety Valve" (CRITICAL)**
+    *   **Memory Initialization**: Replace all `torch.empty` calls with `torch.zeros` for the intermediate $G1$ tensor and output $O$ tensor. This guarantees that masked threads leave $0.0$ instead of uninitialized HBM garbage.
+    *   **Precision Reversion (Fixing the Parent's Bug)**: In `grouped_gemm2_kernel`, compute the SwiGLU activation $c$ in `tl.float32`. **DO NOT** attempt to dynamically quantize $c$ to FP8. Instead, load the FP8 weights $W2$, explicitly cast them to FP32 (`w_f32 = w.to(tl.float32)`), apply the FP32 block scale, and compute the dot product using `tl.dot(c, w_f32, out_dtype=tl.float32)`. This trades a small amount of Tensor Core throughput for a mathematical guarantee of correctness.
+    *   **Pointer Bound Safety**: Enforce explicit `.to(tl.int64)` casting on all indices (especially `e_idx` and coordinate offsets) *before* multiplying by tensor strides, mathematically preventing 32-bit integer overflow when accessing the massive `[32, 4096, 7168]` weight tensors.
+
+*   **Phase 4: Implementation Details**
+    *   **GEMM1**: Use FP8 Tensor Cores because inputs $A$ and $W1$ are natively FP8 with provided block scales. `dot_res = tl.dot(a_fp8, w1_fp8); acc += dot_res * a_scale * w1_scale`.
+    *   **GEMM2**: Load $x1, x2$ from $G1$. Compute SwiGLU: `c = x1 * x2 * tl.sigmoid(x2)`. Load $w2$ (FP8) and $w2\_scale$ (FP32). Accumulate in FP32: `acc += tl.dot(c, w2.to(tl.float32)) * w2_scale`.
+    *   **Final Output**: Multiply the accumulator by the routing weights, write to $O$, and use `output.index_add_` to scatter the results deterministically before casting to `bfloat16`.

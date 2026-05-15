@@ -1,0 +1,9 @@
+Plan 3: Persistent kernel processing all pages of one batch + reuse Q-load + bounded sort.
+
+Mathematical: same. Optimization is launch overhead and Q-tensor reuse.
+
+Solver: Launch grid (batch_size,) with each block processing ALL pages of that batch sequentially. Q is loaded once per batch (instead of per page * batch_size). Use ceil(seq_len/64) pages per block. Each block contains 256 threads (8 warps). For each page, all warps cooperatively load 64 tokens of K via uint4 (8 warps × 32 threads × 16 bytes = 4096 bytes per cycle = 32 tokens per cycle, so 2 cycles per page). Then compute scoring with the parent's transposed-Q dot-product mapping.
+
+Validity: Same external CUB segmented sort with bounded begin/end offsets. Padding with -inf/-1.
+
+Why: Removes batch_size× redundant Q-loading from HBM, removes launch grid overhead. Risk: serializes pages within a batch reducing parallelism — if max_num_pages is small and batch_size is small, GPU under-utilized. For DSA workloads with seq_len ~ thousands and batch ~ small, this could help or hurt.

@@ -1,0 +1,29 @@
+### Outline 1 — TMA GEMM2 Rebase with Deterministic Fallback
+
+**Mathematical Formulation**
+- **Variables (X):** kernel family choice for GEMM2 `{raw-pointer, TMA-block-ptr}`, autotune config set `A`, dispatch threshold function `d(T)`, and preserved parent kernels/routing code.
+- **Constraints (C):**
+  1. Output must be `[T, 7168]` bfloat16.
+  2. Routing semantics must remain exactly DeepSeek no-aux routing.
+  3. GEMM accumulation remains FP32.
+  4. FP8 dequantization semantics remain `fp8 * scale` with 128-block scales.
+  5. Any new structural optimization must have a deterministic fallback to the current best parent behavior.
+- **Objective f(X):** minimize end-to-end latency while preserving correctness; practically maximize score by reducing kernel latency below 1.448 ms.
+
+**Solver Strategy**
+- Use a deterministic model-selection strategy rather than stochastic search:
+  1. Keep the current best solution verbatim as baseline.
+  2. Add one mathematically equivalent GEMM2 load-path variant using `tl.make_block_ptr` / `tl.advance`.
+  3. Let Triton autotune act as the solver over tile configs; choose the minimum-latency legal config at runtime.
+
+**Validity Mechanism**
+- Hard-constraint enforcement by construction:
+  1. Preserve parent routing and GEMM math exactly.
+  2. New kernel changes only the load path, not algebra.
+  3. Wrap new launch in `try/except`; on any compile/runtime issue, call the parent kernel path.
+  4. Keep original output epilogue and `index_add_` scatter unchanged.
+
+**Why this solution?**
+- **Expected improvement:** GEMM2 has large weight-tile traffic and should benefit from Blackwell TMA more than GEMM1.
+- **Advantages:** high robustness, low correctness risk, easy to implement from current global best.
+- **Disadvantages:** gain may be modest if GEMM2 is compute-bound; dual-kernel maintenance adds code size.

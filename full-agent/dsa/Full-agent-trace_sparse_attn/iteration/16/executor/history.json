@@ -1,0 +1,17 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_210",
+        "solution_file_path": "output/b91c6b41-a90d-49c2-a8fe-56b8ab92fabe/16/executor/0_0/solution_210.py",
+        "evaluation_file_path": "output/b91c6b41-a90d-49c2-a8fe-56b8ab92fabe/16/executor/0_0/evaluation_210.json",
+        "score": 11.499567598467902,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 115.00x (ref: 3.033ms, kernel: 0.026ms)\",\n  \"score\": 11.499567598467902,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 114.99567598467901,\n    \"exec_time_ms\": 0.026172514492753624,\n    \"baseline_time_ms\": 3.0327820579710143,\n    \"compile_time\": 0.0,\n    \"eval_time\": 226.698894739151\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64\",\n    \"execution_time\": \"226.70s\",\n    \"kernel_latency_ms\": \"0.026ms\",\n    \"reference_latency_ms\": \"3.033ms\",\n    \"speedup\": \"115.00x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 3.0327820579710143,\n      \"max_relative_error\": 7.554955005645752,\n      \"max_absolute_error\": 0.0078125,\n      \"total_workloads\": 23\n    },\n    \"correctness_check\": \"Passed\",\n    \"ncu_profile\": {\n      \"ncu_set\": \"full\",\n      \"ncu_page\": \"details\",\n      \"ncu_kernel_name\": null,\n      \"rows\": [\n        {\n          \"workload_uuid\": \"0c23b10c7b7645719517828c12eaa1d2\",\n          \"axes\": {\n            \"num_tokens\": 1,\n            \"num_pages\": 8462\n          },\n          \"output\": \"==PROF== Connected to process 1283 (/opt/conda/envs/py312/bin/python3.12)\\n\\n==ERROR== An error was reported by the counter measurement library:\\n==ERROR== For more information, see /tmp/nsight-compute-a5b3-63c5.log\\n==ERROR== Failed to initialize the profiler: LibraryNotLoaded. Check that a compatible driver library is loaded.\\n==ERROR== For more information, see /tmp/nsight-compute-a5b3-63c5.log\\n==PROF== Trying to shutdown target application\\n==ERROR== The application returned an error code (9).\\n\"\n        }\n      ]\n    }\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

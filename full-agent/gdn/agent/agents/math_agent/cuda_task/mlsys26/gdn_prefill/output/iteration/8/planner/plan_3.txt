@@ -1,0 +1,17 @@
+**Mathematical Formulation**:
+- Variables ($X$): Load instructions per loop iteration.
+- Constraints ($C$): Fixed token dimension $d=128$. Thread block size $B=128$.
+- Objective ($f(X)$): Overlap memory latency with computation.
+
+**Solver Strategy**:
+- Async memory copies (`cp.async` or PTX `cp.async.ca.shared.global`).
+- Double buffering for Q, K, V in shared memory.
+- Start asynchronous load for the *next* token while computing the *current* token.
+
+**Validity Mechanism**:
+- `cp.async.commit_group()` and `cp.async.wait_group(0)` ensure data is fully loaded before computation.
+- Predicated loads prevent reading out-of-bounds tokens.
+
+**Why this solution?**:
+- Explicitly suggested by the parent summary: "Explore asynchronous copy (`cp.async` or TMA) to prefetch `q`, `k`, and `v` directly into shared memory".
+- Provides the ultimate memory latency hiding capability.

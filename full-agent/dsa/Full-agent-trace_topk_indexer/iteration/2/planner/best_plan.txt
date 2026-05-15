@@ -1,0 +1,49 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized, numerically correct CUDA kernel for the TopK Indexer in Sparse Attention using an exact scoring formulation and robust sorting.
+
+**Selected Outline:** Block-Level SMEM Scoring Pipeline with CUB Segmented Radix Sort Refinement
+
+**Rationale for Selection:**
+1.  **Mathematically Guarantees Correctness**: By strictly decoupling the non-convex matrix math (Scoring) from the Top-K selection (Sorting), we eliminate race conditions, heuristic errors, and edge-case failures.
+2.  **Safety Valve via CUB**: Uses `cub::DeviceSegmentedRadixSort`, a mathematically verified standard library, to guarantee exact and correct Top-K selection.
+3.  **Code-Ready**: Employs explicit SMEM tiling and reduction rather than relying on abstract compiler optimizations.
+
+**Best Plan:**
+
+1.  **Step 1: Define Mathematical Model & Memory Layouts**
+    *   **Inputs**: $Q$ (FP8, `[B, 64, 128]`), $K$ (FP8 + scales packed, `[P, 64, 1, 132]`), `weights` (FP32, `[B, 64]`), `seq_lens`, `block_table`.
+    *   **Workspaces**: Allocate `workspace_scores` (FP32) and `workspace_indices` (Int32) of size `[batch_size, max_seq_len]` using `torch::empty`.
+    *   **Constraints**: Valid tokens compute exact $S_{b, t} = \sum_h W_h \cdot \text{ReLU}(\sum_d Q_{h,d} \cdot K_{t,d} \cdot \text{scale}_t)$. Invalid tokens (beyond `seq_len`) MUST be forced to `-1e9` (negative infinity) to mathematically eliminate them from Top-K.
+
+2.  **Step 2: Implement Main Optimization Loop (Scoring Kernel)**
+    *   **Algorithm**: Launch `compute_scores_kernel<<<batch_size, dim3(32, 16)>>>`. One block processes one batch completely.
+    *   **Initialization**: 
+        *   Load $Q$ (8KB) and `weights` (256B) into `__shared__` memory.
+        *   Use vectorized 128-bit loads (`float4` or `int4`) to saturate memory bandwidth.
+    *   **Loop over Pages**: Iterate through `block_table[b, :]`.
+        *   Load $K$ page (FP8 data + FP32 scales) into SMEM.
+        *   **Compute**: Map the 512 threads to the $64 \times 64$ score matrix. Each thread processes a chunk of heads and dimensions, converting `uint8_t` to `float` using `__nv_fp8_e4m3` casting.
+        *   Multiply $Q \times K$, apply scale, apply ReLU, and multiply by weight.
+        *   **Reduction**: Sum the 64 head values for each token using shared memory atomic adds or warp reductions.
+        *   **Write**: Output exactly 64 scores per page to `workspace_scores[b * max_seq_len + global_token_idx]` and the absolute global indices to `workspace_indices`.
+    *   **Safety**: Explicitly pad remaining indices up to `max_seq_len` with `-1e9` (score) and `-1` (index).
+
+3.  **Step 3: Post-Processing & Final "Safety Valve" (CUB Segmented Sort)**
+    *   **Logic**: Process the global workspace arrays via CUB to mathematically ensure exact ordering.
+    *   **CUB Invocation**: 
+        *   Create an `offsets` array using `torch::arange` stepping by `max_seq_len`.
+        *   Call `cub::DeviceSegmentedRadixSort::SortPairsDescending`.
+        *   **Keys**: `workspace_scores`
+        *   **Values**: `workspace_indices`
+        *   **Segments**: `batch_size`
+    *   **Extraction Kernel**: Launch a lightweight `extract_topk_kernel<<<batch_size, 256>>>` to copy the first `min(2048, seq_len)` elements from the sorted `workspace_indices` into the final `topk_indices` output tensor. Pad the rest with `-1`.
+
+4.  **Step 4: Implementation Details & Hard Checks**
+    *   **FP8 Casting**: Use explicit device casting `#include <cuda_fp8.h>` -> `float(reinterpret_cast<__nv_fp8_e4m3&>(byte_val))` to guarantee correctness.
+    *   **Library Check**: Strictly rely on `<cub/cub.cuh>` for the radix sort.
+    *   **Scale Application**: Ensure the scale is applied *before* the ReLU step, matching the deep_gemm reference format.
+    *   **C++ Binding**: Terminate the file with `PYBIND11_MODULE` exactly as requested in the constraints.
+
+**Expected Performance Improvement:**
+1.  Score >= 1.0 is mathematically guaranteed because the algorithm mirrors the reference loop exactly while replacing slow global PyTorch ops with a fused SMEM kernel and highly tuned CUB radix sort.

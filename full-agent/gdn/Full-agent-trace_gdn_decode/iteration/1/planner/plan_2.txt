@@ -1,0 +1,12 @@
+Plan 2: GEMV Formulation with CUTLASS/cuBLAS
+
+Mathematical Formulation:
+Variables (X): Matrix dimensions (M=1, N=V, K=K).
+Objective f(X): Maximize throughput using highly optimized standard GEMV routines.
+Constraints: Must match the mathematical output of the custom loop.
+Solver Strategy: Treat the operations `k_h @ old_state` and `q_h @ h_state` as Batched GEMV operations. Use cuBLAS or CUTLASS to perform these batched operations.
+Validity Mechanism: Standard libraries guarantee numerical correctness.
+
+Why this solution?
+Advantages: Relies on heavily optimized NVIDIA libraries.
+Disadvantages: Requires multiple memory round-trips for the intermediate vectors (`old_v`, `new_v`, `state_update`), which is memory bandwidth bound and slower than a fused custom kernel.

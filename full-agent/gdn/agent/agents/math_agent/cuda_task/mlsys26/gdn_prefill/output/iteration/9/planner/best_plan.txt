@@ -1,0 +1,52 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Maximize the performance of the GDN Prefill Forward CUDA kernel to achieve a score >= 1.0 (execution time under 0.766ms) by fully overlapping memory latency with computation.
+
+**Selected Outline:** Asynchronous Memory Pipelining (`cp.async`)
+
+**Rationale for Selection:**
+1. The parent solution (Score 77.79) successfully broke the memory bandwidth wall by chunking sequence loads into $T=16$ blocks using `float4`.
+2. However, the parent uses synchronous memory loads: threads block while waiting for global memory data to arrive in shared memory.
+3. Outline 1 (Asynchronous Pipelining) mathematically guarantees a reduction in memory stall cycles by issuing loads for chunk $i+1$ while the FMA units are busy calculating chunk $i$. This decouples memory latency from the compute path, ensuring maximum hardware utilization.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Definition & Memory Model**
+    *   **Pipeline Model**: Double-buffered shared memory. Let $S=2$ be the number of stages. Let chunk size $T=16$.
+    *   **Shared Memory Structure**: 
+        ```cpp
+        struct alignas(16) SMEM_Tokens {
+            alignas(16) float q[2][16][136];
+            alignas(16) float k[2][16][136];
+            alignas(16) float v_out[2][16][136];
+        };
+        ```
+    *   **Constraint**: All global memory reads for Q, K, and V MUST be 16-byte aligned.
+
+2.  **Phase 2: The Optimization Loop (Hardware-Accelerated Software Pipelining)**
+    *   **Prologue (Initialization)**:
+        *   Include `<cuda_pipeline_primitives.h>`.
+        *   Issue `__pipeline_memcpy_async` for the FIRST chunk ($t\_base = seq\_start$) to load Q, K, V into stage 0 of shared memory. Use 16-byte vectorized loads (casting to `float4`).
+        *   Call `__pipeline_commit()`.
+        *   Call `__pipeline_wait_prior(0)` to ensure stage 0 is fully loaded.
+        *   `__syncthreads()`.
+    *   **Main Loop ($t\_base$)**:
+        *   **Multi-Start/Lookahead**: Check if there is a NEXT chunk ($t\_base + 16 < seq\_end$). If true, issue `__pipeline_memcpy_async` for Q, K, V into the *next* stage (e.g., `(stage + 1) % 2`).
+        *   Call `__pipeline_commit()`.
+        *   **Compute Phase**: Execute the exact same mathematical FMA loop as the parent solution (Step 4 of parent plan) reading from the *current* stage. Calculate `sp_x`, `g`, `beta`, `old_v`, `delta_v`, update `state_reg_f4`, and calculate `o_val`. Write `o_val` to `smem.tokens.v_out[stage]`.
+        *   `__syncthreads()`.
+        *   **Store Phase**: Write `v_out[stage]` back to global memory `output` using `float4` packing.
+        *   **Wait Phase**: Call `__pipeline_wait_prior(0)` to ensure the asynchronous loads for the *next* stage have completed before looping.
+        *   `__syncthreads()`.
+        *   Toggle `stage = (stage + 1) % 2`.
+
+3.  **Phase 3: The "Safety Valve" (Correctness Guarantee)**
+    *   **Math Equivalence**: The inner FMA loop logic MUST remain identically mathematically equivalent to the parent (which passed with `rtol=1e-2`). Do not alter the definitions of `g`, `beta`, or the FMA order.
+    *   **Tail Handling**: The parent handles tail sequences gracefully by bounding the inner loop by `t_chunk = min(16, seq_end - t_base)`. Ensure `cp.async` calls also respect `t_chunk` to prevent out-of-bounds memory accesses. Use conditional checks to mask out invalid pipeline copies.
+    *   **State Fallback**: Keep the `new_state` writing logic exactly as it is in the parent.
+
+4.  **Phase 4: Implementation Details**
+    *   Use `<cuda_pipeline_primitives.h>` explicitly.
+    *   Use `__pipeline_memcpy_async` (which maps to `cp.async.ca.shared.global` in PTX).
+    *   Ensure all loads into shared memory target `float4` elements. The parent does manual packing/unpacking; adapt this to use `__pipeline_memcpy_async` to copy 16 bytes directly into an intermediate `float4` SMEM buffer, then unpack in registers if needed, or better, store `bfloat16` directly in shared memory and unpack on the fly to save SMEM capacity and allow $T=32$ later.
+    *   *Refinement*: To make `cp.async` work easily, load `bfloat16` directly into shared memory asynchronously. In the compute loop, read `bfloat16` from shared memory, convert to `float`, and compute. This avoids manual byte manipulation during the async copy.

@@ -1,0 +1,20 @@
+**Mathematical Formulation**:
+- Variables ($X$): Tiling factor $T$ (tokens per block), Vectorization width $W$ (elements per memory access).
+- Constraints ($C$): Shared memory $\le 48$ KB. Thread count $= 128$.
+- Objective ($f(X)$): Minimize global memory access latency.
+
+**Solver Strategy**:
+- `W = 8` (`float4` containing 8 `bfloat16`).
+- `T = 16`.
+- 128 threads can load $8$ tokens of a 128-dim vector in one parallel memory operation.
+- By looping twice, we load 16 tokens for $Q, K, V$ into shared memory.
+- Compute the recurrent state updates in registers.
+- Store $O$ back to global memory using vectorized `float4` stores.
+
+**Validity Mechanism**:
+- Handle sequence boundaries explicitly: `if (curr_t < seq_end)`.
+- Reinterpret casts are mathematically safe because the innermost dimension (128) is a multiple of 8.
+
+**Why this solution?**:
+- Directly addresses the memory bandwidth wall identified in the parent's summary.
+- Reduces memory issue instructions by 8x.

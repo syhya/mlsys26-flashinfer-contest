@@ -1,0 +1,253 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Produce a child Python implementation for the FP8 block-scale DeepSeek-style MoE that safely stays above the correctness threshold (`score >= 1.0`) and has the highest probability of improving over the assigned parent `a96d6608` by rebasing onto the true frontier. The global database shows the current best is `6da80c61` (score 1.5985), while the assigned parent is older and weaker. The chosen plan is therefore to **rebase onto `6da80c61` and fuse in the proven routing refactor from `302d2eb3`**, while keeping the current-best GEMM1/GEMM2 kernels and bf16 epilogue unchanged.
+
+**Selected Outline:** Outline 3 — Rebase onto global-best `6da80c61` and replace `_route_tokens` with the mathematically equivalent dense sentinel-sort routing formulation.
+
+**Rationale for Selection:**
+1. **Most robust among the 3 outlines.** It changes only the PyTorch routing path, not the fragile Triton GEMM kernels.
+2. **Positive historical evidence exists.** The sentinel-sort routing refactor already produced a real gain in `302d2eb3` over `a96d6608`, so this is not speculative.
+3. **It avoids the two known failure modes in this lineage:**
+   - GEMM2 TMA ideas were either not implemented or regressed.
+   - Complex dual-path fallback code adds surface area without guaranteed upside.
+4. **It cleanly decouples structure from parameters:**
+   - Keep the best kernel structure from `6da80c61` exactly.
+   - Change only the routing parameterization / implementation.
+5. **It preserves a strong floor.** If the routing refactor is copied exactly, the child should remain near the current frontier even if the gain is small.
+
+---
+
+## Phase 1: Mathematical Definition
+
+### 1.1 Full computation model
+The child must still compute exactly the same MoE function:
+
+1. **Routing**
+   - `q[t,e] = sigmoid(routing_logits[t,e])`
+   - `rank[t,e] = q[t,e] + routing_bias[e]`
+   - Partition 256 experts into `N_GROUP = 8` groups of size 32.
+   - For each token `t` and group `g`, define:
+     - `group_score[t,g] = sum(top2(rank[t, group g]))`
+   - Select top-4 groups per token.
+   - Mask all experts outside those groups.
+   - Select global top-8 experts from the masked `rank`.
+   - Define routing weights using **raw sigmoid scores** `q`, renormalized only over the selected top-8 experts, then multiplied by `routed_scaling_factor`.
+
+2. **GEMM1**
+   - For each routed token/expert pair `j` with original token index `tok[j]` and expert `e[j]`:
+   - `G1[j,n] = Σ_k hidden_states[tok[j],k] * gemm1_weights[e[j],n,k] * hidden_states_scale[k//128, tok[j]] * gemm1_weights_scale[e[j], n//128, k//128]`
+   - Accumulation must remain FP32.
+
+3. **SwiGLU**
+   - Split `G1` into `x1 = G1[:, :I]`, `x2 = G1[:, I:]` with `I = 2048`
+   - `C[:,i] = x1[:,i] * x2[:,i] * sigmoid(x2[:,i])`
+
+4. **GEMM2**
+   - `O[j,h] = Σ_i C[j,i] * gemm2_weights[e[j], h, i] * gemm2_weights_scale[e[j], h//128, i//128]`
+   - Keep the current-best FP8-TC GEMM2 math from `6da80c61` unchanged.
+
+5. **Scatter-add**
+   - `output[tok[j], h] += routing_weight[j] * O[j,h]`
+   - Final output dtype must be `torch.bfloat16`.
+
+### 1.2 Variables
+Define optimization variables:
+- `R`: routing implementation.
+- `K1`: GEMM1 implementation.
+- `K2`: GEMM2 implementation.
+- `E`: epilogue/output accumulation path.
+
+For this child:
+- `R = dense sentinel-sort routing from 302d2eb3`
+- `K1 = exact 6da80c61 GEMM1 path`
+- `K2 = exact 6da80c61 GEMM2 path`
+- `E = exact 6da80c61 bf16 epilogue`
+
+### 1.3 Constraints
+Hard constraints:
+- Output shape exactly `[T, 7168]`
+- Output dtype exactly `torch.bfloat16`
+- FP32 accumulation in both GEMMs
+- Routing semantics exactly preserved
+- Expert/token dispatch fully GPU-vectorized
+- All expert stride math in Triton remains int64-safe
+- Must handle any `T`
+- No CPU loops over GPU tensors
+
+### 1.4 Objective
+Let `f(X)` be total forward latency.
+We solve:
+- **minimize** `f(X)`
+- subject to all correctness constraints above.
+
+This is a deterministic constrained optimization problem over a finite implementation family, not a stochastic search.
+
+---
+
+## Phase 2: The Optimization Loop
+
+### Step 2.1: Rebase onto `6da80c61` exactly
+Start by copying the current global-best structure **verbatim**:
+- `grouped_gemm1_kernel`
+- `grouped_gemm1_kernel_tma`
+- `grouped_gemm2_kernel`
+- `_route_tokens`
+- `run()`
+- bf16 epilogue (`O.to(torch.bfloat16)` + bf16 `index_add_`)
+
+This is the baseline feasible point.
+
+### Step 2.2: Replace only `_route_tokens`
+Do **not** modify GEMM kernels or the epilogue.
+Only replace `_route_tokens` with the dense sentinel-sort formulation used in `302d2eb3` / `dce0e38f`.
+
+The replacement must follow this exact mathematical structure:
+
+1. Compute `q`, `rank_scores`, `group_scores`, `top_groups`, `expert_allowed`, `pruned`, `topk_idx`, `weights` exactly as usual.
+2. Replace the local expert extraction block based on:
+   - `torch.nonzero(expert_mask, as_tuple=True)`
+   - `argsort(local_expert_idx)`
+
+with the dense flattened method:
+
+```python
+flat_expert = topk_idx.reshape(-1)
+flat_token = torch.arange(T, device=device, dtype=torch.int64).repeat_interleave(TOP_K)
+flat_weight = weights.gather(1, topk_idx).reshape(-1)
+
+shifted = flat_expert - local_start
+in_range = (shifted >= 0) & (shifted < e_local)
+sentinel = torch.full_like(shifted, e_local)
+sort_key = torch.where(in_range, shifted, sentinel)
+order = torch.argsort(sort_key, stable=True)
+
+n_valid = int(in_range.sum().item())
+if n_valid == 0:
+    return None
+
+order = order[:n_valid]
+sorted_tokens = flat_token[order].to(torch.int32)
+sorted_experts = sort_key[order].to(torch.int32)
+sorted_weights = flat_weight[order].to(torch.float32)
+
+expert_counts = torch.bincount(sorted_experts, minlength=e_local)
+expert_offsets = torch.zeros(e_local + 1, dtype=torch.int32, device=device)
+expert_offsets[1:] = torch.cumsum(expert_counts, dim=0)
+```
+
+### Step 2.3: Keep GEMM kernels unchanged
+The executor must preserve the exact current-best kernels from `6da80c61`.
+That means:
+- Keep GEMM1 TMA path and fallback structure as-is.
+- Keep GEMM2 FP8-TC kernel body as-is.
+- Do not introduce new TMA GEMM2 experiments.
+- Do not edit autotune lists unless absolutely necessary.
+
+### Step 2.4: Keep the epilogue unchanged
+Retain:
+- `O_bf16 = O.to(torch.bfloat16)`
+- `output = torch.zeros((T, H), dtype=torch.bfloat16, device=device)`
+- `output.index_add_(0, sorted_tokens.long(), O_bf16)`
+- `return output`
+
+This is already part of the frontier-best solution and should not be touched.
+
+---
+
+## Phase 3: The "Safety Valve" (CRITICAL)
+
+### 3.1 Validity by construction
+The strongest safety mechanism is to preserve all fragile Triton code from `6da80c61` exactly and alter only `_route_tokens` using a previously validated equivalent formulation.
+
+### 3.2 Exact routing equivalence rule
+The dense sentinel-sort method is valid because it reproduces the same local routed tuple set as the original sparse extraction:
+- `topk_idx.reshape(-1)` enumerates `(token, k)` in row-major order.
+- `repeat_interleave(TOP_K)` builds the matching token indices.
+- `weights.gather(1, topk_idx).reshape(-1)` retrieves the exact expert-selected weights.
+- `sort_key = shifted or sentinel` groups local experts first and non-local experts last.
+- `argsort(..., stable=True)` preserves row-major tie order.
+- Truncating to `n_valid` reproduces the effect of dropping masked-out experts.
+
+This is the deterministic repair/projection step that ensures the new route representation still satisfies the original dispatch constraints.
+
+### 3.3 Hard constraints to explicitly preserve
+The executor must verify:
+- `stable=True` is present in `torch.argsort`
+- `flat_weight = weights.gather(1, topk_idx).reshape(-1)` is used
+- `sorted_experts = sort_key[order].to(torch.int32)` after truncation to valid entries
+- `n_valid == 0` returns `None`
+- `expert_counts = torch.bincount(sorted_experts, minlength=e_local)` remains unchanged
+- all zero-return edge cases in `run()` remain unchanged
+
+### 3.4 Rejection rule
+If the executor cannot copy the dense routing block exactly, then the fallback is simple:
+- submit the exact `6da80c61` parent unchanged rather than risking a partial or incorrect routing rewrite.
+
+This guarantees a valid high-scoring child even under execution uncertainty.
+
+---
+
+## Phase 4: Implementation Details
+
+### 4.1 Libraries
+Use only:
+- `torch`
+- `triton`
+- `triton.language as tl`
+
+### 4.2 Exact file structure
+Single `.py` file in this order:
+1. imports
+2. `grouped_gemm1_kernel` copied from `6da80c61`
+3. `grouped_gemm1_kernel_tma` copied from `6da80c61`
+4. `grouped_gemm2_kernel` copied from `6da80c61`
+5. new `_route_tokens` using the sentinel-sort dense formulation
+6. `run()` copied from `6da80c61` unchanged except it calls the replaced `_route_tokens`
+
+### 4.3 Exact implementation directives
+- Rebase on `6da80c61`, not on `a96d6608`.
+- Do not modify Triton kernels.
+- Do not add GEMM2 TMA.
+- Do not add try/except around GEMM2.
+- Do not change bf16 epilogue.
+- Only replace `_route_tokens` with the exact dense sentinel-sort formulation.
+
+### 4.4 Anti-regression checklist
+Before submission, verify all of the following:
+- [ ] Base code is `6da80c61`
+- [ ] `grouped_gemm1_kernel_tma` still exists
+- [ ] `grouped_gemm2_kernel` body is unchanged from `6da80c61`
+- [ ] `_route_tokens` uses dense flatten + sentinel sort
+- [ ] `torch.argsort(..., stable=True)` is present
+- [ ] `weights.gather(1, topk_idx).reshape(-1)` is present
+- [ ] `n_valid = int(in_range.sum().item())`
+- [ ] `sorted_experts = sort_key[order].to(torch.int32)` after slicing valid prefix
+- [ ] `expert_offsets[1:] = torch.cumsum(expert_counts, dim=0)` unchanged
+- [ ] edge-case zero returns unchanged
+- [ ] final output path remains bf16 `index_add_`
+
+---
+
+## Final Review
+
+### Does it rely on math rather than luck?
+Yes. The child is constructed as a deterministic rebase-plus-equivalent-refactor. No randomization is used.
+
+### Library Check
+Only standard task-available libraries are used: `torch`, `triton`, `triton.language`.
+
+### Randomness Check
+No randomness, so no multi-start loop is needed.
+
+### Is the code implementable?
+Yes. This is a code-ready plan: copy `6da80c61`, replace one function body with a historically validated equivalent formulation, and preserve the rest.
+
+---
+
+## Executor Priority Note
+The lineage evidence is clear:
+- `6da80c61` is the current frontier-best base.
+- GEMM2 TMA experiments have not produced a reliable win.
+- Routing refactor already showed positive evidence.
+
+Therefore the most robust next child is: **rebase on `6da80c61` and swap in the proven sentinel-sort `_route_tokens` implementation, leaving the kernel stack untouched.**

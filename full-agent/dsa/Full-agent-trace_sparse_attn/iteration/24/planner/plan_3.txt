@@ -1,0 +1,2 @@
+Plan 3: Restore + reduce threshold tau from 128 to smaller value (e.g. 64) to shift medium workloads to fused path.
+- Risky: may slow medium workloads where split-K was winning.

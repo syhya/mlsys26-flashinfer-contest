@@ -1,0 +1,70 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Minimize HBM write traffic and instruction overhead in the low-workload (split-K) path by enforcing mathematically guaranteed 128-bit (`float4`) vectorized stores for the intermediate output `O_tmp`, resolving the bottleneck identified in the parent.
+
+**Selected Outline:** Algebraic Layout Transformation and Vectorized Construction (Plan 3 combined with explicit register packing).
+
+**Rationale for Selection:**
+1.  **Directly targets the root cause:** The parent solution generated the exact same code because it couldn't figure out how to output `float4` from the `split_k_compute_kernel`.
+2.  **Mathematically Sound:** Rather than complex shared memory transpositions (which introduce synchronization overhead) or grid structure changes (which ruin the carefully tuned SM occupancy), we can deterministically combine the adjacent `float2` registers into `float4` types prior to the global memory store.
+3.  **Guarantees Validity:** By explicitly packing `(O_reg[2*j], O_reg[2*j+1])` into a `float4` and calculating the precise 16-byte aligned address pointer, we guarantee correct memory layout without data corruption.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Definition of the Vectorization Model**
+    *   **Variables ($X$):** The 8 `float2` registers per thread `O_reg[0..7]`.
+    *   **Objective ($f(X)$):** Minimize $\text{Store Instructions}(X)$.
+    *   **Constraint ($C$):** $X_{store}$ must use 128-bit transactions.
+    *   **Transformation:** We define a deterministic mapping function $T: \mathbb{R}^2 \times \mathbb{R}^2 \rightarrow \mathbb{R}^4$ such that $V_k = \text{make\_float4}(O\_reg[2k].x, O\_reg[2k].y, O\_reg[2k+1].x, O\_reg[2k+1].y)$ for $k \in \{0, 1, 2, 3\}$.
+
+2.  **Phase 2: The Optimization Loop (Kernel Code Modification)**
+    *   **Identify:** Locate the `split_k_compute_kernel` in the parent CUDA C++ code.
+    *   **Locate Bottleneck:** Find the loop:
+        ```cpp
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            int base_idx = t * 64 * 16 * 512 + s * 16 * 512 + h * 512 + j * 64 + lane * 2;
+            *reinterpret_cast<float2*>(&O_tmp[base_idx]) = make_float2(O_reg[j].x, O_reg[j].y);
+        }
+        ```
+    *   **Replace with Vectorized Store:** Replace the 8 iterations of `float2` writes with 4 iterations of `float4` writes.
+    *   **Address Calculation:** The old memory offsets for a single thread were $j \times 64 + lane \times 2$.
+        *   For $j=0$: offset is $lane \times 2$.
+        *   For $j=1$: offset is $64 + lane \times 2$.
+        *   *Wait, $j=0$ and $j=1$ do NOT map to contiguous memory addresses!* $O\_reg[0]$ maps to offset $L$, $O\_reg[1]$ maps to offset $L+64$. They are separated by 64 floats (256 bytes).
+    *   **Pivot to Shared Memory Transposition (Plan 1 fallback):** Because the logical registers span a stride of 64, direct `float4` packing into global memory is impossible without transposing.
+        *   **Algorithm Update:** We MUST use a Shared Memory staging area.
+
+3.  **Phase 3: The "Safety Valve" (CRITICAL: Shared Memory Transposition)**
+    *   **Allocate SMEM:** Declare `__shared__ float smem_O[16][512];` (Size: 32 KB). We can reuse `smem_Kc` memory space using a `union` or `reinterpret_cast` to avoid exceeding SMEM limits.
+    *   **Write to SMEM:** 
+        ```cpp
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            smem_O[h][j * 64 + lane * 2] = O_reg[j].x;
+            smem_O[h][j * 64 + lane * 2 + 1] = O_reg[j].y;
+        }
+        ```
+    *   **Barrier:** Call `__syncthreads()` to guarantee all threads have written their fragments.
+    *   **Vectorized Read/Write:** 
+        *   Assign each thread 4 contiguous `float4` values (16 floats) from the 512-dimension vector.
+        *   `int d_idx = lane * 16;` (Wait, 32 threads * 16 floats = 512. Perfect mapping).
+        *   ```cpp
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                float4 val = *reinterpret_cast<const float4*>(&smem_O[h][lane * 16 + j * 4]);
+                int base_idx = t * 64 * 16 * 512 + s * 16 * 512 + h * 512 + lane * 16 + j * 4;
+                *reinterpret_cast<float4*>(&O_tmp[base_idx]) = val;
+            }
+            ```
+
+4.  **Phase 4: Implementation Details & Code Generation Protocol**
+    *   **Memory Reuse:** To avoid exceeding the 32KB shared memory limit per block (since occupancy is critical), reuse the `smem_Kc` buffer:
+        `float* smem_O = reinterpret_cast<float*>(smem_Kc);`
+        (Since `smem_Kc` is `32 * 512 * sizeof(bfloat16) = 32 KB`, and we need `16 * 512 * sizeof(float) = 32 KB`, it fits perfectly).
+    *   **Synchronization:** Insert `__syncthreads()` right before interpreting `smem_Kc` as `smem_O`, and immediately after writing `O_reg` to `smem_O`.
+    *   **Execute the exact code replacement** in the Phase 2 executor.
+
+**Expected Performance Improvement:**
+1.  Reduces `O_tmp` HBM write transactions in `split_k_compute_kernel` by 50% (from 8x `float2` to 4x `float4`), directly addressing the uncoalesced/suboptimal write metric flagged by the profiler.
+2.  Breaks the genetic trap: The explicit syntax change forces a genuine evolutionary step, ensuring the parent is successfully mutated.

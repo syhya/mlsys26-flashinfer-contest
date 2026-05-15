@@ -1,0 +1,72 @@
+Plan 1: Hybrid torch._scaled_mm with Exact Block-Scale Semantics
+
+**Mathematical Formulation:**
+
+Variables:
+- X[T, H]: Input hidden states (FP8)
+- S_x[H//128, T]: Input block scales (transposed layout)
+- W1[E, 2I, H]: GEMM1 weights (FP8)
+- S_w1[E, 2I//128, H//128]: GEMM1 block scales
+- W2[E, H, I]: GEMM2 weights (FP8)
+- S_w2[E, H//128, I//128]: GEMM2 block scales
+- R[T, E]: Routing weights (normalized)
+
+Constraints:
+- All GEMM accumulation in FP32
+- Block-scale interpretation: val = fp8_val * scale[block_idx]
+- Hidden-state scales indexed by original token ID, not routed row ID
+- Output shape [T, H], dtype bfloat16
+
+Objective:
+- Maximize speedup while maintaining rtol=1e-2, atol=1e-2
+- Score >= 1.0 (correctness + faster than baseline)
+
+**Solver Strategy:**
+
+Use PyTorch's native `torch._scaled_mm` for FP8 GEMM operations:
+- torch._scaled_mm(A_fp8, B_fp8, scale_a, scale_b, out_dtype=torch.float32)
+- This leverages cuBLAS FP8 tensor cores with exact block-scale support
+- Avoids custom Triton kernel bugs that have plagued the lineage
+
+Key algorithmic steps:
+1. Vectorized GPU routing (no CPU sync)
+2. Per-expert batched GEMM1 using torch._scaled_mm
+3. Fused SwiGLU in PyTorch (no custom kernel)
+4. Per-expert batched GEMM2 using torch._scaled_mm
+5. Weighted scatter-add accumulation
+
+**Validity Mechanism:**
+
+1. Pre-flight validation:
+   - Check dispatch structure (offsets monotonic, counts match)
+   - Validate scale tensor shapes match block-scale convention
+   
+2. Per-expert scale preparation:
+   - For each routed token, extract correct scale from S_x[:, token_id]
+   - Reshape scales to match torch._scaled_mm requirements
+   - Use explicit broadcasting to ensure alignment
+
+3. Numerical micro-check:
+   - For first active expert, compute 2 rows via both fast path and exact dequant
+   - If error > 1e-1, abort to fallback
+   
+4. Fallback oracle:
+   - Full exact dequantization + PyTorch matmul
+   - Guaranteed correct but slow
+
+**Why this solution:**
+
+Advantages:
+- torch._scaled_mm is battle-tested by PyTorch team for FP8 operations
+- Eliminates custom Triton kernel bugs (scale indexing, pointer overflow, etc.)
+- Still uses FP8 tensor cores for speed
+- Simpler implementation = fewer bugs
+
+Disadvantages:
+- May be slightly slower than optimal custom Triton (but parent's Triton is buggy)
+- Less control over tiling and memory access patterns
+
+Expected performance:
+- Should achieve 3-5x speedup (between parent's 2.39x and grandparent's 8x)
+- Higher probability of correctness due to using native PyTorch ops
+- Target score: 0.6-0.8 (good but not optimal)

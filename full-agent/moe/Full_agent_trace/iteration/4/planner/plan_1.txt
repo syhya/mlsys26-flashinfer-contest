@@ -1,0 +1,13 @@
+**Mathematical Formulation**:
+- Variables (X): Tile sizes (BLOCK_M, BLOCK_N, BLOCK_K) in Triton kernels.
+- Constraints (C): Output absolute error < 1e-2. Memory access boundaries strictly enforced.
+- Objective (f(X)): Minimize execution latency using GPU Tensor Cores.
+
+**Solver Strategy**:
+Multi-Start Autotuning via `@triton.autotune` with configurations (128x128, 64x128, 64x64) to find the optimal grid execution.
+
+**Validity Mechanism**:
+Replace the parent's highly unstable dynamic FP8 quantization with exact BF16 upcasting (`w_bf16 = (w.to(tl.float32) * w_scale).to(tl.bfloat16)`). This mathematically guarantees precision while still utilizing fast BF16 Tensor Cores for GEMM2.
+
+**Why this solution?**:
+Best balance of speed and guaranteed precision. Fixes the 33280.0 error directly.

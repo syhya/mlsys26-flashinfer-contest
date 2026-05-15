@@ -1,0 +1,38 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized, numerically exact CUDA kernel for the GDN prefill forward pass that significantly outperforms the PyTorch reference while maintaining strict accuracy.
+
+**Selected Outline:** Register-Resident Thread-Local State Kernel with Shared Memory Transpose
+
+**Rationale for Selection:**
+1. Mathematically guarantees zero cross-thread communication during the heavy sequence ($t$) loop by proving the state update formula is dimensionally independent along $V$.
+2. Maximizes arithmetic intensity and bandwidth utilization by caching the $128 \times 128$ state tensor entirely in thread-local registers, bypassing global/shared memory bottlenecks.
+
+**Best Plan:**
+1.  **Phase 1: Mathematical Definition & Kernel Mapping**
+    *   **Variables ($X$)**: Thread execution layout. Assign the CUDA Grid to `(num_v_heads, num_seqs)` and the Block size to exactly `128` threads. Thread $tid \in [0, 127]$ maps precisely to the value index $v = tid$.
+    *   **Constraints ($C$)**: Max registers per thread $\le 255$. Shared memory per block $\le 48$ KB.
+    *   **Objective ($f(X)$)**: Minimize memory latency and eliminate warp synchronization during the sequential sequence loop.
+    *   **Model**: We decouple the delta rule $state[k, v] = g \cdot state[k, v] + k[k] \cdot (new\_v[v] - old\_v[v])$. By keeping $state[\cdot, v]$ entirely in $tid$'s registers, $tid$ computes the update locally using the globally broadcasted vector $k$. Register usage is exactly 128 floats per thread, safely within hardware limits.
+
+2.  **Phase 2: The Optimization Loop (Kernel Execution)**
+    *   **Initialization**: Allocate `__shared__ float smem_transpose[32][129]`. Load the `[num_seqs, num_v_heads, 128, 128]` state tensor cooperatively from global memory in 4 chunks of 32 rows. The 129 stride padding avoids all shared memory bank conflicts when $tid$ reads its column into its local `float state_reg[128]`.
+    *   **Sequence Loop (`for t = seq_start; t < seq_end; t++`)**:
+        *   All 128 threads cooperatively load $q[t, q\_head, \cdot]$ and $k[t, k\_head, \cdot]$ into `__shared__ float smem_q[128]` and `smem_k[128]`. Thread $tid$ loads $v\_val = v[t, v\_head, tid]$ directly from global memory.
+        *   **Compute Gates**: Calculate $x, g, beta$ locally using `expf` and `log1pf`.
+        *   **Thread-Local Math**: $tid$ computes $old\_v = g \cdot \sum_{k=0}^{127} (smem\_k[k] \cdot state\_reg[k])$. (No warp syncs needed here since $smem\_k$ broadcasts perfectly to all threads).
+        *   Compute $new\_v = beta \cdot v\_val + (1 - beta) \cdot old\_v$.
+        *   **State Update**: Unroll a loop `for k=0..127` to update $state\_reg[k] = g \cdot state\_reg[k] + smem\_k[k] \cdot (new\_v - old\_v)$ and simultaneously accumulate $out\_val += smem\_q[k] \cdot state\_reg[k]$.
+        *   Sync threads to protect shared memory, then write $out\_val \cdot scale$ to the global `output` tensor.
+    *   **Write Back**: After the loop concludes, use `smem_transpose` to cooperatively write `state_reg` back to the `new_state` tensor in perfectly coalesced global memory transactions.
+
+3.  **Phase 3: The "Safety Valve" (Strict Constraint Enforcement)**
+    *   **Constraint 1 (Missing State)**: Check `state.defined() && state.numel() > 0`. If false, dynamically bypass the shared memory load and strictly initialize `state_reg[k] = 0.0f` to prevent segmentation faults.
+    *   **Constraint 2 (Zero Scale)**: If `scale == 0.0f` or uninitialized, execute the mathematical fallback `scale = 1.0f / sqrtf(128.0f)` before the sequence loop.
+    *   **Constraint 3 (Sequence Bounds)**: Use `cu_seqlens` to establish `[seq_start, seq_end)`. If `seq_start >= seq_end` (empty sequence), trigger an immediate `return` to prevent illegal memory access.
+    *   **Constraint 4 (Head Alignment)**: Enforce $q\_head = v\_head / 2$ and $k\_head = v\_head / 2$ to correctly map the 4 Q/K heads to the 8 V heads per the Grouped-Value Attention (GVA) constraints.
+
+4.  **Phase 4: Implementation Details**
+    *   **Framework**: Pure CUDA C++ wrapped with `pybind11` (`TORCH_EXTENSION_NAME`). Expose exactly `std::tuple<torch::Tensor, torch::Tensor> gdn_forward(...)` returning `{output, new_state}`.
+    *   **Data Types**: Maintain strict `float32` accumulation for all intermediate variables (`old_v`, `new_v`, `out_val`, `state_reg`) to guarantee correctness (rtol=1e-2). Final output store casts to `c10::BFloat16`.
+    *   **Optimization**: Use `#pragma unroll 8` for the $k$-loops to maximize instruction-level parallelism and hide FMA latencies. Apply `__syncthreads()` strictly after shared memory writes and before the next iteration's overwrites to prevent race conditions.

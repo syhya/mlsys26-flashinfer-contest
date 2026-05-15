@@ -1,0 +1,20 @@
+### Strategic Analysis Report
+
+**1. Executive Summary:**
+This iteration was a successful optimization because pre-dequantizing the query tensor into shared memory and unrolling the inner head-reduction loop eliminated redundant arithmetic overhead, achieving a 37.53x speedup.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   **Sibling Rank:** 1 out of 1 children. Top sibling score: 3.75%.
+*   **Score Delta:** From parent (3.40) to child (3.75).
+*   **Key Change:** Pre-dequantized the FP8 query tensor into FP32 `float4` arrays within shared memory during block initialization (trading 8KB for 32KB of SMEM) and unrolled the inner head loop by a factor of 4.
+*   **Core Metrics:** Execution time decreased from 0.130ms to 0.109ms, improving the speedup from 34.05x to 37.53x while maintaining 1.0 correctness.
+
+**3. Strategic Analysis (The "So What?"):**
+*   **Root Cause:** The outcome was due to a highly effective execution plan that targeted instruction-level bottlenecks. By converting queries from FP8 to FP32 only once per block and caching them in shared memory, the kernel avoided executing the `cvt_fp8x4_to_float4` helper function 64 times per token in the innermost loop. Loop unrolling further increased instruction-level parallelism.
+*   **Key Insight:** Trading shared memory space for reduced computation is a highly effective pattern when dealing with heavily reused broadcast variables. Moving type conversions out of the critical path yields substantial gains.
+*   **Identified Risk:** The block now consumes over 32KB of shared memory just for queries. Further increases in shared memory usage per block (e.g., trying to tile the KV cache) might hit the SM limit, reducing warp occupancy and potentially degrading performance.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   **Recommend Exploration:** With query dequantization optimized, the bottleneck shifts to the KV cache loading. Investigate utilizing vectorized `uint4` loads or asynchronous memory copies (`cp.async` or TMA on SM90) to tile the FP8 KV cache into shared memory, hiding global memory latency.
+*   **Recommend Fusion:** The dot-product is still computed via scalar/vector element-wise operations and warp reductions. Recommend fusing the computation into hardware-accelerated FP8 Tensor Core MMA operations via PTX or CuTe, which could dramatically reduce the cycle count for the `q @ K.T` math.
+*   **Warn:** Monitor shared memory consumption closely. Any future tiling strategies must carefully balance SMEM usage against block occupancy to avoid performance regressions.

@@ -1,0 +1,28 @@
+Outline 3: Hybrid throughput path with cp.async staged tiles and optional WMMA-style inner products
+
+Mathematical Formulation
+- Variables X:
+  1. Tile sizes (Bk, Dk) for sparse-position and feature blocking.
+  2. Pipeline stage count s in {1,2} for asynchronous shared-memory staging.
+  3. Register-blocked accumulator fragments for output O in R^512.
+  4. Per-(token, head) online softmax state (m, l).
+- Constraints C:
+  1. Exact masking semantics for -1 indices.
+  2. FP32 accumulation for logits, m/l, and output accumulation.
+  3. Only final output cast to BF16 and lse to FP32 base-2.
+  4. Path must degrade safely on architectures where cp.async / WMMA implementation details are risky or unavailable.
+- Objective f(X): maximize throughput on large workloads via overlap of gather loads and compute, increasing memory-level parallelism and reducing stall cycles.
+
+Solver Strategy
+- Deterministic pipeline scheduling: double-buffered staged copy-compute loop.
+- Optional architecture-gated path selection acts as a finite-state dispatch optimizer, not random search.
+
+Validity Mechanism
+- Fallback to non-async scalar/vector load path if architecture or alignment conditions fail.
+- Shared-memory bounds and valid-count checks provide deterministic safety.
+- Final exact online normalization ensures correctness independent of staging strategy.
+
+Why this solution?
+- Expected improvement: potential large-workload gains by overlapping memory movement and compute.
+- Advantages: targets advanced hardware features requested by the task.
+- Disadvantages: highest implementation complexity, architecture sensitivity, and greatest compile/correctness risk for this iteration.

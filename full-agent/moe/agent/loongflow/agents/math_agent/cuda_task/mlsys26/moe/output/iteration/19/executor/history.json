@@ -1,0 +1,17 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_35f",
+        "solution_file_path": "output/1387117c-ebe6-4123-b720-7ca74f120716/19/executor/0_0/solution_35f.py",
+        "evaluation_file_path": "output/1387117c-ebe6-4123-b720-7ca74f120716/19/executor/0_0/evaluation_35f.json",
+        "score": 0.1844067610514766,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 1.84x (ref: 19.052ms, kernel: 11.548ms)\",\n  \"score\": 0.1844067610514766,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 1.844067610514766,\n    \"exec_time_ms\": 11.54768856140351,\n    \"baseline_time_ms\": 19.05203701754386,\n    \"compile_time\": 0.0,\n    \"eval_time\": 111.08941578865051\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"111.09s\",\n    \"kernel_latency_ms\": \"11.548ms\",\n    \"reference_latency_ms\": \"19.052ms\",\n    \"speedup\": \"1.84x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 19.05203701754386,\n      \"max_relative_error\": 54799998976.0,\n      \"max_absolute_error\": 8192.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\",\n    \"ncu_profile\": {\n      \"ncu_set\": \"full\",\n      \"ncu_page\": \"details\",\n      \"ncu_kernel_name\": null,\n      \"rows\": [\n        {\n          \"workload_uuid\": \"b8f4f012-a32e-4356-b4e1-7665b3d598af\",\n          \"axes\": {\n            \"seq_len\": 7\n          },\n          \"output\": \"==PROF== Connected to process 458 (/opt/conda/envs/py312/bin/python3.12)\\n\\n==ERROR== An error was reported by the counter measurement library:\\n==ERROR== For more information, see /tmp/nsight-compute-027b-3a41.log\\n==ERROR== Failed to initialize the profiler: LibraryNotLoaded. Check that a compatible driver library is loaded.\\n==ERROR== For more information, see /tmp/nsight-compute-027b-3a41.log\\n==PROF== Trying to shutdown target application\\n==ERROR== The application returned an error code (9).\\n\"\n        }\n      ]\n    }\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

@@ -1,0 +1,33 @@
+### Outline 2 — Worklist-Based Hybrid Triton GEMM with CSR Scheduling and Safe PyTorch Fallback
+
+**Mathematical Formulation**
+- **Variables ($X$):**
+  - CSR dispatch arrays: `expert_counts`, `expert_offsets`, `tile_offsets`, `worklist = {(e, tile_m)}` covering only active expert-token tiles.
+  - GEMM1 tile outputs `G1[tile]` and GEMM2 tile outputs `Y[tile]`.
+  - Routing accumulation tensor `output \in R^{T \times H}`.
+  - Discrete tile hyperparameters `BLOCK_M, BLOCK_N, K_SPLIT` selected as a deterministic function of `T` and `max_count`.
+- **Constraints ($C$):**
+  1. Worklist must exactly cover active tiles and exclude empty CTAs.
+  2. Pointer arithmetic must use int64 for expert-weight addressing.
+  3. GEMM1 uses FP8 tensor-core dot with post-dot scaling.
+  4. GEMM2 accumulation remains FP32 and final output BF16.
+  5. Scatter accumulation into global output must avoid race-induced invalidity; if multiple experts contribute to one token, combine through deterministic FP32 `index_add_` after temporary tile output.
+- **Objective ($f(X)$):** minimize launched empty CTAs and improve occupancy, especially for skewed expert distributions and small `T`.
+
+**Solver Strategy**
+- Deterministic combinatorial scheduler:
+  1. Build CSR counts with `torch.bincount` and `cumsum`.
+  2. Build a compact worklist of only active `(expert_id, m_tile)` pairs using vectorized torch ops.
+  3. Launch GEMM kernels over worklist length instead of full `(expert, m_tile_max)` Cartesian grid.
+  4. Use a fixed policy map from `(T, max_count)` to tile sizes and `K_SPLIT`.
+- This is a discrete scheduling optimization solved by exact construction, not randomness.
+
+**Validity Mechanism**
+- The worklist is generated from exact expert counts, so no tile is missed.
+- For safety, keep a baseline path: if worklist tensors are empty, malformed, or unsupported by Triton indexing, revert to parent grouped-grid launch.
+- Final output still uses deterministic `index_add_` into FP32 before BF16 cast.
+
+**Why this solution?**
+- **Expected improvement:** remove large numbers of idle CTAs when routing is skewed; potentially strong benefit for decode/small `T`.
+- **Advantages:** directly targets a known inefficiency in grouped expert-major launch; no atomics required.
+- **Disadvantages:** implementation is more complex; worklist indexing bugs are possible; gains may be modest for balanced routing or large `T`.

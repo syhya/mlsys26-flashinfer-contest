@@ -1,0 +1,19 @@
+{
+  "status": "execution_failed",
+  "summary": "Compilation failed: Shard 4 failed: please contact support@modal.com (Error code: ZUJ1WKMV)",
+  "score": 0.0,
+  "metrics": {
+    "correctness": 0.0,
+    "speedup": 0.0,
+    "exec_time_ms": 0.0,
+    "baseline_time_ms": 0.0,
+    "compile_time": 0.0,
+    "eval_time": 365.8192865848541
+  },
+  "artifacts": {
+    "eval_backend": "modal+flashinfer-bench",
+    "task_id": "dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64",
+    "execution_time": "365.82s",
+    "error": "Shard 4 failed: please contact support@modal.com (Error code: ZUJ1WKMV)"
+  }
+}

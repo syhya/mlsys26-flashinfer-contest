@@ -1,0 +1,19 @@
+PLAN 3: Strip TIER-L2 + Remove redundant indices_buf write (indices reconstructible)
+
+Variables/Constraints/Objective: same.
+
+Strategy:
+- Start from parent `dc51d5fc` (the proven 9.564 baseline).
+- Observation: `indices_buf[b*N + p*64+t] = global_page_idx * 64 + t` is fully determined by (b, p, t). No need to materialize it as a separate buffer.
+- Modify block_topk_kernel and the device-wide CUB path to reconstruct indices from sort position via a parallel gather using block_table.
+- Approach: replace indices_buf with identity-arange; after sort, recover (p, t) from the sorted position-id and look up block_table[b, p].
+  * Use values = position_id = p*64 + t (16 bits) packed: key = score (float), value = (local_pos : 16 bits). After sort, reconstruct global index: p = local_pos/64; page = block_table[b, p]; out = page*64 + (local_pos&63).
+- Reduces HBM writes in compute_scores_kernel by 50% (one buffer instead of two), reduces radix-sort payload to int16 (but CUB needs int32 values — keep int32 with just local_pos).
+- For TIER-M & TIER-L: sort keys=scores values=local_positions (int32). After sort extract page from block_table.
+
+Validity: Deterministic index reconstruction. Padding sentinel -1 for invalid.
+Advantages: ~25% reduction in HBM traffic for compute_scores_kernel.
+Disadvantages: needs extra gather kernel after sort to look up block_table for top-2048.
+Risk: MODERATE — changes to all three tier kernels required; post-sort gather adds a kernel launch which could eat gains.
+
+Expected: Uncertain; could be wash or +5%. Less upside than plan 1.

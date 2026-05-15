@@ -1,0 +1,17 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_244",
+        "solution_file_path": "output/dac7d74a-cc8b-4a01-8e5a-32c5e3ac0fb5/4/executor/0_0/solution_244.py",
+        "evaluation_file_path": "output/dac7d74a-cc8b-4a01-8e5a-32c5e3ac0fb5/4/executor/0_0/evaluation_244.json",
+        "score": 44.50928549046001,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 445.09x (ref: 1227.121ms, kernel: 1.400ms)\",\n  \"score\": 44.50928549046001,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 445.0928549046001,\n    \"exec_time_ms\": 1.3996326166666668,\n    \"baseline_time_ms\": 1227.12133736,\n    \"compile_time\": 0.0,\n    \"eval_time\": 818.5101687908173\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_prefill_qk4_v8_d128_k_last\",\n    \"execution_time\": \"818.51s\",\n    \"kernel_latency_ms\": \"1.400ms\",\n    \"reference_latency_ms\": \"1227.121ms\",\n    \"speedup\": \"445.09x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 1227.12133736,\n      \"max_relative_error\": 5.611322402954102,\n      \"max_absolute_error\": 0.0001220703125,\n      \"total_workloads\": 100\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

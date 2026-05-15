@@ -1,0 +1,4 @@
+Plan 2: Base 302d2eb3 + persistent/swizzled program ID for L2 reuse on GEMM1.
+- Variables: pid swizzling pattern (group-along-N).
+- Risk: requires kernel restructuring — moderate correctness risk.
+- Expected gain: 2-5% on GEMM1; lower confidence than Plan 1.

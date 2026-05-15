@@ -1,0 +1,136 @@
+## Plan 2: Full FP32 Dequant GEMM2 with Correct BF16 Accumulation + Deeper Autotune
+
+### Mathematical Formulation
+
+**Variables ($X$):**
+- Triton GEMM1 kernel: keep parent's corrected version (proven correct)
+- Triton GEMM2 kernel: completely rewrite to use FP32 weight dequant with correct scale broadcast
+- Autotune configs: expanded set including small-batch friendly configs
+
+**Constraints ($C$):**
+- GEMM2 scale formula: `O[m,n] = sum_k(C[m,k] * W2_fp8[k_local,n]) * W2_scale[n//128, k_local//128]`
+  where k_local is the local offset within expert I dimension
+- The scale is a SCALAR per (n-block, k-block) tile -- must NOT be broadcast incorrectly
+- All accumulation in FP32
+
+**Objective ($f(X)$):**
+- Fix GEMM2 computation to achieve lower absolute error
+- Expand autotuning configs to improve speed for different workload sizes
+
+### Root Cause Analysis
+
+Looking at the parent's GEMM2 kernel code:
+```python
+for k_start in range(0, I, BLOCK_K):
+    k_block_idx = k_start // BLOCK_K
+    k_offs = k_start + k_range
+    
+    x1_ptrs = G1_ptr + row_indices[:, None] * stride_g1m + k_offs[None, :] * stride_g1k
+    x2_ptrs = G1_ptr + row_indices[:, None] * stride_g1m + (I + k_offs)[None, :] * stride_g1k
+    
+    x1 = tl.load(x1_ptrs, mask=m_mask[:, None], other=0.0)
+    x2 = tl.load(x2_ptrs, mask=m_mask[:, None], other=0.0)
+    swiglu_out = x1 * x2 * tl.sigmoid(x2)
+    
+    w2_ptrs = W2_ptr + pid_e.to(tl.int64) * stride_w2e + n_offs[None, :] * stride_w2n + k_offs[:, None] * stride_w2k
+    w2_fp8 = tl.load(w2_ptrs, mask=n_mask[None, :], other=0.0)
+    
+    n_block_idx = n_offs // 128  # n_offs are H-dimension indices!
+    w2_scale_ptrs = W2_scale_ptr + pid_e.to(tl.int64) * stride_w2scale_e + n_block_idx[None, :] * stride_w2scale_n + k_block_idx * stride_w2scale_k
+    w2_scale = tl.load(w2_scale_ptrs, mask=n_mask[None, :], other=1.0)
+    
+    w2_f32 = w2_fp8.to(tl.float32) * w2_scale
+    acc += tl.dot(swiglu_out, w2_f32, out_dtype=tl.float32)
+```
+
+**CRITICAL BUG IDENTIFIED:**
+The `n_block_idx = n_offs // 128` where n_offs are H-dimension indices (0..7167), and k_block_idx goes up to I//128=16.
+- gemm2_weights_scale is [E, H//128, I//128] = [E, 56, 16]
+- stride_w2scale_n should be for H//128 dimension = 16 (each element covers 16 I-blocks)
+- stride_w2scale_k should be for I//128 dimension = 1
+
+But wait -- with BLOCK_N tiles over H (0..7167) and BLOCK_K tiles over I (0..2047):
+- n_block_idx = n_offs // 128 gives H-block index (0..55)
+- k_block_idx = k_start // BLOCK_K = k_start // 128 gives I-block index (0..15)
+- The scale lookup: scale[e, h_block, i_block] seems correct
+
+BUT the `w2_scale` has shape [1, BLOCK_N] (loaded with n_block_idx[None, :]) 
+and `w2_fp8` has shape [BLOCK_K, BLOCK_N]
+
+When we do `w2_f32 = w2_fp8.to(tl.float32) * w2_scale`, the w2_scale broadcasts across K-dimension.
+This means ALL K elements in the tile share the same N-block scale. 
+
+This IS the block-scale semantics: one scale per 128-element block in each dimension.
+
+**Actually, looking deeper**: The `n_block_idx = n_offs // 128` is computed from the FULL n_offs array (128 elements), so different N elements can have DIFFERENT block indices. But within each BLOCK_N=128 tile, all 128 elements have THE SAME n_block_idx since they span exactly one 128-block. So the scale is loaded as a per-column scalar (shape [1, BLOCK_N]) but all 128 N-elements in one tile share the same block index. This is correct!
+
+**The REAL issue might be in the scale interaction:**
+`w2_f32 = w2_fp8.to(tl.float32) * w2_scale` multiplies fp8 weight by its scale.
+Then `acc += tl.dot(swiglu_out, w2_f32, out_dtype=tl.float32)` computes swiglu @ dequant_w2.
+
+This gives: `acc[m,n] += sum_k(swiglu[m,k] * w2_fp8[k,n] * w2_scale[n_block])`
+
+But the block-scale convention is: `float_val ≈ fp8_val * scale`
+So `w2_dequant[k,n] = w2_fp8[k,n] * w2_scale[n//128, k//128]`
+
+**THE BUG**: The scale is per-PAIR-of-blocks (one scale per 128x128 tile), but the parent applies `w2_scale` as only a function of the N-block, NOT the K-block!
+
+Wait, it DOES include k_block_idx in the scale lookup: `+ k_block_idx * stride_w2scale_k`
+So scale = scale[e, n_block, k_block] -- this is a scalar per tile. This is correct.
+
+The bug must be elsewhere. Let me think about what could cause a persistent 8192.0 error...
+
+**HYPOTHESIS**: 8192 = 64 * 128. The error could come from a specific workload where T=7 and each expert gets very few tokens. With small T, the masked rows contain garbage that leaks through. But parent uses `torch.zeros` for G1 and O, so this should be safe.
+
+**Alternative hypothesis**: The GEMM1 output `G1` has shape `[Tk_total, 2*I]` = `[Tk_total, 4096]`. The parent writes: `Out_ptr + (start_idx + m_offs)[:, None].to(tl.int64) * stride_outm + n_offs[None, :] * stride_outn`. For n_offs that exceed 4096 (since N_dim = 4096 and BLOCK_N=128), there's an n_mask. But what about the output G1?
+
+**Solver Strategy:**
+
+This plan takes a different approach: instead of debugging the Triton GEMM2, we completely rewrite it to maximize numerical correctness by:
+1. Using FP32 for ALL weight dequantization (no FP8 tensor cores in GEMM2)
+2. But do this within a properly-tiled Triton kernel to maintain speed
+3. Add a completely separate SwiGLU Triton kernel that writes to a temp buffer
+4. Simplify GEMM2 to be a plain dequant-GEMM with careful indexing
+
+### Validity Mechanism
+
+1. Use `torch.zeros` for all intermediate tensors
+2. Track `n_block_idx` computation explicitly to verify correctness
+3. Verify that BLOCK_N=128 exactly aligns with one scale block
+4. Add explicit mask for BOTH m and n in ALL load/store ops
+
+### Implementation Plan
+
+Phase 1: Mathematical Definition
+- G1 = GEMM1 output, shape [Tk_total, 4096], float32
+- SwiGLU: X1=G1[:, :2048], X2=G1[:, 2048:], C = silu(X2)*X1, shape [Tk_total, 2048]
+- GEMM2: O[j,h] = routing_w[j] * sum_i(C[j,i] * W2[e,h,i] * scale2[e,h//128,i//128])
+
+Phase 2: Rewrite Approach
+- Keep GEMM1 kernel from parent (proven working for score 87.2%)
+- Compute SwiGLU as a separate Triton kernel OR in-place PyTorch:
+  `C = torch.nn.functional.silu(G1[:, 2048:]) * G1[:, :2048]`
+- GEMM2: NEW approach using per-expert torch.mm with pre-dequantized weights
+  - For each expert, extract token rows: `C_expert = C[start:end]`  # [Tk_e, 2048]
+  - Extract W2_expert: `W2e = gemm2_weights[e]`  # [7168, 2048] fp8
+  - Extract W2_scale_expert: `W2s = gemm2_weights_scale[e]`  # [56, 16]
+  - Dequantize W2: expand scales to [7168, 2048] and multiply
+  - `O_expert = C_expert @ W2e_f32.T`
+  - Apply routing weights and accumulate
+
+Phase 3: Safety Valve
+- Use vectorized dequantization via einops-style reshape:
+  ```python
+  # W2e is [H, I] fp8, W2s is [H//128, I//128] float32
+  W2e_f32 = W2e.to(torch.float32)
+  # Reshape to blocks: [H//128, 128, I//128, 128]
+  W2e_f32 = W2e_f32.view(56, 128, 16, 128)
+  W2s_expanded = W2s.view(56, 1, 16, 1)  # broadcast over 128-element blocks
+  W2e_dequant = (W2e_f32 * W2s_expanded).view(7168, 2048)
+  ```
+
+Phase 4: Implementation
+- This approach is slower (serial expert loop) but numerically correct
+- To compensate, keep fast Triton GEMM1 and use optimized PyTorch for GEMM2
+- Expected speedup: ~5-6x (slower than parent but more correct)
+- If this fixes the error, the score formula rewards both correctness and speed

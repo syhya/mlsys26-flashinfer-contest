@@ -1,0 +1,21 @@
+## 1. Executive Summary
+This iteration was a severe regression because the plan’s intended warp-per-head/pipelined redesign was only partially executed and effectively replaced the parent’s ultra-fast small-workload dispatch with a much slower direct-gather path, performing 2 out of 2 among siblings.
+
+## 2. Data-Driven Findings (Facts ONLY)
+- **Sibling Rank:** 2 out of 2 children. Top sibling score: 0.8458.
+- **Score Delta:** From parent (10.3997) to child (0.6766).
+- **Key Change:** Replaced the parent’s small-workload split-K compute+reduce path with a one-warp-per-(token, head) fused kernel, while keeping a tiled shared-memory large-workload kernel.
+- **Core Metrics:** Correctness 1.0 -> 1.0; speedup 103.9971x -> 6.7656x; kernel latency 0.0283 ms -> 0.7696 ms; baseline latency 2.9036 ms -> 2.8865 ms; max absolute error 0.015625 -> 0.0078125; max relative error 1.7666 -> 1.5248; total workloads 23 in both evaluations.
+
+## 3. Strategic Analysis (The "So What?")
+- **Root Cause:** Both plan quality and execution quality contributed, but execution quality was the dominant cause. The plan proposed a more advanced staged/cp.async-style throughput path, yet the delivered child did not implement that deeper pipeline and instead introduced a low-latency kernel that performs uncached direct sparse gathers across all 2048 entries for each `(token, head)`. At the same time, it removed the parent’s empirically superior split-K small-workload route. The result is a structurally cleaner design that lost the parent’s key performance lever.
+- **Key Insight:** In this lineage, the parent’s dynamic dispatch is a first-order optimization, not incidental complexity. The important lesson is that “fused and simpler” is not enough; for sparse attention at this shape, small-token performance depends heavily on creating enough parallel work and amortizing gathers, even if that requires temporary workspace. The salvageable concept is the explicit one-warp-per-head kernel as an experimental micro-path for extremely tiny cases, but only if it is added alongside the parent path rather than replacing it.
+- **Identified Risk:** The main trap is assuming that eliminating intermediate HBM workspace automatically improves performance. The sibling data now shows two consecutive regressions from removing or bypassing the parent’s specialized low-token strategy. Another risk is planning around advanced pipeline ideas such as `cp.async` without actually landing them in code; that creates complexity in intent but not throughput in practice.
+
+## 4. Actionable Guidance (The "What's Next?")
+- **Recommend Fusion:** Restore the parent `2dd80f71` as the active baseline and fuse only isolated experiments into it. Keep its large-workload fused kernel intact and preserve its split-K small-workload path until a replacement wins head-to-head on the benchmark set.
+- **Recommend Exploration:** Reintroduce the new warp-per-head kernel only as an additional micro-kernel for extremely small regimes, e.g. `num_tokens <= 4` or `<= 8`, with deterministic threshold testing against the parent split-K path. Treat it as a niche latency path, not a wholesale replacement.
+- **Recommend Fusion:** Borrow the child’s cleaner explicit `(token, head)` mapping and compact host dispatch structure, but fuse it into the parent only after preserving the parent’s temporary-workspace-based parallel decomposition for low-token workloads.
+- **Recommend Exploration:** If the next planner wants to pursue the original idea, target a genuine throughput improvement in the large path: asynchronous or double-buffered shared-memory staging, reduced synchronization, or lighter workspace reduction. Do not spend another iteration on “delete split-K first, optimize later.”
+- **Recommend Stripping:** Strip plan elements that mention `cp.async` or staged pipelining unless the code will actually implement them. The population evidence suggests aspirational architecture upgrades without realization are not helping selection pressure.
+- **Warn:** Two sibling failures now point to the same local-optimum trap: replacing workload-specialized dispatch with a cleaner unified fused design. Future iterations should treat the parent’s low-token path as protected infrastructure unless benchmark evidence proves otherwise.

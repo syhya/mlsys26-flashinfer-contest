@@ -1,0 +1,190 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Beat parent score 11.69 by cutting split-K workspace traffic in half. Adopt the current sibling-best (iter20, score 12.63) reducer simplification as baseline, then reduce partition count S from 64 to 32 in the small-T split-K path so O_tmp HBM writes/reads halve.
+
+**Selected Outline:** Plan 2 — Halve the partition count S (64 → 32) in the split-K path; each partition processes 2 sparse tiles; keep everything else identical to iter20's winning structure.
+
+**Rationale for Selection:**
+1. Exact online-softmax merge is fully associative: any partition count produces bitwise-equivalent FP32 result (modulo floating-point ordering, within rtol=1e-2).
+2. Cuts O_tmp workspace size from [T,64,16,512] to [T,32,16,512] — halves the HBM traffic in both producer and reducer, the true bottleneck at T=1.
+3. The reducer's per-lane inner loop over partitions halves (64→32 iterations).
+4. Deterministic: no randomness, no autotuning.
+5. Low risk: small, local code changes to an already-winning architecture.
+
+---
+
+## Phase 1: Mathematical Definition
+
+Per (token t, head h):
+- q = concat(q_nope[t,h], q_pe[t,h]) in R^576.
+- For each j in [0,2048): raw=sparse_indices[t,j]. If raw==-1, neutral. Else v=ckv_cache[raw/64, raw%64, :], k_pe=kpe_cache[raw/64, raw%64, :], logit z_j = sm_scale*(<q_nope,v>+<q_pe,k_pe>).
+- out[t,h] = Σ w_j v_j, w_j=softmax(z). lse=log2(Σ exp(z_j)).
+
+Online softmax state (m, l, O in R^512). Neutral: m=-INF, l=0, O=0.
+
+Partition 2048 slots into S disjoint chunks of size 2048/S. Each partition p produces (m_p, l_p, O_p). Exact merge:
+- m = max_p m_p
+- scale_p = exp(m_p - m) if m_p!=-INF else 0
+- l = Σ l_p * scale_p
+- O = Σ O_p * scale_p
+- out = O/l if l>0 else 0
+- lse = m*log2(e) + log2(l) if l>0 else -INF
+
+**Variables X:**
+- S = 32 (was 64)
+- slots_per_partition = 2048/S = 64 (was 32)
+- inner loop: each compute block processes 2 tiles of 32 slots sequentially reusing smem.
+
+**Constraints C:** Exact mask for -1; FP32 accumulation; BF16 store; base-2 lse; explicit BF16 intrinsics only; preserve ABI + PYBIND11_MODULE.
+
+**Objective:** Minimize small-T kernel latency.
+
+---
+
+## Phase 2: Implementation Steps (Code-Ready)
+
+### Step 0: Baseline from iter20 winner (solution_id 94736692)
+Start from that child's code (not the parent bad043e5). Key property: its reducer does NOT cache l_s_smem; lane-0 computes coeff = exp(m_s - m_global)/l_global on-the-fly. Keep this. Keep the fused-path separate `tile_has_valid` flag.
+
+### Step 1: Change S constant from 64 to 32 in host code
+```cpp
+if (num_tokens < 128) {
+    constexpr int S = 32;                          // was 64
+    constexpr int SLOTS_PER_PART = 2048 / S;       // = 64
+    auto O_tmp = torch::empty({num_tokens, S, 16, 512}, fp32_opts);
+    auto m_tmp = torch::empty({num_tokens, 16, S}, fp32_opts);
+    auto l_tmp = torch::empty({num_tokens, 16, S}, fp32_opts);
+    dim3 compute_grid(S, num_tokens, 1);
+    dim3 compute_block(32, 16, 1);
+    split_k_compute_kernel<<<compute_grid, compute_block>>>(...);
+    dim3 reduce_grid(num_tokens, 16, 1);
+    dim3 reduce_block(128, 1, 1);
+    split_k_reduce_kernel<<<reduce_grid, reduce_block>>>(...);
+}
+```
+
+### Step 2: Rewrite split_k_compute_kernel inner loop to process 2 tiles per block
+Each block (blockIdx.x = p in [0,32)) now owns slots [p*64, p*64+64). Process them as 2 sub-tiles of 32:
+```cpp
+int p = blockIdx.x;
+// init m=-INF, l=0, O_reg=0 (unchanged)
+#pragma unroll 1
+for (int sub = 0; sub < 2; ++sub) {
+    int tile_base = p * 64 + sub * 32;
+    // load 32 sparse indices into idx_shared[32]
+    if (tid < 32) idx_shared[tid] = sparse_indices_ptr[t * 2048 + tile_base + tid];
+    __syncthreads();
+    // (optional) tile_has_valid early-skip as in fused path
+    // stage smem_Kc and smem_Kp for 32 keys (same code as parent)
+    // ... load loop unchanged ...
+    __syncthreads();
+    // inner 32-key online softmax update loop (unchanged from parent)
+    for (int i = 0; i < 32; ++i) { if (idx_shared[i]==-1) continue; ... }
+    __syncthreads();
+}
+// final store of m, l, O_reg to workspace at index [t, p, h, ...]
+```
+This keeps m/l/O_reg live across the two sub-tiles — that's the exact online-softmax state merging two 32-slot chunks into one partition's (m_p, l_p, O_p). Mathematically identical to the current code's result over 64 slots.
+
+### Step 3: split_k_reduce_kernel — change partition count from 64 to 32
+```cpp
+__shared__ float m_s_smem[32];    // was [64]
+// lane < 32 loads m_tmp[t*16*32 + h*32 + lane]; similarly l_tmp
+if (lane < 32) m_s_smem[lane] = m_tmp[t*16*32 + h*32 + lane];
+__syncthreads();
+if (lane == 0) {
+    float m_max = -INFINITY;
+    for (int i=0;i<32;++i) m_max = fmaxf(m_max, m_s_smem[i]);
+    float l_sum = 0.f;
+    for (int i=0;i<32;++i) {
+        if (m_s_smem[i] != -INFINITY) {
+            float scale = __expf(m_s_smem[i] - m_max);
+            scale_smem[i] = scale;
+            l_sum = fmaf(l_tmp[t*16*32 + h*32 + i], scale, l_sum);
+        } else scale_smem[i] = 0.f;
+    }
+    m_global = m_max; l_global = l_sum;
+    lse_ptr[t*16+h] = (m_max==-INFINITY||l_sum<=0.f) ? -INFINITY
+                     : fmaf(m_max, 1.4426950408889634f, __log2f(l_sum));
+}
+__syncthreads();
+// output accumulation: inner loop over 32 partitions (was 64)
+int d_idx = lane * 4;
+if (d_idx < 512) {
+    float out0=0, out1=0, out2=0, out3=0;
+    if (m_global != -INFINITY && l_global > 0.f) {
+        float inv_l = __fdividef(1.0f, l_global);
+        #pragma unroll 8
+        for (int s = 0; s < 32; ++s) {              // was 64
+            float coeff = scale_smem[s] * inv_l;
+            if (coeff > 0.f) {
+                int base_idx = t*32*16*512 + s*16*512 + h*512 + d_idx;   // stride changed
+                float4 val = *reinterpret_cast<const float4*>(&O_tmp[base_idx]);
+                out0 = fmaf(val.x, coeff, out0);
+                out1 = fmaf(val.y, coeff, out1);
+                out2 = fmaf(val.z, coeff, out2);
+                out3 = fmaf(val.w, coeff, out3);
+            }
+        }
+    }
+    // BF16 pack+store (unchanged)
+}
+```
+
+### Step 4: Update every index arithmetic
+All occurrences of `* 64 *` referring to S must become `* 32 *`. Specifically:
+- `m_tmp[t * 16 * 64 + h * 64 + s]` → `m_tmp[t * 16 * 32 + h * 32 + s]`
+- `l_tmp[...]` likewise
+- `O_tmp[t * 64 * 16 * 512 + s * 16 * 512 + ...]` → `O_tmp[t * 32 * 16 * 512 + s * 16 * 512 + ...]`
+- `scale_smem[64]` → `scale_smem[32]`
+
+### Step 5: Large path (fused kernel) unchanged
+`dsa_forward_kernel` and `num_tokens >= 128` dispatch path stay byte-identical to iter20 baseline. No risk to large-T performance.
+
+---
+
+## Phase 3: Safety Valve
+
+1. **Masking:** Inner loop retains `if (idx_shared[i] == -1) continue;` — invalid slots contribute nothing. Load path retains `if (idx != -1)` guard before cache reads.
+2. **Empty partition:** If all 64 slots in partition p are -1, the two sub-tile loops do nothing, so m=-INF, l=0, O=0 is written — neutral state, handled exactly in reducer.
+3. **Empty row:** Reducer checks `m_max==-INFINITY || l_sum<=0.f` and writes zero output + -INF lse.
+4. **Correctness proof:** Online softmax is associative; merging (m,l,O) over slots [p*64, p*64+64) processed as two consecutive 32-tiles yields identical FP32 state to merging over 64 slots atomically. No new numerical path — just re-grouping.
+5. **BF16 intrinsics:** Keep every `__bfloat1622float2`, `__floats2bfloat162_rn`. No implicit casts.
+6. **ABI:** dsa_forward signature + final PYBIND11_MODULE block preserved byte-for-byte.
+7. **Fallback:** If at integration time any compile issue surfaces, reverting S to 64 is a one-line change.
+
+---
+
+## Phase 4: Implementation Details
+
+**Libraries/headers:** `<torch/extension.h>`, `<cuda_bf16.h>`, `<cuda_fp16.h>`, `<tuple>`, `<math.h>`. No external deps.
+
+**Launch config:**
+- Small path: compute = (32, T) × (32, 16) = 16 warps/block; reduce = (T, 16) × 128.
+- Large path: unchanged (num_tokens, 1) × (32, 16).
+
+**Key constants:**
+- `S = 32`
+- `SLOTS_PER_PART = 64`
+- threshold: `num_tokens < 128` (unchanged)
+
+**Expected gain:** Small-T reducer reads 50% less from O_tmp (16MB→8MB for T=1); compute kernel writes 50% less to O_tmp. Benchmark is dominated by T=1 workloads, so global speedup should move from ~126x toward ~135-150x territory.
+
+**Review checklist:**
+- Math: Yes, exact associativity.
+- Libraries: Standard CUDA only. ✓
+- Randomness: None. ✓
+- Implementable: Minimal edits to a known-working kernel. ✓
+- Constraints preserved: BF16 intrinsics, FP32 accum, base-2 lse, -1 masking, ABI. ✓
+
+**Executor instructions — be explicit:**
+1. START from solution_id **94736692** (iter20, score 12.63), NOT the parent (bad043e5, 11.69).
+2. Change S=64 to S=32 in host code.
+3. Rewrite split_k_compute_kernel inner body to loop over `sub=0..1`, each sub processing 32 indices starting at `p*64+sub*32`, WITH m/l/O_reg PERSISTED ACROSS the two sub-iterations (this is the exact online-softmax merge of two 32-slot chunks into one 64-slot partition).
+4. Update all `* 64 *` strides in workspace indexing to `* 32 *`.
+5. Update reducer shared arrays `m_s_smem[64]`, `scale_smem[64]` to `[32]`, and loops `for (int i=0;i<64;++i)` to `<32`.
+6. Keep iter20's reducer formula (no l_s_smem; inline `scale = __expf(m - m_max)`; later `coeff = scale * inv_l`).
+7. Keep large path (`dsa_forward_kernel`) byte-identical.
+8. Preserve PYBIND11_MODULE footer exactly.
+
+This plan decouples the hard structural decision (partitioning) — fixed at S=32 by deterministic analysis — from the exact FP32 merge math (unchanged associative formula), guaranteeing score ≥ correctness baseline while materially improving latency.

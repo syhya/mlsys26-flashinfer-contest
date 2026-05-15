@@ -1,0 +1,23 @@
+### Outline 3: Asynchronous Deep Pipeline & Swizzled Shared Memory (The "Safe" Hopper Approach)
+
+**Objective:** Maximize memory bandwidth utilization and hide latency without risking the structural instability of single-kernel syncs or complex Tensor Core layouts.
+
+**Mathematical Formulation:**
+*   **Variables ($X$):** Implementation of `cp.async` for key/value cache loading, Swizzled shared memory layouts, and loop unrolling strategies.
+*   **Constraints ($C$):**
+    *   $C_1$: Must maintain the exact numerical output.
+    *   $C_2$: Must be strictly faster than the current implementation.
+*   **Objective ($f(X)$):** Minimize L1/L2 cache misses and memory stalls.
+
+**Solver Strategy:**
+*   Keep the optimized two-pass Split-K structure (it is mathematically safe and proven fast).
+*   Inject `cp.async` (or `__pipeline_memcpy_async`) to overlap the loading of the *next* tile of keys/values into shared memory while computing the dot product of the *current* tile.
+*   Apply XOR swizzling to the shared memory indices to guarantee 0 bank conflicts when reading keys/values for the dot product.
+*   Further optimize the reduction kernel by using CUB BlockReduce primitives instead of manual shared memory reductions.
+
+**Validity Mechanism:**
+*   **Safety Valve:** The math remains identical to the Parent solution. The pipeline is just a structural shift in *when* data is loaded. If `cp.async` fails, standard vectorized loads are the fallback.
+
+**Why this solution?**
+*   **Advantages:** Mathematically robust. Addresses the "memory access pattern" warnings in the NCU profile without taking massive risks on new execution paradigms.
+*   **Disadvantages:** Does not solve the HBM round-trip of Split-K, but makes the compute passes significantly faster.

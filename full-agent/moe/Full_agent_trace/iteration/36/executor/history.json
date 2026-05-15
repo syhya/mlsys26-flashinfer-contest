@@ -1,0 +1,177 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_525",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/0_0/solution_525.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/0_0/evaluation_525.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL:  | max_rel_err=5709523.0, max_abs_err=1035366400.0 | workload={'seq_len': 32}\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 218.11001205444336\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"218.11s\",\n    \"error\": \"INCORRECT_NUMERICAL: \",\n    \"error_detail\": {\n      \"status\": \"INCORRECT_NUMERICAL\",\n      \"log\": \"\",\n      \"axes\": {\n        \"seq_len\": 32\n      },\n      \"correctness\": {\n        \"max_relative_error\": 5709523.0,\n        \"max_absolute_error\": 1035366400.0,\n        \"extra\": {\n          \"matched_ratio\": 0.59375\n        }\n      }\n    }\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_8e5",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/0_0/solution_8e5.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/0_0/evaluation_8e5.json",
+        "score": 1.401531549231529,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 14.02x (ref: 17.096ms, kernel: 1.607ms)\",\n  \"score\": 1.401531549231529,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 14.01531549231529,\n    \"exec_time_ms\": 1.6066152105263158,\n    \"baseline_time_ms\": 17.095558605263157,\n    \"compile_time\": 0.0,\n    \"eval_time\": 71.98658871650696\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"71.99s\",\n    \"kernel_latency_ms\": \"1.607ms\",\n    \"reference_latency_ms\": \"17.096ms\",\n    \"speedup\": \"14.02x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 17.095558605263157,\n      \"max_relative_error\": 825599983616.0,\n      \"max_absolute_error\": 33280.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_a3c",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/0_0/solution_a3c.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/0_0/evaluation_a3c.json",
+        "score": 1.4394580002116948,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 14.39x (ref: 17.340ms, kernel: 1.648ms)\",\n  \"score\": 1.4394580002116948,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 14.394580002116946,\n    \"exec_time_ms\": 1.648435745614035,\n    \"baseline_time_ms\": 17.34041000877193,\n    \"compile_time\": 0.0,\n    \"eval_time\": 69.12862038612366\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"69.13s\",\n    \"kernel_latency_ms\": \"1.648ms\",\n    \"reference_latency_ms\": \"17.340ms\",\n    \"speedup\": \"14.39x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 17.34041000877193,\n      \"max_relative_error\": 323199991808.0,\n      \"max_absolute_error\": 36864.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  },
+  {
+    "round": 1,
+    "candidates": [
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_315",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/1_0/solution_315.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/1_0/evaluation_315.json",
+        "score": 1.3521001499100735,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 13.52x (ref: 17.795ms, kernel: 1.744ms)\",\n  \"score\": 1.3521001499100735,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 13.521001499100734,\n    \"exec_time_ms\": 1.7442569736842104,\n    \"baseline_time_ms\": 17.795057368421052,\n    \"compile_time\": 0.0,\n    \"eval_time\": 83.10843205451965\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"83.11s\",\n    \"kernel_latency_ms\": \"1.744ms\",\n    \"reference_latency_ms\": \"17.795ms\",\n    \"speedup\": \"13.52x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 17.795057368421052,\n      \"max_relative_error\": 37800001536.0,\n      \"max_absolute_error\": 39936.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_51a",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/1_0/solution_51a.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/1_0/evaluation_51a.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL:  | max_rel_err=5725000192.0, max_abs_err=135282688.0 | workload={'seq_len': 11948}\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 68.96911287307739\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"68.97s\",\n    \"error\": \"INCORRECT_NUMERICAL: \",\n    \"error_detail\": {\n      \"status\": \"INCORRECT_NUMERICAL\",\n      \"log\": \"\",\n      \"axes\": {\n        \"seq_len\": 11948\n      },\n      \"correctness\": {\n        \"max_relative_error\": 5725000192.0,\n        \"max_absolute_error\": 135282688.0,\n        \"extra\": {\n          \"matched_ratio\": 0.5616139057941556\n        }\n      }\n    }\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_712",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/1_0/solution_712.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/1_0/evaluation_712.json",
+        "score": 1.4200427529376682,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 14.20x (ref: 17.640ms, kernel: 1.656ms)\",\n  \"score\": 1.4200427529376682,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 14.20042752937668,\n    \"exec_time_ms\": 1.655517096491228,\n    \"baseline_time_ms\": 17.640142763157893,\n    \"compile_time\": 0.0,\n    \"eval_time\": 83.16920113563538\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"83.17s\",\n    \"kernel_latency_ms\": \"1.656ms\",\n    \"reference_latency_ms\": \"17.640ms\",\n    \"speedup\": \"14.20x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 17.640142763157893,\n      \"max_relative_error\": 320000000000.0,\n      \"max_absolute_error\": 30720.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_3e4",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/1_1/solution_3e4.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/1_1/evaluation_3e4.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL:  | max_rel_err=1122810.5, max_abs_err=2096668672.0 | workload={'seq_len': 1}\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 106.562739610672\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"106.56s\",\n    \"error\": \"INCORRECT_NUMERICAL: \",\n    \"error_detail\": {\n      \"status\": \"INCORRECT_NUMERICAL\",\n      \"log\": \"\",\n      \"axes\": {\n        \"seq_len\": 1\n      },\n      \"correctness\": {\n        \"max_relative_error\": 1122810.5,\n        \"max_absolute_error\": 2096668672.0,\n        \"extra\": {\n          \"matched_ratio\": 0.0\n        }\n      }\n    }\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_896",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/1_1/solution_896.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/1_1/evaluation_896.json",
+        "score": 1.3202445938301468,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 13.20x (ref: 17.383ms, kernel: 1.715ms)\",\n  \"score\": 1.3202445938301468,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 13.202445938301468,\n    \"exec_time_ms\": 1.7146241929824562,\n    \"baseline_time_ms\": 17.383481184210524,\n    \"compile_time\": 0.0,\n    \"eval_time\": 90.61598920822144\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"90.62s\",\n    \"kernel_latency_ms\": \"1.715ms\",\n    \"reference_latency_ms\": \"17.383ms\",\n    \"speedup\": \"13.20x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 17.383481184210524,\n      \"max_relative_error\": 305600004096.0,\n      \"max_absolute_error\": 32768.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  },
+  {
+    "round": 2,
+    "candidates": [
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_4f4",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_0/solution_4f4.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_0/evaluation_4f4.json",
+        "score": 1.3862283078505744,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 13.86x (ref: 17.074ms, kernel: 1.662ms)\",\n  \"score\": 1.3862283078505744,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 13.862283078505742,\n    \"exec_time_ms\": 1.6618062719298246,\n    \"baseline_time_ms\": 17.074383140350875,\n    \"compile_time\": 0.0,\n    \"eval_time\": 344.8045952320099\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"344.80s\",\n    \"kernel_latency_ms\": \"1.662ms\",\n    \"reference_latency_ms\": \"17.074ms\",\n    \"speedup\": \"13.86x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 17.074383140350875,\n      \"max_relative_error\": 395200004096.0,\n      \"max_absolute_error\": 32256.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_6c2",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_0/solution_6c2.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_0/evaluation_6c2.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL:  | max_rel_err=13457984.0, max_abs_err=1064697856.0 | workload={'seq_len': 32}\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 146.5593342781067\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"146.56s\",\n    \"error\": \"INCORRECT_NUMERICAL: \",\n    \"error_detail\": {\n      \"status\": \"INCORRECT_NUMERICAL\",\n      \"log\": \"\",\n      \"axes\": {\n        \"seq_len\": 32\n      },\n      \"correctness\": {\n        \"max_relative_error\": 13457984.0,\n        \"max_absolute_error\": 1064697856.0,\n        \"extra\": {\n          \"matched_ratio\": 0.59375\n        }\n      }\n    }\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_d1e",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_0/solution_d1e.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_0/evaluation_d1e.json",
+        "score": 1.388993297840237,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 13.89x (ref: 17.273ms, kernel: 1.628ms)\",\n  \"score\": 1.388993297840237,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 13.88993297840237,\n    \"exec_time_ms\": 1.6279202456140351,\n    \"baseline_time_ms\": 17.272748868421054,\n    \"compile_time\": 0.0,\n    \"eval_time\": 325.72121119499207\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"325.72s\",\n    \"kernel_latency_ms\": \"1.628ms\",\n    \"reference_latency_ms\": \"17.273ms\",\n    \"speedup\": \"13.89x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 17.272748868421054,\n      \"max_relative_error\": 454400016384.0,\n      \"max_absolute_error\": 36864.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_072",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_1/solution_072.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_1/evaluation_072.json",
+        "score": 1.4317684393056516,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 14.32x (ref: 16.925ms, kernel: 1.596ms)\",\n  \"score\": 1.4317684393056516,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 14.317684393056515,\n    \"exec_time_ms\": 1.5959242280701753,\n    \"baseline_time_ms\": 16.925291149122806,\n    \"compile_time\": 0.0,\n    \"eval_time\": 296.69182443618774\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"296.69s\",\n    \"kernel_latency_ms\": \"1.596ms\",\n    \"reference_latency_ms\": \"16.925ms\",\n    \"speedup\": \"14.32x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 16.925291149122806,\n      \"max_relative_error\": 340800012288.0,\n      \"max_absolute_error\": 36864.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_a23",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_1/solution_a23.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_1/evaluation_a23.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL:  | max_rel_err=524289.0, max_abs_err=1190921216.0 | workload={'seq_len': 1}\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 142.06531429290771\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"142.07s\",\n    \"error\": \"INCORRECT_NUMERICAL: \",\n    \"error_detail\": {\n      \"status\": \"INCORRECT_NUMERICAL\",\n      \"log\": \"\",\n      \"axes\": {\n        \"seq_len\": 1\n      },\n      \"correctness\": {\n        \"max_relative_error\": 524289.0,\n        \"max_absolute_error\": 1190921216.0,\n        \"extra\": {\n          \"matched_ratio\": 0.0\n        }\n      }\n    }\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_68a",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_2/solution_68a.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_2/evaluation_68a.json",
+        "score": 1.3878366595339922,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 13.88x (ref: 17.647ms, kernel: 1.691ms)\",\n  \"score\": 1.3878366595339922,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 13.878366595339921,\n    \"exec_time_ms\": 1.6912500789473686,\n    \"baseline_time_ms\": 17.64653344736842,\n    \"compile_time\": 0.0,\n    \"eval_time\": 323.29108905792236\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"323.29s\",\n    \"kernel_latency_ms\": \"1.691ms\",\n    \"reference_latency_ms\": \"17.647ms\",\n    \"speedup\": \"13.88x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 17.64653344736842,\n      \"max_relative_error\": 457600008192.0,\n      \"max_absolute_error\": 29696.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_9d9",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_2/solution_9d9.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_2/evaluation_9d9.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL:  | max_rel_err=8650751.0, max_abs_err=1341358080.0 | workload={'seq_len': 32}\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 106.90096306800842\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"106.90s\",\n    \"error\": \"INCORRECT_NUMERICAL: \",\n    \"error_detail\": {\n      \"status\": \"INCORRECT_NUMERICAL\",\n      \"log\": \"\",\n      \"axes\": {\n        \"seq_len\": 32\n      },\n      \"correctness\": {\n        \"max_relative_error\": 8650751.0,\n        \"max_absolute_error\": 1341358080.0,\n        \"extra\": {\n          \"matched_ratio\": 0.59375\n        }\n      }\n    }\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_bd4",
+        "solution_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_2/solution_bd4.py",
+        "evaluation_file_path": "output/f7850538-26a4-40dd-aa8d-d07f6051bb65/36/executor/2_2/evaluation_bd4.json",
+        "score": 1.2710672443586712,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 12.71x (ref: 17.583ms, kernel: 1.757ms)\",\n  \"score\": 1.2710672443586712,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 12.710672443586711,\n    \"exec_time_ms\": 1.7568050263157897,\n    \"baseline_time_ms\": 17.582741280701754,\n    \"compile_time\": 0.0,\n    \"eval_time\": 287.23369693756104\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"287.23s\",\n    \"kernel_latency_ms\": \"1.757ms\",\n    \"reference_latency_ms\": \"17.583ms\",\n    \"speedup\": \"12.71x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 17.582741280701754,\n      \"max_relative_error\": 155199995904.0,\n      \"max_absolute_error\": 34816.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

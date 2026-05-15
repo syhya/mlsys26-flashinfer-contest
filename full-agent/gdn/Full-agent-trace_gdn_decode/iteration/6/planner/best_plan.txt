@@ -1,0 +1,43 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a heavily optimized GDN decode kernel that maximizes speedup (targeting >7000x) while mathematically guaranteeing correctness and safety for arbitrary $B$, $V$, and $K$ dimension sizes.
+
+**Selected Outline:** Dual-Kernel Architecture with Deterministic Runtime Dispatch (Structure vs. Parameters Decoupling).
+
+**Rationale for Selection:**
+1. **Mathematical Safety Guaranteed**: It strictly decouples the "hard part" (extreme unrolling and vectorization for specific $K$ and $V$) from the "easy part" (routing logic and generalized fallback).
+2. **Maintains Peak Fitness**: It preserves the peak performance of the parent solution (score 777.01x) by preserving its architectural exactness for $K=128$, ensuring we do not regress on the primary benchmark.
+3. **Generalization Safety Valve**: It employs a foolproof deterministic fallback to a mathematically safe, dynamic-loop kernel if the tensor dimensions deviate from the optimized constraints, completely eliminating the risk of out-of-bounds memory crashes.
+
+**Best Plan:**
+
+1. **Phase 1: Mathematical Definition & Modeling**
+    * **Variables ($X$)**: Tensor dimensions $B$ (batch), $H_V$ (v_heads), $V$ (sequence/v_dim), $K$ (head_dim). Thread mapping $(t_x, t_y)$ and block mapping $(b_x, b_y, b_z)$.
+    * **Constraints ($C$)**: Memory access indices must strictly satisfy $v_{idx} < V$ and $k_{idx} < K$. Vectorized reads (e.g., `float4`) require memory alignment and dimension multiples (e.g., $K \bmod 4 = 0$).
+    * **Objective ($f(X)$)**: Minimize instruction latency and memory stalls. For known optimal sizes ($K=128$), $f(X)$ is minimized using perfectly unrolled FMA instructions and `float4` memory transactions. For unknown sizes, $f(X)$ prioritizes functional correctness and warp convergence.
+
+2. **Phase 2: The Optimization Loop (Dual-Kernel Generation)**
+    * **Step 2.1: Kernel A (The Optimized Fast-Path for K=128)**
+        * Define `__global__ void gdn_decode_kernel_k128(...)`.
+        * Hardcode thread mapping for $K=128$: `tx` maps to 32 lanes, each loading 4 elements (via `float2` for `bfloat16` and `float4` for `float32` state).
+        * Use `#pragma unroll` for the inner K-dimension reductions.
+        * Omit `__syncthreads()` entirely within the V-loop to grant warps complete autonomy, exactly mirroring the parent's winning FMA logic.
+    * **Step 2.2: Kernel B (The Generic Fallback Path)**
+        * Define `__global__ void gdn_decode_kernel_generic(...)`.
+        * Use dynamic loops: `for (int k = tx; k < K; k += blockDim.x)` to handle arbitrary $K$.
+        * Use standard scalar reads (`__bfloat162float(ptr[k])`) and a mathematically exact warp reduction loop (`for (int offset = 16; offset > 0; offset /= 2) val += __shfl_down_sync(0xffffffff, val, offset);`) that gracefully handles non-power-of-2 dimensions by padding out-of-bounds reads with `0.0f`.
+        * Use grid-stride loops for the V-dimension to handle arbitrary $V$.
+
+3. **Phase 3: The "Safety Valve" (CRITICAL Runtime Dispatch)**
+    * **Logic**: In the `std::tuple<torch::Tensor, torch::Tensor> gdn_forward(...)` PyTorch C++ entry point, implement a deterministic routing mechanism (the Solver).
+    * **Condition Check**: Extract `K` and `V` from the input tensors. Evaluate the exact mathematical condition: `if (K == 128 && V % 4 == 0)`.
+    * **Enforcement**: 
+        * If true: Launch Kernel A (`gdn_decode_kernel_k128<<<grid, block>>>`) with grid `(B, num_v_heads, V / 4)`.
+        * If false: Launch Kernel B (`gdn_decode_kernel_generic<<<grid_gen, block_gen>>>`) with grid `(B, num_v_heads, (V + 3) / 4)`.
+    * **Guarantee**: This `if/else` constraint projection guarantees that the optimized path is only taken when mathematically safe, and the generic path acts as a repair function to guarantee an evaluation score $\ge 1.0$ for any valid input shape.
+
+4. **Phase 4: Implementation Details & Strict Constraints**
+    * **Libraries**: Strictly include `<cuda_bf16.h>`, `<torch/extension.h>`, and standard CUDA math headers. Do NOT use non-standard packages.
+    * **Type Conversions (Mandatory)**: Due to `-D__CUDA_NO_BFLOAT16_CONVERSIONS__`, explicitly use `__bfloat162float()` and `__float2bfloat16()` for all casts. No implicit casting.
+    * **Math Intrinsics**: Force the compiler to use fast math by utilizing `expf()`, `logf()`, and structuring the state update as `st = g * st + dv_v * k_f` to trigger hardware Fused Multiply-Add (FMA).
+    * **Output Alignment**: Ensure all output tensors are correctly typed (`bfloat16` for output, `float32` for state) and contiguous before passing pointers to the kernel.

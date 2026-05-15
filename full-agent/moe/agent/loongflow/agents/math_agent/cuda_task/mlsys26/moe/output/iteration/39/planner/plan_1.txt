@@ -1,0 +1,6 @@
+Plan 1: Rebase to database-best 302d2eb3 + bf16 epilogue + 1 new autotune config
+- Variables: epilogue dtype, autotune set
+- Constraints: byte-identical kernels/routing of 302d2eb3, BLOCK_N=128, int64 ptr math
+- Solver: Triton autotune argmin over superset configs (mathematical floor guarantee)
+- Validity: USE_BF16_EPILOGUE flag with fp32 fallback
+- Why: bf16 epilogue independently proven +0.009 in ba626bb8; combined with 302d2eb3 base gives expected ~1.56

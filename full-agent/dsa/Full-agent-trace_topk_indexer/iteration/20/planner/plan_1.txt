@@ -1,0 +1,7 @@
+Plan 1: STRICT REVERT to grandparent dc51d5fc (3-tier S/M/L baseline = 9.564)
+- Mathematical model: 3 disjoint tiers by L; each tier uses an exact deterministic primitive.
+- Solver: CUB BlockRadixSort + DeviceSegmentedRadixSort.
+- Validity: each batch handled by exactly one kernel via early-return guards.
+- Why: parent `baa28cba` (7.86) regressed badly from 9.564. Strict revert restores known floor.
+- Advantages: zero risk, mathematically guaranteed >= grandparent score modulo eval noise.
+- Disadvantages: zero upside; doesn't progress evolution.

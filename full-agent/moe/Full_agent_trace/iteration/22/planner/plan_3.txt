@@ -1,0 +1,55 @@
+### Plan 3: Decoupled Structure-Finding + Per-Expert Backend Selection
+
+**Mathematical Formulation:**
+
+Variables:
+- Same as Plan 1, plus:
+- backend_choice[e] ∈ {NATIVE_FP8, SAFE_DEQUANT}: per-expert backend selector
+- T_e_threshold = 64: token count threshold for backend selection
+
+Constraints:
+1. Exact routing topology (same as Plan 1)
+2. Backend admissibility: NATIVE_FP8 only if T_e >= threshold and API supports layout
+3. SAFE_DEQUANT must be mathematically exact (blockwise expansion)
+4. Both backends must produce identical results within tolerance
+
+Objective:
+Same as Plan 1, with secondary objective: minimize number of experts using SAFE_DEQUANT
+
+**Solver Strategy:**
+
+Phase 1 - Structure Finding (GPU, vectorized):
+1. Exact routing with torch.topk
+2. Build dispatch with torch.nonzero + torch.argsort + torch.bincount
+3. Compute unique token set and inverse mapping
+
+Phase 2 - Backend Selection (CPU, per-expert):
+For each expert e:
+  if T_e >= 64 and torch._scaled_mm available:
+    backend_choice[e] = NATIVE_FP8
+  else:
+    backend_choice[e] = SAFE_DEQUANT
+
+Phase 3 - Execution (GPU, per-expert):
+For each expert e:
+  if backend_choice[e] == NATIVE_FP8:
+    - Use torch._scaled_mm for GEMM1 and GEMM2
+    - Apply scale tensors directly
+  else:
+    - Exact blockwise dequant for activations and weights
+    - Use torch.mm with FP32 operands
+  - Compute SwiGLU
+  - Apply routing weights
+  - Accumulate into output
+
+**Validity Mechanism:**
+
+1. Deterministic backend selection: no heuristics, only hard thresholds
+2. SAFE_DEQUANT path is guaranteed correct by construction
+3. NATIVE_FP8 path validated against SAFE_DEQUANT on small test cases
+4. Final output clamped to valid BF16 range
+
+**Why this solution:**
+- Advantages: Combines speed of native ops with safety of exact dequant; adaptive to workload; low risk
+- Disadvantages: Hybrid complexity; may not achieve maximum performance; backend selection overhead
+- Expected improvement: 4-6x speedup with high confidence in correctness

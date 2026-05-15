@@ -1,0 +1,231 @@
+# GDN prefill configuration
+workspace_path: "./output"
+
+# Global LLM configuration
+llm_config:
+  url: "https://api.chatanywhere.tech/v1"
+  api_key: "${LLM_API_KEY}"
+  model: "openai/gemini-3.1-pro-preview"
+  temperature: 0.9
+  context_length: 128000
+  max_tokens: 32768
+  timeout: 1200
+
+# ------------------------------------------------------------------------------
+# Define all available components
+# ------------------------------------------------------------------------------
+
+planners:
+  evolve_planner:
+    react_max_steps: 5
+
+executors:
+  evolve_executor_react:
+    parallel_candidates: 1
+    max_rounds: 3
+    react_max_steps: 10
+
+  evolve_executor_chat:
+    max_rounds: 3
+
+  evolve_executor_fuse:
+    max_rounds: 3
+    react_max_steps: 10
+    score_threshold: 0.99
+
+summarizers:
+  evolve_summary:
+    react_max_steps: 5
+
+# ------------------------------------------------------------------------------
+# Define main evolution process configuration
+# ------------------------------------------------------------------------------
+evolve:
+  task: |
+    # Role
+    You are a world-class expert in high-performance computing, specializing in PyTorch and CUDA C++ programming. Your expertise includes writing custom CUDA kernels, optimizing memory access patterns, and leveraging low-level hardware features for maximum performance.
+
+    # Task
+    You will be given with a JSON task definition describing a GPU kernel operation. Your goal is to implement a **highly optimized CUDA kernel** that significantly outperforms the provided PyTorch reference implementation while maintaining strict numerical correctness.
+
+    The definition includes:
+    1. **Tensor specifications**: shapes, dtypes, and descriptions for all inputs and outputs
+    2. **Axes**: dimension parameters (some constant, some variable like total_seq_len, num_seqs)
+    3. **Constraints**: relationships between dimensions
+    4. **Reference implementation**: a correct but unoptimized Python/PyTorch `run()` function
+
+    # Input Format
+    The initial file is a JSON object with the following structure:
+    ```json
+    {
+      "name": "task_identifier",
+      "description": "What this kernel does",
+      "axes": { ... },       // Dimension parameters
+      "inputs": { ... },     // Input tensor specs (shape, dtype)
+      "outputs": { ... },    // Expected output specs
+      "constraints": [...],  // Dimension constraints
+      "reference": "..."     // Reference Python implementation
+    }
+    ```
+    The `reference` field contains a Python function `run(*inputs) -> outputs` that serves as the correctness baseline.
+
+
+    # Output Format
+    Provide **only a single CUDA/C++ code block** — the content of `kernel.cu`.
+
+    Your `kernel.cu` MUST include `<torch/extension.h>` and expose exactly this C++ entry point:
+
+    ```cpp
+    #include <torch/extension.h>
+    #include <tuple>
+
+    // ... your CUDA kernels and helpers ...
+
+    // Entry point – must have this exact name and signature
+    std::tuple<torch::Tensor, torch::Tensor> gdn_forward(
+        torch::Tensor q,           // [total_seq_len, 4, 128]          bfloat16
+        torch::Tensor k,           // [total_seq_len, 4, 128]          bfloat16
+        torch::Tensor v,           // [total_seq_len, 8, 128]          bfloat16
+        torch::Tensor state,       // [num_seqs, 8, 128, 128]          float32  (k-last: [N,HV,V,K]), may be undefined/empty
+        torch::Tensor A_log,       // [8]                               float32
+        torch::Tensor a,           // [total_seq_len, 8]                bfloat16
+        torch::Tensor dt_bias,     // [8]                               float32
+        torch::Tensor b,           // [total_seq_len, 8]                bfloat16
+        torch::Tensor cu_seqlens,  // [num_seqs + 1]                   int64
+        torch::Tensor scale        // scalar float32 tensor
+    );
+    // Returns: {output [total_seq_len, 8, 128] bfloat16, new_state [num_seqs, 8, 128, 128] float32}
+
+    PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+        m.def("gdn_forward", &gdn_forward, "GDN Prefill Forward");
+    }
+    ```
+
+    # Correctness Requirements
+    1. Output shapes and dtypes must match exactly: `output` is bfloat16, `new_state` is float32.
+    2. Numerical tolerance: rtol=1e-2, atol=1e-2.
+    3. All intermediate accumulation must be in **FP32**; convert back to BF16 only for final `output` store.
+    4. All variable axes (`total_seq_len`, `num_seqs`) must work for any valid value.
+    5. `state` is optional: check with `state.defined() && state.numel() > 0`; initialize recurrent state to zeros when not provided.
+    6. `scale` is a 0-dim scalar tensor; access its value with `scale.item<float>()`.
+    7. `cu_seqlens[i]` and `cu_seqlens[i+1]` define the token range `[start, end)` for sequence `i`.
+    8. Gate formulas must be exact:
+      - `softplus(x) = log(1 + exp(x))` (stable: return `x` directly when `x > 20`)
+      - `g = exp(-exp(A_log) * softplus(a + dt_bias))`
+      - `beta = sigmoid(b) = 1 / (1 + exp(-b))`
+
+
+    # Core Optimization Strategy
+    Your solution must demonstrate a **substantial architectural or performance improvement** over a naive implementation. Superficial changes are forbidden. The following dimensions are key areas where meaningful gains can be achieved — addressing more dimensions generally leads to better performance:
+
+    ## 1. Register-resident State (Key Insight)
+    The most impactful optimization for prefill is to **keep the assigned state rows entirely in registers** throughout the whole token loop, never writing back to HBM between tokens.
+    - Partition the V=128 dimension across thread blocks: each block handles a tile of V rows for one (sequence, head) pair.
+    - Each warp owns a fixed set of V rows (`h0[], h1[], ...` in register arrays) and iterates over all tokens in the sequence without re-reading state from global memory.
+    - Only at the very end of the sequence are the final state values written back to `new_state`.
+    - The number of V rows per warp (Rows Per Warp, RPW) controls the tradeoff between register pressure and tile granularity.
+
+    ## 2. RPW Dispatch Based on Workload Size
+    Different RPW values change the number of thread blocks and the amortization of shared per-token work (qk_dot, gate values) across rows.
+    - Larger RPW (e.g., 4 rows/warp) amortizes the single qk reduction and gate computation over more rows, reducing relative overhead per row — beneficial when there are many sequences to fill the GPU.
+    - Smaller RPW (e.g., 1 row/warp) launches more thread blocks, improving occupancy when the workload is small.
+    - Dispatching to different kernels based on `num_seqs` (or total block count) allows the best tradeoff across the full workload range.
+
+    ## 3. Instruction Pipeline: Gate Computation Overlap
+    Gates `g[t]` and `beta[t]` are computed via SFU instructions (exp, log, rcp), which have different pipeline resources than FMA.
+    Scheduling the gate computation for token `t+1` between the FMA rows of token `t` allows the GPU to overlap SFU and ALU execution, effectively hiding gate latency.
+
+    ## 4. Memory Access and Prefetching
+    - Vectorized loads/stores (e.g., `float4` for float32 state initialization, `uint2` / `__nv_bfloat162` for bfloat16 q/k reads) maximize bus utilization.
+    - Prefetching the next token's q/k at the start of each loop iteration (while computing the current token) hides global memory latency.
+    - Non-temporal stores (e.g., `__stcs`) for writing `new_state` at loop end can avoid polluting the L2 cache since state is write-once per sequence.
+
+    ## 5. Warp-level Reduction
+    The per-token dot products (kh, qh over K=128) are reductions across a warp.
+    Warp shuffle primitives such as `__shfl_xor_sync` / `__shfl_sync`, or other intra-warp communication mechanisms, perform these reductions efficiently. Fusing multiple reductions (e.g., kh and qh) into a single communication pass reduces instruction count.
+
+    ## 6. Instruction-level Efficiency
+    The gate formulas (softplus, sigmoid, exp) and inner-loop accumulations are hot paths.
+    Fast math intrinsics (e.g., `__expf`, `__logf`, `__frcp_rn`) and fused multiply-add operations (e.g., `fmaf`) reduce instruction latency on CUDA hardware. Using `__launch_bounds__` helps the compiler make better register allocation decisions and improve occupancy.
+
+    ## 7. Library Usage
+    You are encouraged to call third-party CUDA libraries directly from `kernel.cu` when they provide a performance advantage. Available libraries in the build environment include:
+    - **CUB** (`<cub/cub.cuh>`): block-level and warp-level primitives (e.g., `cub::WarpReduce`) for dot-product reductions.
+    - **CUTLASS / CuTe** (`<cute/tensor.hpp>` etc.): tile-level abstractions if a tiled outer-product approach is explored.
+    - **Standard CUDA math** (`<cuda_bf16.h>`, `<cuda_fp16.h>`): bfloat16/fp16 arithmetic helpers.
+    Using a library is not required — a well-written pure CUDA kernel can be equally fast — but leveraging library primitives where appropriate can simplify code and improve correctness.
+
+
+    Below is an example. You can refer to the format in this example. Your question code is in the initial file.
+
+    ===== Example Start =====
+
+    Given model:
+
+    ```json
+    {
+      "name": "task_identifier",
+      "description": "What this kernel does",
+      "axes": { ... },       // Dimension parameters
+      "inputs": { ... },     // Input tensor specs (shape, dtype)
+      "outputs": { ... },    // Expected output specs
+      "constraints": [...],  // Dimension constraints
+      "reference": "..."     // Reference Python implementation
+    }
+    ```
+
+    You should respond with:
+
+    [Your thinking process]
+
+    Then the final answer:
+
+    ```cpp
+    #include <torch/extension.h>
+    #include <tuple>
+
+    // ... your CUDA kernels and helpers ...
+
+    std::tuple<torch::Tensor, torch::Tensor> gdn_forward(
+        torch::Tensor q, torch::Tensor k, torch::Tensor v,
+        torch::Tensor state, torch::Tensor A_log,
+        torch::Tensor a, torch::Tensor dt_bias,
+        torch::Tensor b, torch::Tensor cu_seqlens,
+        torch::Tensor scale);
+    // Returns: {output [total_seq_len,8,128] bfloat16, new_state [num_seqs,8,128,128] float32}
+
+    PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+        m.def("gdn_forward", &gdn_forward, "GDN Prefill Forward");
+    }
+    ```
+
+    ===== Example End =====
+
+    Now, provide your answer below:
+
+
+  # Component selection
+  planner_name: "evolve_planner"
+  executor_name: "evolve_executor_fuse"
+  summary_name: "evolve_summary"
+
+  # Core parameters
+  max_iterations: 10
+  target_score: 100.0
+  concurrency: 1
+
+  # Skip evaluation of the JSON initial file (it's a task definition, not code)
+  initial_score: 0.0
+  initial_evaluation: "Initial file is a JSON task definition for GDN prefill. No kernel to evaluate yet."
+
+  # Evaluator configuration
+  evaluator:
+    timeout: 3600
+
+  # Database configurations
+  database:
+    storage_type: "in_memory"
+    num_islands: 1
+    population_size: 100
+    checkpoint_interval: 1
+    sampling_weight_power: 2

@@ -1,0 +1,8 @@
+Plan 2: Reducer-native workspace layout + float4 stores in compute kernel.
+- Current compute kernel writes O_tmp using float2 stores; reducer reads float4. Misaligned access pattern.
+- Re-layout O_tmp[T,16,P,512] so each thread writes 4 floats contiguously, perfectly matching reducer's float4 read at d_idx=lane*4.
+- Map: in compute kernel, after computing O_reg[8] (16 floats per lane spanning d=lane*2 within 64-pack), reorganize via warp shuffles so that each lane owns 4 contiguous floats per output chunk. Then store as float4.
+- Validity: Math identical, only memory layout changes. LSE unaffected.
+- Multi-start not needed (deterministic).
+- Expected: 1.3-1.5x small-path speedup → score ~6+.
+- Library: pure CUDA intrinsics + warp shuffles.

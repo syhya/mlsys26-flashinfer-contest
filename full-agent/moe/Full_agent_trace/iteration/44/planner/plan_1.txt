@@ -1,0 +1,29 @@
+Outline 1: Hybrid Native-FP8 / Safe-PyTorch MoE
+
+Mathematical Formulation
+- Variables X:
+  - R[t, j]: selected expert indices for token t, j in {0..7}
+  - W[t, j]: normalized routing weights
+  - P: dispatch permutation that groups routed pairs by local expert
+  - O[t, h]: final output in fp32 before cast
+- Constraints C:
+  1. Routing must exactly follow DeepSeek topology: sigmoid -> top2 per group -> top4 groups -> top8 experts.
+  2. hidden-state scale lookup uses original token id, not local dispatch row.
+  3. GEMM accumulation in fp32.
+  4. Final output shape [T,7168], dtype bf16.
+- Objective f(X): maximize evaluation score by preserving exact routing/correctness while using native fast paths where API semantics are exact.
+
+Solver Strategy
+- Deterministic decomposition, not random search.
+- Use PyTorch tensor ops as the exact solver for routing/dispatch.
+- Use backend selection: torch._scaled_mm only when scale layout exactly matches semantics; otherwise use chunked exact dequant + torch.mm.
+
+Validity Mechanism
+- Always maintain a safe repair path with exact per-block dequantization.
+- Use index_add_ scatter-add in fp32 only.
+- Final projection: return out_fp32.to(torch.bfloat16).
+
+Why this solution?
+- Advantages: highly robust, least likely to mis-handle block scales, easiest to validate.
+- Disadvantages: likely too slow to beat strong solutions if safe path dominates.
+- Expected performance: correctness oracle and fallback, moderate speed only.

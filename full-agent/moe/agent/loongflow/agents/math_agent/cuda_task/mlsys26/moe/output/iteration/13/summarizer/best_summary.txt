@@ -1,0 +1,20 @@
+**1. Executive Summary:**
+This iteration was a sharp regression because the correctness-first active-slice dequantization strategy traded away the parent’s fused tensor-core throughput for exact eager FP32 GEMMs, performing 1 out of 1 siblings.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* `**Sibling Rank:**` 1 out of 1 children. Top sibling score: 16.39%.
+* `**Score Delta:**` From parent (86.26%) to child (16.39%).
+* `**Key Change:**` Replaced Triton grouped GEMM execution with per-expert exact blockwise dequantization of hidden states and weights, followed by eager `torch.mm` FP32 GEMMs and `index_add_` scatter accumulation.
+* `**Core Metrics:**` Kernel latency changed from 2.810ms to 14.030ms; speedup changed from 8.63x to 1.64x; max absolute error changed from 33280.0 to 0.0; max relative error changed from 369600004096.0 to 0.0; correctness check passed in both cases.
+
+**3. Strategic Analysis (The "So What?"):**
+* `**Root Cause:**` The outcome was driven primarily by plan quality, not execution failure. The plan explicitly pivoted from a performance-oriented fused-kernel design to a correctness-first exact dequantization pipeline, and the implementation followed that plan faithfully. The score collapsed because the benchmark rewards speed once correctness is satisfied, and this design removed the parent’s main acceleration mechanism.
+* `**Key Insight:**` Exact active-slice block dequantization is now a validated oracle path: it proves the routing semantics, scale layout interpretation, and scatter accumulation can all produce bit-exact reference outputs. That makes this child highly valuable as a debugging baseline, even though it is not competitive as a final solution.
+* `**Identified Risk:**` This solution exposes a major evolutionary trap: over-correcting from a numerically risky fast kernel to a fully eager exact implementation can satisfy correctness but fall into a low-performance basin that is too far from the task optimum. The per-expert Python loop plus repeated expert dequantization/materialization is the dominant structural bottleneck.
+
+**4. Actionable Guidance (The "What's Next?"):**
+* `Recommend Fusion:` Use this child as the numerical reference backbone and fuse its proven-correct block dequant semantics into the parent’s grouped Triton architecture. In particular, preserve the child’s exact routing and dequant layout logic, but reintroduce grouped GPU execution for GEMM1 and GEMM2.
+* `Recommend Fusion:` Compare the child’s exact per-expert outputs against the parent at three checkpoints—post-routing weights, post-GEMM1 `G1`, and pre-scatter GEMM2 output—to localize where the fast lineage diverges. This child is best used as an internal differential tester for future fused kernels.
+* `Recommend Exploration:` Explore a hybrid path that keeps eager exactness only for the numerically sensitive stage while restoring fast kernels elsewhere: e.g., Triton grouped FP8 GEMM1 + exact FP32/BF16 SwiGLU/GEMM2, or exact dequantized weights cached once per expert with batched library GEMMs instead of per-expert full rematerialization each call.
+* `Recommend Stripping:` Strip the per-call full dequantization of `gemm1_weights` and `gemm2_weights` inside the expert loop from future high-performance descendants. Any successful child should avoid repeatedly materializing `[4096,7168]` and `[7168,2048]` FP32 weights in eager mode.
+* `Warn:` Do not interpret the parent’s large artifact error numbers as proof that the fast lineage is unusable; this child shows the true leverage point is establishing a trustworthy oracle and then narrowing the mismatch. Abandoning fused execution entirely is not an efficient path to the objective.

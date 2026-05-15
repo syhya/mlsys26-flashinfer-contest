@@ -1,0 +1,14 @@
+Outline 1: Vectorized Memory Access & Shared Memory Tiling for K
+Mathematical Formulation:
+- Variables (X): Block size, tiling shape (e.g., tile_size_q=64, tile_size_k=64).
+- Constraints (C): Shared memory capacity (< 48KB per block typically), max threads per block (1024), constraint on topK (2048) <= max_num_pages * 64.
+- Objective f(X): Minimize memory latency and arithmetic overhead.
+
+Solver Strategy:
+Use vectorized `uint4` memory reads for the KV cache to maximize global memory bandwidth, and load blocks of the KV cache into shared memory before performing the dot products. This reduces redundant global memory reads and improves cache hit rates.
+
+Validity Mechanism:
+Ensure sequence length bounds checks are strictly enforced. Unused elements in the shared memory tile will be zeroed out or masked. Use a radix sort (via CUB) as the deterministic safety valve for exact Top-K correctness.
+
+Why this solution?
+It directly addresses the parent's finding that KV cache loading is the next bottleneck. It is straightforward to implement and highly robust, avoiding the extreme complexity of CuTe/MMA which might cause compilation errors.

@@ -1,0 +1,12 @@
+PLAN 3: Reducer Compute Cleanup + Vectorized Workspace Read
+Keep two-path structure. Modify split_k_reduce_kernel to:
+1. Use 4-warp parallel max+sum reduction over 64 partitions (instead of lane 0 doing it serially).
+2. Replace shared scale_smem write/read with __shfl broadcast since 64 < 128 threads.
+3. Use float4 vectorized reads of O_tmp aligned to 128B.
+
+Variables: reducer parallelization scheme.
+Constraints: exact merge.
+Objective: reduce reducer kernel latency.
+
+Pros: improves reducer throughput.
+Cons: reducer is already fast (<5us), gains may be small. Risk of synchronization bugs.

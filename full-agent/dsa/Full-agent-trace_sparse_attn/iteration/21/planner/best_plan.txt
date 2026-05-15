@@ -1,0 +1,95 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Evolve the parent (score 4.47, 44.72x speedup) toward the best-known lineage configuration (12.64x) by adopting the proven refinements that lifted sibling descendants, while preserving strict correctness (score >= 1.0, rtol/atol 1e-2).
+
+**Selected Outline:** Plan 1 — Reducer simplification + tile-validity flag + vectorized workspace stores, applied as a strict superset of the parent.
+
+**Rationale for Selection:**
+1. Empirically validated: The top-scoring solutions in the same island (12.64x, 11.69x, 11.49x) all converge on exactly this set of low-risk refinements while keeping the two-path architecture.
+2. Mathematically exact: all changes preserve the online-softmax recurrence and exact merge algebra.
+3. Code-ready: every edit is a targeted line-level modification of the parent kernel, not a structural rewrite.
+4. Avoids known failure modes: prior siblings that attempted aggressive small-path redesign (partition+merge) regressed or were silently abandoned.
+
+---
+
+**Best Plan:**
+
+### Phase 1: Mathematical Definition (unchanged from parent)
+For each (t,h), compute online-softmax over 2048 sparse keys:
+- logit z_j = sm_scale * (dot(q_nope, k_nope_j) + dot(q_pe, k_pe_j)), where raw_idx = sparse_indices[t,j]; if raw_idx == -1, skip exactly.
+- State (m, l, O) updated by m_new=max(m,z); α=exp(m-m_new) (0 if m==-INF); β=exp(z-m_new); l←l*α+β; O←O*α+β*v.
+- Final: out = O/l if l>0 else 0. lse = m*log2(e)+log2(l) if l>0 else -INF.
+- Split-K exact merge: m=max(m_p); scale_p=exp(m_p-m); l=Σ l_p*scale_p; O=Σ O_p*scale_p.
+
+### Phase 2: Concrete Code-Level Edits (apply in order)
+
+**Edit A — Fused large-path tile-validity flag (replace shared-index mutation):**
+1. Add `__shared__ int tile_has_valid;` alongside `idx_shared[32]`.
+2. Inside the `for (tile=0; tile<64; ++tile)` loop, after loading `idx_shared`, add:
+   ```
+   if (tid == 0) {
+       int any = 0;
+       #pragma unroll
+       for (int i=0; i<32; ++i) any |= (idx_shared[i] != -1);
+       tile_has_valid = any;
+   }
+   __syncthreads();
+   if (!tile_has_valid) { __syncthreads(); continue; }
+   ```
+3. Do NOT overwrite `idx_shared[0]`; keep payload pristine.
+
+**Edit B — Split-K reducer simplification (remove redundant `l_s_smem` + fused scale compute):**
+1. Remove `__shared__ float l_s_smem[64];` allocation.
+2. In the lane==0 branch, inside the single pass that computes m_max, also compute l_sum by reading l_tmp directly:
+   ```
+   float l_sum = 0.0f;
+   for (int i=0; i<64; ++i) {
+       if (m_s_smem[i] != -INFINITY) {
+           l_sum = fmaf(l_tmp[t*16*64 + h*64 + i], __expf(m_s_smem[i]-m_max), l_sum);
+       }
+   }
+   ```
+3. In the scale computation stage, compute `coeff = scale_smem[s]` directly as `exp(m_s - m_global) * inv_l_global` with `inv_l_global = __fdividef(1.0f, l_global)` precomputed once, to save per-lane divisions.
+4. Emit `lse = (m_max==-INFINITY || l_sum<=0.0f) ? -INFINITY : fmaf(m_max, 1.4426950408889634f, __log2f(l_sum));`.
+
+**Edit C — Fast-math intrinsics everywhere (keep from parent):**
+- Ensure `__expf`, `__log2f`, `__fdividef` are used in both kernels (parent already has these; verify no regression).
+
+**Edit D — Vectorized float4 reducer load (keep from parent):**
+- `split_k_reduce_kernel` block size 128, each thread handles `d_idx = lane*4` via `float4` load from O_tmp; pack two `__nv_bfloat162` via `uint2` store.
+
+**Edit E — Safe dispatch:**
+- Keep threshold `num_tokens < 128` to split-K path; else fused large path.
+- If `num_tokens==0`, return empty tensors.
+
+### Phase 3: Safety Valve (CRITICAL)
+1. **Mask guard**: every load of `ckv_cache`/`kpe_cache` gated on `idx != -1`.
+2. **Empty-row fallback**: if `m_global == -INFINITY` OR `l_global <= 0.0f`, write zeros to output and `-INFINITY` to lse; all four accumulators `out0..out3` stay 0.
+3. **Fused path empty-row**: if `l <= 0.0f` at kernel end, set `inv_l = 0.0f`, store zero BF16 output, store `-INFINITY` lse at lane 0.
+4. **BF16 intrinsics only**: exclusively use `__bfloat162float`, `__bfloat1622float2`, `__float2bfloat16`, `__floats2bfloat162_rn`. No implicit casts (build flag `-D__CUDA_NO_BFLOAT16_CONVERSIONS__`).
+5. **ABI preservation**: keep exact entry point signature and final `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("dsa_forward", &dsa_forward, "DSA Forward"); }`.
+6. **Fallback**: if any edit introduces ambiguity, default to the exact parent code path for that sub-kernel. Never ship broken code.
+
+### Phase 4: Implementation Details
+- **Headers**: `<torch/extension.h>`, `<cuda_bf16.h>`, `<cuda_fp16.h>`, `<tuple>`, `<math.h>`.
+- **Kernels**: three total — `dsa_forward_kernel` (fused large path), `split_k_compute_kernel` (unchanged from parent, float2 O_tmp stores), `split_k_reduce_kernel` (simplified as in Edit B).
+- **Launch configs**:
+  - Fused: `grid=(T,)`, `block=(32,16)`.
+  - Split-K compute: `grid=(64, T)`, `block=(32, 16)`.
+  - Split-K reduce: `grid=(T, 16)`, `block=(128,)`.
+- **Workspace (small path)**:
+  - `O_tmp: [T, 64, 16, 512] float32`
+  - `m_tmp: [T, 16, 64] float32`
+  - `l_tmp: [T, 16, 64] float32`
+- **Shared memory (fused+compute)**:
+  - `idx_shared[32]` int
+  - `smem_Kc[32*512]` bf16
+  - `smem_Kp[32*64]` bf16
+  - `tile_has_valid` int (fused only)
+- **Warp reduction**: `__shfl_down_sync` tree over 32 lanes, then `__shfl_sync(..., 0)` broadcast.
+- **Register blocking**: 8x float2 per lane for O_reg (covers 512-dim output); query fragments preloaded once as 8x float2 for q_nope + 1x float2 for q_pe.
+
+### Expected Performance
+- Speedup target: 10x+ (matching best known 12.64x descendants).
+- Correctness: guaranteed 1.0 by strict preservation of recurrence + empty-row guards.
+- Risk: minimal — every edit is already validated in sibling solutions in the same database.

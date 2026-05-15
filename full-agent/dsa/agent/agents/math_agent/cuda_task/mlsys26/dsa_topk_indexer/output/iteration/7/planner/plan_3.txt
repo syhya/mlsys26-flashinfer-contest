@@ -1,0 +1,14 @@
+Outline 3: Fused Kernel with Block Radix TopK (Algorithmically Robust)
+Mathematical Formulation:
+- Variables (X): Number of items per thread, block dimension.
+- Constraints (C): Output must match exact top-2048 logic, independent of thread execution order.
+- Objective f(X): Minimize HBM round trips by avoiding global memory writes of the full scores array, directly outputting top-K.
+
+Solver Strategy:
+Compute the scores using vectorized (uint4) loads and unrolled loops (similar to Outline 1). Instead of writing all `N` scores to global memory and launching a separate Radix Sort, maintain a thread-local or block-local top-K heap/radix select, or use a fused CUB BlockRadixSort if N is small enough. Wait, N can be up to max_num_pages * 64, which might be large. So keeping the two-pass approach but optimizing the pass 1 is safer.
+
+Validity Mechanism:
+Strictly use CUB's DeviceSegmentedRadixSort for the exact top-K (the "Safety Valve"). The focus will be completely on optimizing the compute phase (Pass 1) to be mathematically exact and memory-bound optimal using uint4.
+
+Why this solution?
+It decouples the "hard part" (the exact Top-K sorting) from the "easy part" (fast scores computation). It guarantees correctness while enabling aggressive memory optimizations (uint4 loads, shared memory tiling) for the scoring phase.

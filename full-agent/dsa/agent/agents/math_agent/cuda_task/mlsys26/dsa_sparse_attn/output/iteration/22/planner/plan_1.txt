@@ -1,0 +1,9 @@
+Plan 1: Restore the best-in-lineage dual-path architecture (sol 94736692, score 12.63) AS-IS and add one targeted micro-optimization to the split-K reducer: precompute coefficients once and use float4 vector loads for O_tmp with loop unrolling by 32.
+
+Variables X: kernel dispatch threshold tau (128), split-K parts S (64), reducer block (128), O_tmp layout [T,S,16,512] fp32.
+Constraints C: FP32 accum, base-2 lse, -1 masked, BF16 only at final store, exact online softmax merge.
+Objective f(X): minimize kernel latency while maintaining correctness=1.0.
+
+Solver Strategy: Exact online softmax with deterministic split-K + exact algebraic merge.
+Validity: Safety valve = if l<=0 -> zero output & -INF lse; neutral state for all-invalid partitions; exact merge formula.
+Why: Directly revert the regression by basing child on score=12.63 ancestor. Low risk, guaranteed improvement over parent (0.85 -> ~12.6).

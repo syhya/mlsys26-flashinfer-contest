@@ -1,0 +1,20 @@
+**1. Executive Summary:**
+This iteration was a regression because the plan intentionally replaced the parent’s fast fused GEMM2 path with correctness-first per-expert FP32 dequantized `torch.mm`, performing 1 out of 2 siblings.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* `**Sibling Rank:**` 2 out of 2 children. Top sibling score: 81.29%.
+* `**Score Delta:**` From parent (86.26%) to child (27.73%).
+* `**Key Change:**` Removed dynamic FP8/BF16 fused GEMM2 kernels and switched to exact per-expert block dequantization of `gemm2_weights` followed by FP32 `torch.mm`, while retaining Triton grouped GEMM1.
+* `**Core Metrics:**` Kernel latency changed from 2.810ms to 7.576ms; speedup changed from 8.63x to 2.77x; max absolute error changed from 33280.0 to 4096.0; max relative error changed from 3.696e11 to 3.047e7; correctness check passed; eval time changed from 60.25s to 140.88s.
+
+**3. Strategic Analysis (The "So What?"):**
+* `**Root Cause:**` Primarily plan quality. The execution followed the intended strategy faithfully: preserve exactness by stripping the parent’s aggressive GEMM2 approximation. That plan improved numerical behavior but moved the solution into a much slower performance regime, and the score function heavily rewards latency once baseline correctness is satisfied. Execution quality appears acceptable; the regression is the result of an over-conservative architectural pivot.
+* `**Key Insight:**` The valuable salvageable lesson is that exact block dequant semantics for GEMM2 materially reduced the error signature without needing to abandon the grouped routing/dispatch structure. This child acts as a differential probe showing that GEMM2 approximation is a major contributor to the parent lineage’s numerical pathology, but fully eager per-expert FP32 GEMM2 is too expensive to be competitive.
+* `**Identified Risk:**` The biggest trap is getting stuck in a correctness-first local optimum where each repair is implemented as eager dequantization and Python-side expert loops. That path validates semantics but scales poorly in both kernel latency and end-to-end eval time, and it may still leave unresolved structural issues given the remaining 4096.0 absolute error.
+
+**4. Actionable Guidance (The "What's Next?"):**
+* `Recommend Fusion:` Use this child’s exact GEMM2 dequantization semantics as the oracle for a new grouped GEMM2 kernel: load FP8 weight tiles, apply stored block scales in-kernel, keep SwiGLU activations in FP32/BF16, and accumulate in FP32—without any dynamic re-quantization of activations.
+* `Recommend Fusion:` Combine this child’s improved numerical path with the stronger sibling `0114e7fa` performance structure. Specifically: keep Triton grouped GEMM1 and fused grouped GEMM2 launch topology from the sibling, but replace its BF16-dequant GEMM2 math with this child’s exact block-scale interpretation to test whether accuracy can improve without collapsing throughput.
+* `Recommend Exploration:` Introduce a hybrid expert-size policy: for large `Tk_e`, run a grouped Triton GEMM2 with exact weight-scale application; for tiny `Tk_e`, keep the current eager `torch.mm` fallback. This opens a path away from all-or-nothing design choices.
+* `Recommend Stripping:` Strip per-call full expert weight materialization from the hot path. Future descendants should avoid repeatedly creating `[7168, 2048]` FP32 expert weights inside the loop; if an eager fallback remains, it should be restricted to sparse/tiny experts only.
+* `Warn:` Do not conclude from the lower error numbers alone that the core bug is solved. The remaining 4096.0 absolute error indicates unresolved mismatch still exists, so future planners should treat this child as a semantic guide for GEMM2, not as a correctness-complete endpoint.

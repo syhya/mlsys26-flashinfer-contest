@@ -1,0 +1,7 @@
+Plan 3: Vectorize reducer + skip empty partitions early
+- Keep iter20 architecture, S=64, etc.
+- Optimize reducer: use 2 warps (64 threads) parallelizing partition merge; vectorize the 64 m_tmp/l_tmp loads.
+- Add early-skip for fully-empty partitions in compute kernel using a tile_has_valid flag (already in iter20 fused path; add to split_k_compute_kernel).
+- Modest speedup expected, low risk.
+- Math: identical.
+- Less ambitious than plan 1.

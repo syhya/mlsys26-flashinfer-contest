@@ -1,0 +1,293 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Improve end-to-end speedup beyond the best lineage solution (sibling iteration 20, score 12.635, solution_id `94736692`) for `dsa_forward`, while preserving correctness == 1.0. The given parent (`bad043e5`, score 11.69) is actually inferior to that sibling within the same lineage. The right move is to **branch from the best sibling** (it shares the same parent `c06e99d2`) and apply targeted, low-risk micro-optimizations.
+
+**Selected Outline:** Best-Sibling-Based Micro-Optimization with Partition-Level Early-Skip and Reducer-Native Workspace Layout.
+
+**Rationale for Selection:**
+1. The best sibling already proved that simplifying the reducer (removing `l_s_smem`, computing `coeff = exp(m_p - m_global) * inv_l_global` inline) is a clear win. Build on this proven artifact, not on the inferior parent.
+2. The largest unaddressed waste is in the small-path: `O_tmp` is `[T, S=64, 16, 512]` fp32 → 4MB / token of HBM round-trip. Most evaluation workloads are tiny (`num_tokens=1` per the ncu trace), so reducer HBM traffic dominates.
+3. A safe, mathematically-exact partition-level early-skip in `split_k_compute_kernel` (skip the partition entirely if all 32 sparse indices are `-1`) costs nothing and saves real work for sparse-padded tokens.
+4. Re-laying `O_tmp` to head-major `[T, 16, S, 512]` lets the reducer read 64 contiguous 512-dim vectors per `(t,h)` instead of strided gathers, dramatically improving L2 reuse and coalescing.
+5. All changes are deterministic, math-preserving, ABI-preserving, and compile-safe. No randomness, no `cp.async`, no Tensor Cores, no inline PTX.
+
+---
+
+## Phase 1: Mathematical Definition
+
+### 1.1 Operator (unchanged from reference)
+For each `(t, h)`:
+- `s_j = sm_scale * (q_nope[t,h]·k_nope(raw_j) + q_pe[t,h]·k_pe(raw_j))` for valid `raw_j != -1`
+- `out[t,h] = Σ exp(s_j - m) * k_nope(raw_j) / Σ exp(s_j - m)` where `m = max_j s_j`
+- `lse[t,h] = m * log2(e) + log2(Σ exp(s_j - m))`, else `-INF`
+
+### 1.2 Split-K exact merge (already used in best sibling)
+Partition the 2048 sparse slots into `S=64` chunks of 32 each. Each compute block produces `(m_p, l_p, O_p)` (FP32). Merge:
+- `m = max_p m_p`
+- `coeff_p = exp(m_p - m) / l_global` where `l_global = Σ_p l_p * exp(m_p - m)` (skip `m_p == -INF`)
+- `out = Σ_p coeff_p * O_p`
+
+This is byte-equivalent to the best sibling's math.
+
+### 1.3 Variables `X`
+- `LAYOUT(O_tmp)`: choose head-major `[T, 16, S, 512]` instead of slot-major `[T, S, 16, 512]`.
+- `EARLY_SKIP_PARTITION`: bool, enable warp-ballot all-invalid skip.
+- All other parameters (S=64, block geometry 32×16, threshold `num_tokens<128`) unchanged.
+
+### 1.4 Constraints `C`
+- Output shapes/dtypes exact: `output [T,16,512] bf16`, `lse [T,16] fp32`.
+- All accumulation FP32; BF16 only at I/O boundary; explicit BF16 intrinsics only.
+- `lse` in **base 2**.
+- `-1` sparse indices contribute nothing.
+- ABI: `dsa_forward(q_nope, q_pe, ckv_cache, kpe_cache, sparse_indices, sm_scale)` returns `tuple<Tensor, Tensor>`.
+- Mandatory `PYBIND11_MODULE` footer.
+
+### 1.5 Objective
+Minimize end-to-end latency, prioritizing: correctness ≥ 1.0 → small-token workloads (where benchmark spends most time) → large-token preserved.
+
+---
+
+## Phase 2: The Optimization Loop (Deterministic, No Randomness)
+
+This is a deterministic finite design search; no multi-start needed.
+
+### 2.1 Branch base
+**Start from the best sibling code (`94736692`, score 12.635), NOT from `bad043e5`.** Reproduce its kernel structure verbatim, then layer the micro-optimizations below.
+
+### 2.2 Optimization 1: Reducer-native head-major workspace layout
+Change `O_tmp` from `[T, S=64, 16, 512]` to `[T, 16, S=64, 512]`.
+
+**Producer side** (`split_k_compute_kernel`):
+- For block `(s, t)`, head `h`:
+  - `base_idx = ((t * 16 + h) * S + s) * 512 + j*64 + lane*2`
+- This is exactly one `float2` per lane per `j`, fully coalesced within a warp because lanes vary in the innermost dim.
+
+**Consumer side** (`split_k_reduce_kernel`):
+- For block `(t, h)`, lane handles `d_idx = lane*4`:
+  - For `s ∈ [0, 64)`: `base_idx = ((t * 16 + h) * S + s) * 512 + d_idx`
+- The 64 reads per lane are now to addresses spaced exactly 512 floats apart within one contiguous `[64, 512]` slab — much more L2-friendly than strided across heads.
+
+This is purely an indexing change. Math is byte-identical.
+
+### 2.3 Optimization 2: Partition-level all-invalid early skip
+In `split_k_compute_kernel`, after loading `idx_shared[32]`:
+```
+int valid_mask = __ballot_sync(0xffffffff, (tid < 32) ? (idx_shared[tid] != -1) : 0);
+if (valid_mask == 0) {
+    // write neutral state and exit
+    if (lane == 0) {
+        m_tmp[((t*16)+h)*S + s] = -INFINITY;
+        l_tmp[((t*16)+h)*S + s] = 0.0f;
+    }
+    // O_tmp values are unused when l_p == 0 in reducer (coeff_p = 0); but to be safe,
+    // we can skip writing O_tmp because the reducer must already gate on m_p == -INFINITY.
+    return;
+}
+```
+**Correctness gate:** the reducer must explicitly check `m_p == -INFINITY` and set `coeff_p = 0` (the best sibling already does this — confirmed). So skipping `O_tmp` writes is safe.
+
+Also re-layout `m_tmp` and `l_tmp` to `[T, 16, S]` indexing (already that shape in best sibling).
+
+### 2.4 Optimization 3: Reducer simplification preserved
+Keep the best sibling's reducer pattern: lane-0 computes `m_global`, `l_global`, and writes `lse`; precomputes `scale_smem[s] = exp(m_s - m_global)` (skip `-INF`); then each lane multiplies-accumulates 64 partials. **Use `inv_l = 1/l_global` and fold into `coeff` once, exactly like the best sibling.**
+
+### 2.5 Optimization 4: Use `__ldg` cache hints on cache reads (low-risk)
+Replace direct dereferences of `ckv_cache_ptr[idx*512]` and `kpe_cache_ptr[idx*64]` with `__ldg`-via-`const __restrict__` (already there, but additionally use `__ldg(reinterpret_cast<const float4*>(...))` patterns where alignment is guaranteed). Drop this if it complicates code; it's an opportunistic add.
+
+### 2.6 Large-path kernel
+**Keep the fused `dsa_forward_kernel` from the best sibling verbatim**, including the `tile_has_valid` separate-flag pattern. Do NOT modify large-path math.
+
+### 2.7 Dispatch
+Keep `num_tokens < 128 → split-K, else → fused`. No threshold change in this iteration (the best sibling already uses 128, validated).
+
+---
+
+## Phase 3: The "Safety Valve" (CRITICAL)
+
+### 3.1 Neutral-state masking
+- Producer: when `valid_mask == 0`, write `m_tmp = -INF`, `l_tmp = 0`, do not touch `O_tmp` for that (t,h,s) slab. Reducer must (and does) treat `m_p == -INF` as `coeff_p = 0`, so unread `O_tmp` is never multiplied.
+- Per-key `idx == -1`: skip the inner-loop iteration (already done).
+
+### 3.2 Reducer correctness gates (preserve from best sibling)
+- `m_global = max_s m_tmp[t,h,s]`. If all `-INF`, set `out=0`, `lse=-INF`.
+- `l_global = Σ_s l_tmp * exp(m_s - m_global)` skipping `-INF` entries.
+- If `l_global <= 0`, force zero output and `lse = -INF`.
+- Final `out = Σ_s coeff_s * O_tmp[t,h,s,:]`, where `coeff_s = exp(m_s-m_global)/l_global` (0 if `m_s == -INF`).
+
+### 3.3 Layout consistency check (mandatory in implementation)
+Producer index formula and consumer index formula MUST be derived from the same closed-form expression `((t*16+h)*S + s)*512 + d`. Write a single device-side `__forceinline__` helper:
+```
+__device__ __forceinline__ int otmp_idx(int t, int h, int s, int d, int S) {
+    return ((t * 16 + h) * S + s) * 512 + d;
+}
+```
+Use it in both kernels. This eliminates the most common bug class.
+
+### 3.4 Conservative fallback
+- Keep large-path fused kernel byte-identical to best sibling (it works at correctness 1.0).
+- If executor is uncertain about layout change, the fallback is to keep the original layout `[T,S,16,512]` from the best sibling and ship only the early-skip optimization. This still produces a strictly better-or-equal child.
+
+### 3.5 Build environment compliance
+- `#include <torch/extension.h>`, `#include <cuda_bf16.h>`, `#include <tuple>`, `#include <math.h>`.
+- Explicit BF16 conversions only: `__bfloat1622float2`, `__floats2bfloat162_rn`, `__bfloat162float`.
+- Exact entry signature `dsa_forward(q_nope, q_pe, ckv_cache, kpe_cache, sparse_indices, sm_scale)`.
+- Mandatory `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("dsa_forward", &dsa_forward, "DSA Forward"); }`.
+
+---
+
+## Phase 4: Implementation Details
+
+### 4.1 Files / Headers
+```cpp
+#include <torch/extension.h>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+#include <tuple>
+#include <math.h>
+```
+
+### 4.2 Helpers
+```cpp
+template <typename T>
+__device__ __forceinline__ T warp_reduce_sum(T v) {
+    #pragma unroll
+    for (int o = 16; o > 0; o /= 2) v += __shfl_down_sync(0xffffffff, v, o);
+    return v;
+}
+__device__ __forceinline__ int otmp_idx(int t, int h, int s, int d, int S) {
+    return ((t * 16 + h) * S + s) * 512 + d;
+}
+__device__ __forceinline__ int ml_idx(int t, int h, int s, int S) {
+    return (t * 16 + h) * S + s;  // already shape [T,16,S]
+}
+```
+
+### 4.3 Kernel 1: `dsa_forward_kernel` (large path)
+**Copy verbatim from best sibling 94736692.** Do not modify.
+
+### 4.4 Kernel 2: `split_k_compute_kernel` (modified small path)
+Block: `(32, 16)`, Grid: `(S=64, T)`.
+1. Load `idx_shared[32]` from `sparse_indices[t*2048 + s*32 + tid]` for `tid < 32`.
+2. `__syncthreads();`
+3. **Early-skip (NEW):** lane 0 of warp 0 computes:
+   ```cpp
+   __shared__ int partition_valid;
+   if (tid == 0) {
+       int any = 0;
+       #pragma unroll
+       for (int i = 0; i < 32; ++i) any |= (idx_shared[i] != -1);
+       partition_valid = any;
+   }
+   __syncthreads();
+   if (!partition_valid) {
+       if (tid == 0) {
+           // write neutral state for all 16 heads
+           #pragma unroll
+           for (int hh = 0; hh < 16; ++hh) {
+               m_tmp[ml_idx(t, hh, s, 64)] = -INFINITY;
+               l_tmp[ml_idx(t, hh, s, 64)] = 0.0f;
+           }
+       }
+       return;
+   }
+   ```
+4. Stage `smem_Kc` and `smem_Kp` (same `float4` cooperative load as best sibling, gated by `idx != -1`).
+5. Inner loop over 32 keys: compute logit, online-softmax update (FP32). Identical to best sibling.
+6. Write outputs using **NEW layout**:
+   ```cpp
+   #pragma unroll
+   for (int j = 0; j < 8; ++j) {
+       int idx = otmp_idx(t, h, s, j*64 + lane*2, 64);
+       *reinterpret_cast<float2*>(&O_tmp[idx]) = make_float2(O_reg[j].x, O_reg[j].y);
+   }
+   if (lane == 0) {
+       m_tmp[ml_idx(t, h, s, 64)] = m;
+       l_tmp[ml_idx(t, h, s, 64)] = l;
+   }
+   ```
+
+### 4.5 Kernel 3: `split_k_reduce_kernel` (modified small path)
+Block: `128`, Grid: `(T, 16)`.
+1. Load `m_s_smem[64]` from `m_tmp[ml_idx(t,h,s,64)]` for `lane < 64`.
+2. `__syncthreads()`.
+3. Lane 0:
+   - Compute `m_max = max_s m_s_smem[s]`.
+   - Compute `l_sum = Σ_s l_tmp[ml_idx(t,h,s,64)] * exp(m_s - m_max)` for `m_s != -INF`; store `scale_smem[s] = exp(m_s - m_max)` (or 0 if -INF).
+   - `m_global = m_max; l_global = l_sum;`
+   - `lse[t*16+h] = (m_max == -INF || l_sum <= 0) ? -INF : fmaf(m_max, 1.4426950408889634f, __log2f(l_sum));`
+4. `__syncthreads()`.
+5. `inv_l = (l_global > 0) ? 1.0f / l_global : 0.0f;`
+6. `d_idx = lane * 4` (lanes 0..127 cover 512). For each lane:
+   ```cpp
+   float4 acc = make_float4(0,0,0,0);
+   if (m_global != -INFINITY && l_global > 0.0f) {
+       #pragma unroll 8
+       for (int s = 0; s < 64; ++s) {
+           float coeff = scale_smem[s] * inv_l;
+           if (coeff > 0.0f) {
+               int idx = otmp_idx(t, h, s, d_idx, 64);
+               float4 v = *reinterpret_cast<const float4*>(&O_tmp[idx]);
+               acc.x = fmaf(v.x, coeff, acc.x);
+               acc.y = fmaf(v.y, coeff, acc.y);
+               acc.z = fmaf(v.z, coeff, acc.z);
+               acc.w = fmaf(v.w, coeff, acc.w);
+           }
+       }
+   }
+   __nv_bfloat162 b0 = __floats2bfloat162_rn(acc.x, acc.y);
+   __nv_bfloat162 b1 = __floats2bfloat162_rn(acc.z, acc.w);
+   uint2 out = make_uint2(*reinterpret_cast<uint32_t*>(&b0), *reinterpret_cast<uint32_t*>(&b1));
+   *reinterpret_cast<uint2*>(&output_ptr[(t*16+h)*512 + d_idx]) = out;
+   ```
+   **Note the contiguous stride pattern:** all 64 reads per lane are now within the same `[64, 512]` head-local slab → much better L2 hit-rate than the original slot-major layout.
+
+### 4.6 Workspace allocation in `dsa_forward(...)`
+```cpp
+constexpr int S = 64;
+auto O_tmp = torch::empty({num_tokens, 16, S, 512}, torch::dtype(torch::kFloat32).device(q_nope.device()));
+auto m_tmp = torch::empty({num_tokens, 16, S}, torch::dtype(torch::kFloat32).device(q_nope.device()));
+auto l_tmp = torch::empty({num_tokens, 16, S}, torch::dtype(torch::kFloat32).device(q_nope.device()));
+```
+
+### 4.7 Dispatch logic
+```cpp
+if (num_tokens == 0) return {output, lse};
+if (num_tokens < 128) { /* split-K path */ }
+else { /* fused large path (verbatim from best sibling) */ }
+```
+
+### 4.8 Numerical rules (preserve exactly)
+- Multiply by `sm_scale` after warp-reduce of dot product, before exp.
+- `__expf` for exponentials, `__log2f` for final lse, `1.4426950408889634f` for `log2(e)`.
+- All accumulators FP32. BF16 only at input loads and output store.
+
+### 4.9 Forbidden in this iteration
+- No `cp.async`, no WMMA, no inline PTX, no cooperative-groups grid sync, no autotuning, no randomness.
+- Do not change the large fused kernel beyond what the best sibling already has.
+
+---
+
+## Review Checklist
+
+- **Math vs luck:** All optimizations preserve exact math. The merge equations are deterministic FP32 algebra.
+- **Library check:** Only standard CUDA/PyTorch extension headers.
+- **Randomness:** None → no multi-start needed.
+- **Implementable:** Direct minor edit of best-sibling code; concrete index formulas given; concrete kernel signatures.
+- **Decoupled structure/parameters:** Structure (layout, dispatch) is fixed and exact; only the workspace strides change. The "tuning" is a single boolean (early-skip) gated by exact correctness.
+
+---
+
+## Final Executor Instructions
+
+1. **Start from solution `94736692` (best sibling, score 12.635), NOT from the given parent `bad043e5`.** Copy its three kernels verbatim as the baseline.
+2. **Change `O_tmp` layout from `[T, 64, 16, 512]` to `[T, 16, 64, 512]`** in both producer and consumer. Use the `otmp_idx(t,h,s,d,S)` helper consistently.
+3. **Add partition-level early-skip** in `split_k_compute_kernel`: if all 32 sparse indices in this `(t, s)` tile are `-1`, write neutral `(m=-INF, l=0)` for all 16 heads and return. This requires a single `__shared__ int partition_valid` flag set by `tid == 0` after the index load and one `__syncthreads()`.
+4. **Reducer must continue to gate** on `m_p == -INFINITY → coeff_p = 0` (already does in best sibling) so unwritten `O_tmp` slabs are never read.
+5. **Keep the fused large kernel byte-identical** to the best sibling.
+6. **Preserve ABI and the mandatory `PYBIND11_MODULE` footer.**
+7. If layout change introduces any complication during implementation, **fall back to keeping the original layout and shipping only the early-skip optimization** — this is still a strict improvement over the best sibling.
+
+**Expected performance improvement:**
+- Reducer L2 hit rate improves substantially due to head-major contiguity (64 reads × 512 floats per lane now lie in one 128KB slab per (t,h) instead of scattered across 16 head slabs).
+- For workloads with many `-1`-padded partitions (the typical sparse case), `split_k_compute_kernel` skips all 16-head FMA loops for those tiles.
+- Both changes are math-exact. Expected speedup gain: 3–10% over score 12.635, targeting score ≥ 13.0 while guaranteeing correctness == 1.0 and no regression risk thanks to the explicit fallback.

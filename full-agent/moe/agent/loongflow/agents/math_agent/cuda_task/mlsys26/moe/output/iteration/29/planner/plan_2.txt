@@ -1,0 +1,55 @@
+## Plan 2: Deeper Autotune + num_warps=16 + num_stages=6 for GEMM1
+
+### Mathematical Formulation
+
+**Variables (X):**
+- Expand GEMM1 autotune configs to 14+ entries:
+  - Add num_warps=16 for BLOCK_M=128 tiles
+  - Add num_stages=6 for deeply pipelined variants
+  - Add BLOCK_M=16 configs for very small decode batches
+  - Add BLOCK_N=64 variants for GEMM1 (weight tensor is [4096, 7168] so N dim)
+- Expand GEMM2 autotune to add num_warps=16, num_stages=6 for BLOCK_M=128
+
+**Constraints (C):**
+- BLOCK_K = 128 strictly
+- For GEMM2: n_block_idx = n_offs // 128 (safer than pid_n, allows BLOCK_N=64 variants)
+- Keep FP32 dequant path for GEMM2 (safest correctness)
+- All int64 pointer arithmetic preserved
+
+**Objective f(X):**
+- Minimize GEMM1 time through better hardware utilization via deeper pipelining
+- Target: ~12.5-13x speedup overall (incremental over b550fc5e's 12.01x)
+
+### Solver Strategy
+
+1. Keep GEMM1/GEMM2 kernels structurally identical to b550fc5e
+2. Expand autotune search space:
+   - GEMM1: Add {BLOCK_M=128, num_warps=16, num_stages=4,5,6} configs
+   - GEMM1: Add {BLOCK_M=64, BLOCK_N=128, num_warps=8, num_stages=4,5} configs
+   - GEMM2: Add {BLOCK_M=128, num_warps=16, num_stages=4,5} configs
+3. For GEMM2: allow BLOCK_N=64 variants by reverting n_block_idx = n_offs // 128
+4. Total configs: GEMM1=14 configs, GEMM2=12 configs
+
+### Validity Mechanism
+
+- No algorithmic changes -- same correctness as b550fc5e
+- Autotune selects the best config (only performance variable)
+- Larger search space means higher compile time but better hardware utilization
+- The FP32 dequant path is proven correct across all parent solutions
+
+### Why This Solution?
+
+**Expected Performance:**
+- b550fc5e: 12.01x (10 configs each)
+- This plan: Adds deeper pipeline and more warp options → ~12.5x expected
+
+**Advantages:**
+1. Safest option -- minimal code changes, only config additions
+2. No new correctness risks
+3. May find new optimal configs for specific workload sizes
+
+**Disadvantages:**
+1. Diminishing returns -- going from 10 to 14 configs is incremental
+2. B200 SMs may already be saturated; num_warps=16 may not help
+3. Compile time increases with more configs (~15-20% increase vs b550fc5e)
+4. The potential gain is small: only 3-8% expected improvement over 12.01x

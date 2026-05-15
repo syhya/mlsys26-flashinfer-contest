@@ -1,0 +1,19 @@
+**1. Executive Summary:**
+This iteration was a catastrophic regression because it replaced the parent's post-dot FP8 scale multiplication with pre-dot dequantization in GEMM1, destroying FP8 tensor core utilization and causing a 45x slowdown (285.5ms vs. 8.3ms parent, 2.9ms grandparent), performing 1st out of 1 siblings.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* **Sibling Rank:** 1 out of 1 children. Top sibling score: 0.64%.
+* **Score Delta:** From parent (23.92%) to child (0.64%).
+* **Key Change:** Modified GEMM1 kernel to cast FP8 operands to FP32 and apply block scales before `tl.dot`, replacing the parent's FP8-native dot followed by post-accumulation scale multiplication.
+* **Core Metrics:** Correctness: 1.0; speedup: 0.064x (slowdown 15.7x vs. reference); kernel execution time: 285.524ms; parent time: 8.283ms; grandparent time: 2.854ms; reference time: 18.630ms; max absolute error: 2048.0; max relative error: 0.9999987; total workloads: 19; eval time: 248.90s.
+
+**3. Strategic Analysis (The "So What?"):**
+* **Root Cause:** The outcome was driven by catastrophic execution quality failure, not plan quality. The child appears to have misinterpreted optimization guidance about "dequantizing before dot" as a literal instruction to cast operands to FP32 inside the Triton kernel hot loop, completely negating B200's FP8 tensor core advantage. This is a textbook example of premature optimization destroying the one component that was working correctly.
+* **Key Insight:** The most important lesson is that the parent's GEMM1 kernel architecture (FP8 dot + post-scale) was fundamentally sound and fast, and the persistent numerical errors in the lineage originate downstream in GEMM2, SwiGLU semantics, or final accumulation logic—not in GEMM1's FP8 handling. The 45x performance collapse from a single-line kernel change proves GEMM1 was never the bottleneck or error source.
+* **Identified Risk:** The biggest risk revealed is that diagnostic modifications intended to isolate semantic bugs can accidentally destroy performance-critical architectural decisions. The lineage is now trapped in a worse state than any ancestor: slower than the reference implementation while still exhibiting large numerical errors (2048.0 max absolute error).
+
+**4. Actionable Guidance (The "What's Next?"):**
+* **Recommend Stripping:** Immediately revert to the parent's FP8-native GEMM1 kernel (post-dot scale multiplication). The pre-dot dequantization experiment conclusively proved that GEMM1's FP8 handling is not the error source, so there is zero justification for keeping the 45x slower variant.
+* **Recommend Exploration:** Build a child that keeps the grandparent's (12a8176f) fast grouped GEMM2 architecture but adds a single targeted fix: audit the `gemm2_weights_scale` indexing and orientation in the GEMM2 kernel. The error signature (2048.0–4096.0 max absolute error across multiple children) strongly suggests a block-level scale lookup bug in GEMM2, not GEMM1.
+* **Recommend Fusion:** Fuse the parent's exact PyTorch GEMM2 oracle logic into a micro-validation check (not the production path) that runs on 1–2 expert rows after the fast GEMM2 completes, enabling differential debugging without sacrificing throughput.
+* **Warn:** Do not attempt further GEMM1 modifications in this lineage. Three generations of evidence (grandparent 80.31% fast, parent 23.92% slow-but-validated, child 0.64% catastrophically slow) prove that GEMM1 is not the root cause and that touching it only makes performance worse.

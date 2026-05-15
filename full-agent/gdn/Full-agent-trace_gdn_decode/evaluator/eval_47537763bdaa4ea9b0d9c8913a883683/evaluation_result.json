@@ -1,0 +1,28 @@
+{
+  "status": "success",
+  "summary": "Optimization successful! Speedup: 6802.31x (ref: 108.266ms, kernel: 0.010ms)",
+  "score": 680.2312968783725,
+  "metrics": {
+    "correctness": 1.0,
+    "speedup": 6802.3129687837245,
+    "exec_time_ms": 0.009533435185185186,
+    "baseline_time_ms": 108.2664207469136,
+    "compile_time": 0.0,
+    "eval_time": 687.5216994285583
+  },
+  "artifacts": {
+    "eval_backend": "modal+flashinfer-bench",
+    "task_id": "gdn_decode_qk4_v8_d128_k_last",
+    "execution_time": "687.52s",
+    "kernel_latency_ms": "0.010ms",
+    "reference_latency_ms": "108.266ms",
+    "speedup": "6802.31x",
+    "bench_stats": {
+      "reference_latency_ms": 108.2664207469136,
+      "max_relative_error": 0.39304274320602417,
+      "max_absolute_error": 6.103515625e-05,
+      "total_workloads": 54
+    },
+    "correctness_check": "Passed"
+  }
+}

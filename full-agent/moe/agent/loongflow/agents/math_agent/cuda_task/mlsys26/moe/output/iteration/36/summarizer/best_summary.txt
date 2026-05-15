@@ -1,0 +1,23 @@
+## Strategic Summary Report — Solution `c9929ab3` (Iteration 36, Generation 11)
+
+### 1. Executive Summary
+This iteration was a **clear regression** because replacing the GEMM2 `tl.store` + `index_add_` epilogue with in-kernel `tl.atomic_add` scatter into the global output buffer raised kernel latency from 1.520ms → 1.648ms (-7.9%, score 1.5517 → 1.4395), as the only sibling of parent `302d2eb3` it sets a negative baseline for this branch.
+
+### 2. Data-Driven Findings (Facts ONLY)
+- **Sibling Rank:** 1 of 1 children of `302d2eb3` (no other siblings retrieved).
+- **Score Delta:** Parent 1.5517 (15.52x, 1.520ms) → Child **1.4395 (14.39x, 1.648ms)**. Absolute: **-0.1122 (-7.2%)**. Latency: **+0.128ms (+8.4%)**.
+- **Key Change:** GEMM2 epilogue fused — `OutGlobal_ptr` indexed by global token ID + `tl.atomic_add` replaces local `O[Tk_total,H]` scratch + `output.index_add_(...)`. Added `sorted_tokens_ptr` arg and `reset_to_zero=["OutGlobal_ptr"]` in autotune (a serious side-effect, see analysis).
+- **Core Metrics:** Correctness 1.0; max abs err 36,864 (vs parent 30,720 — slightly worse but in tolerance); eval_time 69.1s (much shorter than parent's 591s — autotune cache hit, not a fair comparison); 19 workloads.
+
+### 3. Strategic Analysis (The "So What?")
+- **Root Cause:** **Plan quality failure**, executed faithfully. The plan's HBM-traffic accounting was naive: it assumed atomic_add overhead would be "negligible (≤8 contributors per row, well-spread)." In reality, GEMM2 has BLOCK_N=128 tiles writing across H=7168 — that's 56 N-tiles × M-tiles × 32 experts of fp32 atomics into a contended `[T,H]` buffer. With grouped GEMM scheduling, multiple experts often write the same token row near-simultaneously, causing serialization at the L2/HBM atomic units. This easily exceeds the 10-20µs `index_add_` launch the plan was trying to save.
+- **Hidden Booby Trap — `reset_to_zero=["OutGlobal_ptr"]`:** The autotune decorator now zeros the **entire `[T,H]` output buffer between every autotune trial**. While this preserves correctness during tuning, it also runs at **measurement time on every call** — adding a full T×H×4-byte memset to the measured latency. This alone could account for a large fraction of the +0.128ms regression.
+- **Key Insight:** **Eliminating a launch is not free if the "fused" replacement adds atomic contention or memset overhead via autotune side-effects.** The parent's `index_add_` epilogue is already a highly-optimized PyTorch primitive operating on a small `O[Tk_total,H]` (much smaller than `[T,H]`); the supposed "wasted" HBM traffic was actually cheaper than scattered fp32 atomics into a hot global buffer.
+- **Identified Risk:** Future "fused epilogue" plans must (a) account for atomic contention on shared rows when top-k>1, and (b) **never use `reset_to_zero` on a buffer whose zeroing is part of the measured workload** — this silently inflates timings.
+
+### 4. Actionable Guidance (The "What's Next?")
+- **Recommend Stripping (immediate):** Discard this branch. Resample `302d2eb3` as the active best for further evolution. Do NOT inherit the atomic_add epilogue or `reset_to_zero` pattern.
+- **Warn (critical):** Avoid `reset_to_zero` on large output buffers in `@triton.autotune` — it silently re-zeros at every invocation and is rarely the intent. If atomic accumulation is ever needed, allocate a small staging buffer instead.
+- **Recommend Exploration:** The original epilogue-fusion idea can still pay off via a **different mechanism**: fuse the final `output_f32 → bf16` cast directly into GEMM2's tile store (write bf16 to a pre-allocated `[T,H]` bf16 buffer in a deterministic, non-atomic way after performing `index_add_` of GEMM2's local fp32 output). This saves the cast launch without atomics.
+- **Recommend Exploration (high priority):** Pivot to **TMA via `tl.make_block_ptr`** for GEMM1 weight loads, or a **fused Triton routing kernel** — both were flagged in the parent's summary as the highest-value untapped levers. Both attack the dominant ~55% GEMM1 cost or the routing launch overhead, neither of which involves atomic contention.
+- **Recommend Fusion:** If pursuing scatter-add fusion again, do it at the **token-tile granularity with deterministic ordering** (e.g., one CTA per global token row aggregating all experts), not via global atomics. This requires inverting the dispatch (token-major instead of expert-major) and is a structural change — keep as a separate experiment.

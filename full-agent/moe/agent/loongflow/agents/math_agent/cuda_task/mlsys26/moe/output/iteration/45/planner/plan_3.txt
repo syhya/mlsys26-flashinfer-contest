@@ -1,0 +1,28 @@
+### Outline 3 — T-Adaptive Hybrid Dispatch with Split-K for Tiny Batches
+
+**Mathematical Formulation**
+- **Variables (X):** regime classifier `r(T) in {tiny, small, medium, large}`, per-regime kernel choice for GEMM1/GEMM2, Split-K factor `s`, autotune config subsets, and unchanged routing/scatter logic.
+- **Constraints (C):**
+  1. For every `T`, selected kernel path must compute the same MoE function as the parent.
+  2. Split-K partial sums must be reduced exactly in FP32 before final cast.
+  3. The dispatch function must be deterministic and depend only on observed input sizes / counts.
+  4. Fallback path must exist for every regime.
+- **Objective f(X):** reduce under-occupancy for decode/tiny-T workloads while preserving the strong large-T path.
+
+**Solver Strategy**
+- Piecewise deterministic optimization:
+  1. Define thresholds on `T` and/or `max_count`.
+  2. For tiny workloads, use Split-K GEMM or smaller tiles to increase parallelism.
+  3. For medium/large workloads, keep the current best kernels.
+  4. Triton autotune solves local tile choice inside each regime.
+
+**Validity Mechanism**
+- Safety by regime fallback:
+  1. Keep existing parent path as the universal safe regime.
+  2. New tiny-batch path writes into FP32 scratch and reduces deterministically.
+  3. If any specialized path fails, route execution to the parent kernels.
+
+**Why this solution?**
+- **Expected improvement:** useful if benchmark includes many tiny-T cases where occupancy dominates.
+- **Advantages:** directly follows task guidance on T-adaptive dispatch.
+- **Disadvantages:** benchmark mix may dilute gains; Split-K reduction logic increases code complexity and potential race/overhead issues.

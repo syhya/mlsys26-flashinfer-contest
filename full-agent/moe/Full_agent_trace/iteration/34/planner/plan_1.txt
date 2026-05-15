@@ -1,0 +1,19 @@
+PLAN 1: Fused Triton Routing Kernel + retain proven FP8 GEMM kernels
+
+Math model:
+- Input: routing_logits [T,256] f32, routing_bias [256] bf16
+- Compute q = sigmoid(logits); rank = q + bias
+- Group-level top2 sum -> top4 groups -> mask -> top8 experts -> renorm by raw q -> *scaling
+
+Solver/strategy:
+- Replace the multi-launch PyTorch routing pipeline (sigmoid + 3xtopk + scatter + nonzero + argsort + bincount + cumsum) with a 1- or 2-stage Triton kernel:
+  Kernel A: per-token (one program per token, T programs). Loads 256 logits/biases, computes sigmoid, group reductions (8 groups of 32), top2 within group via register sort, top4 groups via small register sort, masks, top8 experts via register sort, renormalize, write per-token (expert_idx[8], weight[8]) and per-token-per-expert atomic increment expert_count[E].
+  Kernel B: build CSR offsets via cumsum (cheap; can keep torch.cumsum on the small E+1 array) then a Triton scatter kernel that places (token_id, weight) into sorted slots indexed by atomic_add(expert_offsets[e]) per (token, expert) pair.
+
+Validity:
+- DeepSeek topk math is fragile. Use deterministic per-token register sort (insertion sort over 256 elements is too big, but we only need top8 of 32 per group and top4 of 8 group scores, plus top8 of 32 masked experts in chosen groups).
+- Validate against the existing PyTorch routing on a fixed seed in unit-style sanity (mental model).
+
+Why: routing now likely consumes 15-25% of 1.5ms.
+
+Risk: HIGH correctness risk - DeepSeek no-aux topk is fragile (tie-breaking, numeric).

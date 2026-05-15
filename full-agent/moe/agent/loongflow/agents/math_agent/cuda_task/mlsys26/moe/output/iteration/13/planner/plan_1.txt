@@ -1,0 +1,37 @@
+Outline 1: Correctness-first hybrid using PyTorch native scaled GEMM + exact routing
+
+Mathematical Formulation
+- Variables (X):
+  - X_route: selected top-8 global experts per token and normalized routing weights.
+  - X_dispatch: flattened assignment arrays (token_idx, local_expert_idx, slot_idx), CSR offsets per expert.
+  - X_gemm1[e]: per-expert matrix product G1_e = Dequant(A_tokens) @ Dequant(W1_e)^T, shape [Tk_e, 2I].
+  - X_act[e]: SwiGLU activations C_e = silu(G1_e[:, I:]) * G1_e[:, :I].
+  - X_gemm2[e]: O_e = C_e @ Dequant(W2_e)^T, shape [Tk_e, H].
+- Constraints (C):
+  - Routing must exactly match DeepSeek no-aux routing: sigmoid(logits), add bias only for selection, top2-within-group summed over 8 groups, choose top4 groups, then top8 experts globally among allowed groups.
+  - Final routing weights use sigmoid(logits) only on selected experts, normalized and multiplied by routed_scaling_factor.
+  - GEMM accumulation in FP32; final output BF16 only.
+  - FP8 block-scale semantics exact: value = fp8 * scale for each 128-element block; hidden_states_scale indexed by original global token index.
+  - Supports arbitrary T and zero-token experts.
+- Objective f(X): maximize score by minimizing correctness error first and reducing latency second; concretely, implement exact semantics while reducing memory traffic and launch overhead.
+
+Solver Strategy
+- Deterministic decomposition, not stochastic search:
+  1) Solve routing and dispatch using vectorized tensor algebra (topk, bincount, cumsum, argsort).
+  2) Solve GEMM using torch._scaled_mm where legal/available, otherwise torch.mm on dequantized per-expert blocks.
+  3) Solve accumulation with index_add_.
+- This is equivalent to a blockwise exact linear algebra solver on fixed routing structure.
+
+Validity Mechanism
+- A deterministic repair/fallback ladder:
+  1) Compute routing with sorted=True everywhere.
+  2) Build dispatch entirely on GPU with bincount/cumsum; verify CSR monotonicity by construction.
+  3) For GEMM path selection, if torch._scaled_mm cannot express the exact per-block layout directly, fall back to explicit dequantization for only the active expert/token slices, never full weights.
+  4) For experts with Tk_e == 0, skip safely.
+  5) Final output always allocated as zeros([T,H], fp32) and converted to bf16.
+- This guarantees valid shape/dtype and exact mathematical semantics independent of Triton compilation risk.
+
+Why this solution?
+- Expected performance improvement: likely enough to beat baseline by combining exact routing, compact active-slice dequantization, and vendor GEMM kernels; also most likely to achieve score >= 1.0 because it avoids custom-kernel indexing bugs.
+- Advantages: highest robustness, easiest to keep numerically exact, minimal Triton risk.
+- Disadvantages: may leave some performance on the table relative to fully fused kernels.

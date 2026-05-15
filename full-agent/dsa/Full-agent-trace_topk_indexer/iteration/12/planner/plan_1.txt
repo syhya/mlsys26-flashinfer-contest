@@ -1,0 +1,3 @@
+Plan 1: Fuse block-level Top-K filter into compute_scores_kernel using per-block radix select.
+- Replace full N CUB segmented sort with per-(batch, page) block emitting only top-128 candidates to a shrunk buffer of size batch*max_num_pages*128 then a smaller CUB sort.
+- Risk: complex to fuse and might not reduce sort time enough; sort already small since bounded by seq_lens.

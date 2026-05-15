@@ -1,0 +1,189 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Beat parent score 8.97 (kernel 0.045 ms) by attacking the now-dominant CUB device-wide segmented radix sort, while preserving correctness=1.0.
+
+**Selected Outline:** Plan 2 — Three-Tier Dispatch (Short / Medium / Long) with Per-Batch Block-Level Radix Sort for the Medium Tier
+
+**Rationale for Selection:**
+1. Parent's strategic summary explicitly states: *"the long-path still pays the full O(N) CUB segmented sort cost, which is now the unambiguous bottleneck."* This plan directly removes the device-wide CUB launch for many batches.
+2. Decouples STRUCTURE (per-batch seq_len bucket → kernel choice) from PARAMETERS (exact top-K via proven CUB BlockRadixSort primitive).
+3. Mathematically exact in every tier — no approximation, no chance of correctness regression.
+4. Downside-protected: if all batches are long, falls back to parent's device-wide CUB; if all short, parent's fast-path applies. Worst case == parent.
+
+---
+
+### Phase 1: Mathematical Definition
+
+For each batch `b` with `L = seq_lens[b]`, `K = 2048`, `P = 64`, `N = max_num_pages * 64`:
+- `score[b, p*64+t] = sum_h ReLU(scale[t] * sum_d Q[b,h,d]·fp8(K[t,d])) · weights[b,h]`, masked to t < L.
+- Output: any permutation of top-`min(K,L)` indices `block_table[b,p]*64 + t`; remainder = -1.
+
+**Tier partition (mutually exclusive):**
+- TIER-S (Short): `L ≤ 2048` → no scoring/sorting. Direct enumeration. (parent's proven path)
+- TIER-M (Medium): `2048 < L ≤ L_MED_MAX = 6144` → score + **single-block BlockRadixSort in shared memory**.
+- TIER-L (Long): `L > L_MED_MAX` → score + device-wide CUB segmented sort (parent's path, but only on TIER-L batches).
+
+`L_MED_MAX = 6144` chosen because: 6144 floats (24KB) + 6144 int32 (24KB) = 48KB scores+indices; with cub::BlockRadixSort temp + Q/K/weights smem we fit in 96KB H100 dynamic smem (`cudaFuncSetAttribute(MaxDynamicSharedMemorySize, 98304)`). Conservative; can tune to 4096 if compile fails.
+
+---
+
+### Phase 2: Kernel Architecture
+
+**A. emit_short_topk_kernel** (verbatim from parent solution `2fb50fd2`):
+```cpp
+__global__ void emit_short_topk_kernel(const int32_t* seq_lens, const int32_t* block_table,
+    int32_t* topk_indices, int max_num_pages, int topk) {
+    int b = blockIdx.x; int L = seq_lens[b];
+    if (L > topk) return;
+    for (int i = threadIdx.x; i < topk; i += blockDim.x) {
+        int v = (i < L) ? (block_table[b*max_num_pages + i/64]*64 + (i&63)) : -1;
+        topk_indices[b*topk + i] = v;
+    }
+}
+```
+Launch: `<<<batch_size, 256>>>`.
+
+**B. compute_scores_kernel** (parent's transposed-Q head-parallel kernel, **unchanged math**):
+- Add early-return guard: `if (L <= 2048) return;` (short-path handles).
+- Output destination: writes scores/indices to `scores_buf[b*N + p*64+t]`, `indices_buf[b*N + p*64+t]` as before.
+- This kernel runs for BOTH TIER-M and TIER-L (the score buffer is consumed differently per tier).
+Launch: `<<<dim3(max_num_pages, batch_size), 256>>>`.
+
+**C. NEW per-batch block-level top-K kernel `block_topk_kernel`** for TIER-M:
+```cpp
+template <int BLOCK_THREADS, int ITEMS_PER_THREAD>  // e.g., 256, 24 → 6144 items
+__global__ void block_topk_kernel(
+    const float* scores_buf, const int32_t* indices_buf,
+    const int32_t* seq_lens, int32_t* topk_indices,
+    int N, int topk, int L_med_max)
+{
+    int b = blockIdx.x;
+    int L = seq_lens[b];
+    if (L <= 2048 || L > L_med_max) return;  // not our tier
+
+    using BlockRadixSort = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int32_t>;
+    __shared__ typename BlockRadixSort::TempStorage temp_storage;
+
+    float keys[ITEMS_PER_THREAD];
+    int32_t vals[ITEMS_PER_THREAD];
+
+    int base = b * N;
+    #pragma unroll
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) {
+        int idx = i * BLOCK_THREADS + threadIdx.x;   // strided
+        if (idx < L) {
+            keys[i] = scores_buf[base + idx];
+            vals[i] = indices_buf[base + idx];
+        } else {
+            keys[i] = -1e30f;
+            vals[i] = -1;
+        }
+    }
+    BlockRadixSort(temp_storage).SortDescending(keys, vals);
+
+    // After sort, thread `t` holds items at logical positions [t*ITEMS_PER_THREAD, (t+1)*ITEMS_PER_THREAD)
+    int actual_topk = min(topk, L);
+    #pragma unroll
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) {
+        int out_pos = threadIdx.x * ITEMS_PER_THREAD + i;
+        if (out_pos < topk) {
+            topk_indices[b*topk + out_pos] = (out_pos < actual_topk) ? vals[i] : -1;
+        }
+    }
+}
+```
+Launch: `<<<batch_size, 256>>>` with template params `<256, 24>` → handles up to L=6144. Use `cudaFuncSetAttribute` to enable dynamic smem if needed (BlockRadixSort temp storage fits well within 48KB static smem for these sizes).
+
+**D. generate_offsets_begin_end** (modified): for batches NOT in TIER-L, mark as empty CUB segment:
+```cpp
+int L = seq_lens[b];
+begin_offsets[b] = b * N;
+end_offsets[b] = (L > L_MED_MAX) ? (b*N + L) : (b * N);
+```
+
+**E. extract_topk_kernel** (modified): early-return if `L <= L_MED_MAX` (handled by tiers S/M):
+```cpp
+if (seq_lens[b] <= L_MED_MAX) return;
+```
+
+**F. Host pipeline `topk_indexer_forward`:**
+1. Allocate `scores_buf`, `indices_buf`, `topk_indices`, `scores_sorted`, `indices_sorted`, offsets.
+2. Launch `emit_short_topk_kernel` (TIER-S writes its outputs).
+3. Launch `compute_scores_kernel` (writes scores for both TIER-M and TIER-L; TIER-S is skipped via guard).
+4. Launch `block_topk_kernel<256,24>` (TIER-M writes its outputs).
+5. Launch `generate_offsets_begin_end` (only TIER-L gets non-empty segment).
+6. Two CUB `DeviceSegmentedRadixSort::SortPairsDescending` calls (size query + actual). Will skip empty segments cheaply.
+7. Launch `extract_topk_kernel` (TIER-L writes its outputs).
+8. Return `topk_indices`.
+
+---
+
+### Phase 3: The "Safety Valve" (CRITICAL)
+
+1. **Strict partition invariant:** Each batch belongs to exactly ONE tier based on `L`. Each tier kernel writes `topk_indices[b,:]` for its tier and early-returns otherwise. No race condition possible.
+2. **Exact top-K guarantee in every tier:**
+   - TIER-S: enumeration of all valid tokens (set equality with required top-K when `L ≤ K`).
+   - TIER-M: `cub::BlockRadixSort` is a deterministic exact sort — top-K is mathematically exact.
+   - TIER-L: device-wide `cub::DeviceSegmentedRadixSort::SortPairsDescending` (parent's proven path).
+3. **NaN guard:** Preserved in `compute_scores_kernel` (`if (isnan(s)) s = -1e20f`).
+4. **Padding correctness:** TIER-M strided load uses `-1e30f` for `idx >= L`, ensuring those never enter the top-K (they sort to bottom). After sort, positions `>= actual_topk` written as `-1`.
+5. **Smem budget check (H100):** `BlockRadixSort<float, 256, 24, int32_t>::TempStorage` ≈ 24×256×8 + radix counters ≈ 49KB. Use `cudaFuncSetAttribute(block_topk_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 98304)` if needed; or fall back to `<256, 16>` (handles L≤4096) with static smem if first build fails.
+6. **Fallback ladder:**
+   - If `BlockRadixSort` instantiation fails to compile or smem overflows → set `L_MED_MAX = 0`, disabling TIER-M; behavior reverts exactly to parent (proven 8.97 score).
+   - If TIER-M correctness fails → same fallback.
+7. **Variable-axis support:** Works for any `batch_size`, `num_pages`, `max_num_pages`. No hardcoded shape assumptions.
+
+---
+
+### Phase 4: Implementation Details
+
+**Single file `kernel.cu`.**
+**Headers:** `<torch/extension.h>`, `<cuda_fp8.h>`, `<cub/cub.cuh>`, `<cub/block/block_radix_sort.cuh>`, `<tuple>`.
+
+**Constants:**
+```cpp
+constexpr int TOPK = 2048;
+constexpr int L_MED_MAX = 6144;     // tunable; 6144 = 24*256
+constexpr int BT_THREADS = 256;
+constexpr int BT_ITEMS = 24;        // BT_THREADS * BT_ITEMS = 6144
+```
+
+**Functions in order:**
+1. `cvt_fp8x4_to_float4(uint32_t)` — inline device helper (verbatim from parent).
+2. `emit_short_topk_kernel(...)` — verbatim from sibling `2fb50fd2`.
+3. `compute_scores_kernel(...)` — verbatim from parent `2fb50fd2`, `if (seq_len <= 2048) return;` already present.
+4. `block_topk_kernel<256, 24>(...)` — NEW, see Phase 2 step C.
+5. `generate_offsets_begin_end(...)` — modified per Phase 2 step D (uses `L_MED_MAX` instead of `topk`).
+6. `extract_topk_kernel(...)` — modified per Phase 2 step E.
+7. `topk_indexer_forward(...)` — host pipeline per Phase 2 step F.
+8. `PYBIND11_MODULE`: export `topk_indexer_forward` and alias `dsa_forward`.
+
+**Host-side dynamic smem setup (one-time):**
+```cpp
+static bool smem_set = false;
+if (!smem_set) {
+    cudaFuncSetAttribute((void*)block_topk_kernel<BT_THREADS, BT_ITEMS>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, 98304);
+    smem_set = true;
+}
+```
+(Only needed if static smem usage exceeds 48KB; for <256,24> it should fit in static smem, so this may be omitted on initial attempt.)
+
+**Randomness:** None. Fully deterministic. No multi-start needed.
+**Library check:** Only `<cuda_fp8.h>` + `<cub/cub.cuh>` (CUB::BlockRadixSort + CUB::DeviceSegmentedRadixSort). Both standard CUDA 12+, both already used in parent. ✔
+**Compile target:** SM90+ (Hopper). Compatible.
+
+**Expected Performance:**
+- Parent: 0.045 ms (8.97×).
+- For TIER-M batches: replaces device-wide CUB launch (~0.02 ms overhead per call) with a single fused per-batch block. Expected per-TIER-M-batch latency reduction ~30–50%.
+- For TIER-L batches: identical to parent (still uses device-wide CUB but only over those batches, which have larger L so the per-batch CUB cost is amortized better).
+- Aggregate target: kernel latency ~0.030–0.038 ms → **score ≈ 10.5–13.0** (vs parent 8.97).
+- Worst case (all TIER-S or all TIER-L): score = parent's 8.97 (no regression).
+
+**Critical correctness guards (NON-NEGOTIABLE):**
+- Partition invariant: each batch → exactly one tier kernel writes its row.
+- Padding `-1e30f` (more negative than `-1e20f` NaN sentinel) so NaN-replaced scores still rank above padding.
+- `__syncthreads()` between `cub::BlockRadixSort::SortDescending` call and the output write loop is implicit in BlockRadixSort.
+- Compile-time `static_assert(BT_THREADS * BT_ITEMS >= L_MED_MAX);` to enforce buffer sufficiency.
+
+**Fallback if correctness fails:** Set `L_MED_MAX = 0` in one line — TIER-M becomes empty, all medium batches flow to TIER-L (parent's CUB path). Guaranteed-correct baseline at parent's 8.97 score.

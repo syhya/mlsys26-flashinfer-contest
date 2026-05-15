@@ -1,0 +1,5 @@
+Outline 1: Standard FlashAttention-like Tiling with Online Softmax
+Mathematical Formulation: Calculate Attention Output O_i = sum(softmax(Q_i K^T) V) using Online Softmax (FlashAttention).
+Solver Strategy: Block-tiled computation over KV sequence using register blocking and shared memory.
+Validity Mechanism: Ensure fp32 accumulation and base-2 exp/logsumexp exactly matching the PyTorch reference semantics (masking padding -1 indices).
+Why this solution?: Balances implementation complexity with high performance. Avoids out-of-memory for large sequences.

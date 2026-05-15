@@ -1,0 +1,28 @@
+Outline 3: Persistent-CTA kernel with cp.async double buffering and vectorized cache-line aligned access
+
+Mathematical Formulation
+- Variables X:
+  - Persistent scheduler state assigning CTA c to a stream of (t, tile32) jobs.
+  - Per job online-softmax state (m,l,O) for one or several heads.
+  - Shared-memory staging buffers Kc_stage[2][32][512], Kp_stage[2][32][64], and sparse index tile I[32].
+- Constraints C:
+  - All loads from ckv_cache/kpe_cache are guarded by idx!=-1.
+  - Shared-memory buffer ownership must obey ping-pong stage parity and synchronization order.
+  - Every output/lse equals reference computation exactly up to BF16 output rounding.
+- Objective f(X):
+  - Maximize overlap of memory and compute by minimizing exposed latency: f = maximize overlap(load, compute) while preserving deterministic recurrence.
+
+Solver Strategy
+- Deterministic persistent-kernel scheduling using an atomic or grid-stride loop over tokens/tiles.
+- cp.async (or architecture-guarded memcpy_async equivalent) fills next shared tile while current tile is consumed.
+- Within a tile, use warp-level online softmax update and register-blocked O accumulation.
+
+Validity Mechanism
+- Compile-time arch guards: if __CUDA_ARCH__ does not support the async path cleanly, fall back to synchronous vectorized shared loads using the same loop nest.
+- Explicit zeroing/skip for invalid indices and exact FP32 recurrence for m,l,O.
+- Dispatcher chooses persistent kernel only when num_tokens is small enough that current parent underfills the GPU; otherwise use regular fused kernel.
+
+Why this solution?
+- Expected improvement: specifically targets the profiler-indicated low-workload underutilization and latency stalls without allocating split-K workspaces.
+- Advantages: robust occupancy improvement for tiny batch sizes, good fit to sparse gather pattern, keeps one-pass algorithm.
+- Disadvantages: cp.async details are architecture-sensitive; more synchronization complexity than Outline 1.

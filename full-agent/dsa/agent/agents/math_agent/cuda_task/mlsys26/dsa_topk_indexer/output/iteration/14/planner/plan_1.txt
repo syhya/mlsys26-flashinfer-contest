@@ -1,0 +1,8 @@
+Plan 1: Fused Per-Page Local Top-K (Two-Stage Bucketed Selection)
+- Modify compute_scores_kernel to additionally emit per-(batch,page) top-32 candidates using cub::BlockRadixSort or warp-local selection in shared memory, before writing to global.
+- Global candidate buffer shrinks from N=max_num_pages*64 to max_num_pages*32 (or *16) per batch.
+- Then run CUB segmented sort on this smaller buffer.
+Math: top-2048 ⊂ union of per-page-top-K if per-page-K >= ceil(2048/num_pages_used). For safety, pick per-page-K=32 (since 2048/64=32 and topk constraint=2048<=max_num_pages*64).
+Risk: correctness might break if a single page contains >32 of the global top-2048. Must pick local-K>=32 to be safe, but 32 is the tight bound — use 48 or 64 for safety margin.
+Actually for topk=2048 and page_size=64, worst case all 2048 top scores concentrate in pages — need local_k=64 (=page_size) to guarantee. That defeats purpose.
+Verdict: risky without careful bound. Rejected.

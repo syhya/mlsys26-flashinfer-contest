@@ -1,0 +1,15 @@
+PLAN 1: Fuse scale computation into lane-0 pass + drop l_s_smem (adopt iter20 winner + new trick)
+
+Mathematical model:
+- Variables X: reducer memory layout, per-partition scale array scale_p = exp(m_p - m_global)/l_global.
+- Constraints C: exact online-softmax merge semantics; FP32 accumulation; BF16 output; base-2 lse.
+- Objective f(X): minimize reducer latency while preserving correctness 1.0.
+
+Solver strategy: Apply the already-validated iter20 reducer simplification (drop l_s_smem, compute coeff directly) PLUS a new optimization: precompute scale_p[64] in the lane-0 pass itself (fuse with m_max/l_sum) so the second __syncthreads + lane<64 branch disappears. The 64 iterations lane-0 does anyway cover all partitions; just store scale into shared on the fly.
+
+Validity mechanism: Exact merge equations preserved verbatim. Neutral partitions (m_p = -INF) produce scale_p = 0 by explicit branch. Empty-row guard checks m_global==-INF || l_global<=0 and writes zeros + -INF lse. Large-T path untouched.
+
+Why: Directly targets the current winner's formula, removes one __syncthreads + one shared-memory buffer + one branchy pass. Low implementation risk, high expected ROI because the small-T path (num_tokens=1) dominates benchmark time (3ms reference is a tiny-workload benchmark).
+
+Advantages: Tiny delta from proven winner; preserves all correctness guarantees; removes real overhead.
+Disadvantages: Small absolute gain (already at 126x).

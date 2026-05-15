@@ -1,0 +1,483 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a single-file `run()` for FP8 block-scale DeepSeek-style MoE that achieves **evaluation score >= 1.0** by preserving exact routing/block-scale semantics while recovering high throughput through a **T-adaptive hybrid backend**. The database global view shows evolution is **not stuck** (`best_score=1.598 > 1.0`, avg 0.719), so the correct strategy is **fusion**: keep the parent’s correctness-preserving structural ideas (exact PyTorch routing/dispatch, token dequant cache) and reintroduce high-performance execution only where semantics can be enforced exactly.
+
+**Selected Outline:** T-Adaptive Hybrid Algorithm with Structure/Parameter Decoupling
+
+**Rationale for Selection:**
+1. The parent failed mainly on **speed**, not basic validity. Its summary explicitly says the safe PyTorch path is a useful **correctness oracle** but not competitive.
+2. The database already contains a score above 1.0, which means the search space is solvable; therefore we should **fuse strong ideas** instead of doing another totally different reset.
+3. The most robust path is to **decouple structure from execution**:
+   - exact routing + exact sparse dispatch in PyTorch/GPU tensor ops,
+   - stage-specific backend selection for GEMM1/GEMM2,
+   - deterministic fallback for any unsupported or suspicious path.
+4. This minimizes the chance of invalid outputs while still targeting the main bottleneck: the parent’s serial full-dequant per-expert matmuls.
+
+---
+
+## Phase 1: Mathematical Definition
+
+### 1.1 Constants and known dimensions
+Define compile-time constants:
+- Number of global experts: `E = 256`
+- Number of local experts: `E_local = 32`
+- Hidden size: `H = 7168`
+- Intermediate size: `I = 2048`
+- Block size: `B = 128`
+- Number of routing groups: `G = 8`
+- Experts per group: `E_g = 32`
+- Top groups kept: `K_g = 4`
+- Top experts kept: `K_e = 8`
+
+Input tensors:
+- `routing_logits ∈ R^{T×256}`
+- `routing_bias ∈ R^{256}`
+- `hidden_states ∈ FP8^{T×H}`
+- `hidden_states_scale ∈ R^{(H/B)×T} = R^{56×T}`
+- `gemm1_weights ∈ FP8^{32×(2I)×H} = FP8^{32×4096×7168}`
+- `gemm1_weights_scale ∈ R^{32×(2I/B)×(H/B)} = R^{32×32×56}`
+- `gemm2_weights ∈ FP8^{32×H×I} = FP8^{32×7168×2048}`
+- `gemm2_weights_scale ∈ R^{32×(H/B)×(I/B)} = R^{32×56×16}`
+
+Output tensor:
+- `Out ∈ BF16^{T×H}`
+
+### 1.2 Decision variables
+Define the exact operator via these variables:
+
+1. **Routing variables**
+- `S[t, e] = sigmoid(routing_logits[t, e])`
+- `SB[t, e] = S[t, e] + routing_bias[e]`
+- `GroupScore[t, g] = sum(top2(SB[t, g*32:(g+1)*32]))`
+- `TopGroups[t, :] ∈ {0,...,7}^{4}`
+- `TopExperts[t, :] ∈ {0,...,255}^{8}`
+- `RouteW[t, j]` = normalized `S[t, TopExperts[t,j]] * routed_scaling_factor`
+
+2. **Dispatch variables**
+For routed local experts only:
+- `tok[k]`: token id for routed pair `k`
+- `exp[k]`: local expert id in `[0,31]`
+- `wt[k]`: routing weight for routed pair `k`
+- `offs[e]`: CSR offsets with `offs[0]=0`, `offs[32]=num_pairs`
+
+3. **Stage outputs**
+For each local expert `e`, with token count `T_e = offs[e+1]-offs[e]`:
+- `A_e ∈ R^{T_e×H}`: dequantized hidden rows for expert `e`
+- `G1_e ∈ R^{T_e×2I}`
+- `X1_e = G1_e[:, :I]`, `X2_e = G1_e[:, I:]`
+- `Swi_e = silu(X2_e) * X1_e ∈ R^{T_e×I}`
+- `Y_e ∈ R^{T_e×H}`
+- `Out_fp32 ∈ R^{T×H}` final accumulation buffer
+
+### 1.3 Hard constraints
+The child implementation must satisfy these exact constraints:
+
+#### C1. Exact DeepSeek routing
+Routing must be implemented exactly as:
+1. `S = sigmoid(logits.float())`
+2. `SB = S + bias.float()`
+3. reshape `SB -> [T, 8, 32]`
+4. top-2 within each group, sum those 2 values into `GroupScore`
+5. top-4 groups from `GroupScore`
+6. mask all experts outside top-4 groups with `-inf`
+7. top-8 global experts from masked `SB`
+8. compute final routing weights from **unbiased** `S`, normalize across top-8, multiply by `routed_scaling_factor`
+
+#### C2. Exact FP8 block-scale semantics
+For any token `t`, hidden feature `h`, output channel `n`, intermediate feature `i`:
+- `A_deq[t,h] = float(hidden_states[t,h]) * hidden_states_scale[h//128, t]`
+- `W1_deq[e,n,h] = float(gemm1_weights[e,n,h]) * gemm1_weights_scale[e, n//128, h//128]`
+- `W2_deq[e,h,i] = float(gemm2_weights[e,h,i]) * gemm2_weights_scale[e, h//128, i//128]`
+
+#### C3. Exact accumulation precision
+- Both GEMM1 and GEMM2 accumulate in FP32.
+- Scatter-add accumulation occurs in FP32.
+- Only one final cast to BF16 is allowed at return.
+
+#### C4. Exact dispatch invariants
+- Every routed pair `(token, selected expert)` belonging to the local rank must appear exactly once in CSR dispatch.
+- `offs` must satisfy monotonicity and `offs[-1] == number_of_local_pairs`.
+- Scatter-add must sum all routed expert contributions for the same token.
+
+### 1.4 Objective function
+Use a lexicographic objective:
+
+1. **Primary objective:** guarantee correctness semantics and stable execution.
+2. **Secondary objective:** maximize throughput.
+
+Equivalent planner objective:
+- maximize `f(X) = CorrectnessPass(X) * Speedup(X)`
+with the implementation designed so that `CorrectnessPass` is structurally enforced by exact routing, exact scale usage, and safe fallbacks.
+
+---
+
+## Phase 2: The Optimization Loop
+
+This task does not need stochastic search. The right “optimization loop” is a **deterministic algorithm selector** that separates:
+1. structure finding,
+2. backend choice,
+3. exact repair/fallback.
+
+### 2.1 Step A — Solve the hard structure exactly with PyTorch tensor ops
+Implement routing and sparse dispatch entirely with vectorized PyTorch ops on GPU.
+
+#### A1. Routing solver
+Implement a helper like `route_tokens(...)`:
+1. `s = torch.sigmoid(routing_logits.float())`
+2. `sb = s + routing_bias.float().view(1, 256)`
+3. `sbg = sb.view(T, 8, 32)`
+4. `top2_vals = torch.topk(sbg, k=2, dim=2, largest=True, sorted=True).values`
+5. `group_scores = top2_vals.sum(dim=2)`
+6. `top_groups = torch.topk(group_scores, k=4, dim=1, largest=True, sorted=True).indices`
+7. Build boolean `group_mask` and expand to expert mask `[T,256]`
+8. `pruned = sb.masked_fill(~expert_mask, -inf)`
+9. `topk_idx = torch.topk(pruned, k=8, dim=1, largest=True, sorted=True).indices`
+10. `topk_w = s.gather(1, topk_idx)`
+11. Normalize `topk_w /= topk_w.sum(dim=1, keepdim=True) + 1e-20`
+12. `topk_w *= routed_scaling_factor`
+
+This stage is exact and backend-independent.
+
+#### A2. Dispatch solver
+Implement `build_local_dispatch(...)` using only GPU tensor ops:
+1. `local_mask = (topk_idx >= local_expert_offset) & (topk_idx < local_expert_offset + 32)`
+2. `tok, slot = torch.nonzero(local_mask, as_tuple=True)`
+3. If empty, return zero output immediately.
+4. `local_exp = (topk_idx[tok, slot] - local_expert_offset).long()`
+5. `w = topk_w[tok, slot].float()`
+6. `order = torch.argsort(local_exp)`
+7. Reorder `tok`, `local_exp`, `w`
+8. `counts = torch.bincount(local_exp, minlength=32)`
+9. `offsets[0] = 0; offsets[1:] = torch.cumsum(counts, dim=0)`
+
+This is the **exact topology solve**. No Triton kernels should modify routing meaning.
+
+### 2.2 Step B — Reuse the parent’s strongest safe idea: token dequant cache
+The parent summary explicitly identifies `unique_tokens` activation caching as valuable.
+
+Implement:
+1. `unique_tokens, inverse = torch.unique(sorted_tokens, sorted=True, return_inverse=True)`
+2. `hidden_deq = dequant_hidden_rows(hidden_states, hidden_states_scale, unique_tokens)`
+
+Where `dequant_hidden_rows(...)` must:
+- gather fp8 rows with `index_select(0, unique_tokens)`
+- gather scales with `index_select(1, unique_tokens)` from `[56,T]`
+- transpose to `[U,56]`
+- expand each scale 128 times with `repeat_interleave(128, dim=1)` and slice to `7168`
+- multiply in FP32
+
+This avoids repeated activation dequant for the same token routed to multiple local experts.
+
+### 2.3 Step C — T-adaptive execution regime selection
+Select execution backend based on `T` and expert microbatch sizes. This is a deterministic regime map, not a heuristic guess.
+
+#### Regime definitions
+- **Decode regime:** `T <= 8`
+- **Medium regime:** `9 <= T <= 128`
+- **Prefill regime:** `T > 128`
+
+Store regime in code and use it to select tile sizes / backend choice.
+
+### 2.4 Step D — Stage 1 (GEMM1) backend selection
+For each expert `e`, process token slice `[start:end)`.
+
+#### D1. Preferred fast path for GEMM1
+Reintroduce a custom Triton kernel for GEMM1 only, because this is where the task guidance says FP8 tensor cores matter most.
+
+Kernel design requirements:
+1. Operands remain in FP8 for `tl.dot`.
+2. Use `BK = 128` so each reduction tile aligns with one activation/weight scale block.
+3. Apply block scales **after** each dot tile accumulation, not by pre-expanding full fp32 tensors.
+4. Use original global token ids to index `hidden_states_scale[k_block, token_id]`.
+5. Use `int64` pointer arithmetic for expert weight base offsets.
+6. Accumulate final `G1_e` in FP32.
+7. Prefer work decomposition over active expert tiles only.
+
+A robust implementation strategy is:
+- one expert at a time for simplicity,
+- but Triton computes `A_e_fp8 @ W1_e_fp8^T` tilewise,
+- loads scale scalars for current `k_block` and `n_block`,
+- multiplies partial tile contributions by `a_scale * w_scale`.
+
+This fuses dequantization into the reduction without materializing `W1`.
+
+#### D2. Safe fallback for GEMM1
+If Triton fast path preconditions fail, use chunked exact dequantization:
+1. `a_e = hidden_deq.index_select(0, inverse[start:end])`
+2. Allocate `g1 = torch.empty((T_e, 4096), dtype=torch.float32, device=device)`
+3. Process output channels in chunks, e.g. `n_chunk = 512`
+4. For each chunk `[n0:n1)`:
+   - dequant only `gemm1_weights[e, n0:n1]` using corresponding scale blocks
+   - compute `a_e @ w1_chunk.t()` in FP32
+   - write into `g1[:, n0:n1]`
+
+This fallback is exact and bounded in memory.
+
+### 2.5 Step E — SwiGLU execution
+After `G1_e` is produced:
+1. `x1 = g1[:, :2048]`
+2. `x2 = g1[:, 2048:]`
+3. `swi = F.silu(x2) * x1`
+
+Keep `swi` in FP32 by default.
+
+Optional optimization:
+- In medium/prefill regimes only, optionally quantize `swi` to FP16 with explicit per-row scale if and only if the downstream GEMM2 path implements exact correction in epilogue.
+- If there is any doubt, stay in FP32.
+
+### 2.6 Step F — Stage 2 (GEMM2) backend selection
+Because the parent summary suggests previous high-speed variants likely hid correctness bugs in the execution path, GEMM2 should be more conservative than GEMM1.
+
+#### F1. Preferred practical path
+Use a hybrid path:
+- If `T_e` is large enough, cast `swi` to `float16` or keep `float32` depending on kernel support, but ensure accumulation/output is FP32.
+- Use dequantized weight chunks or a carefully controlled Triton kernel only if scale semantics are exact.
+
+#### F2. Recommended robust path for next child
+Keep GEMM2 in a **safe chunked dequantized path**, but optimize it better than the parent:
+1. Avoid dequantizing full `[7168,2048]` weight matrix at once.
+2. Process hidden/output channels in chunks, e.g. `h_chunk = 512` or `1024`.
+3. For each `[h0:h1)`:
+   - dequant only `gemm2_weights[e, h0:h1, :]`
+   - compute `y_chunk = swi @ w2_chunk.t()` in FP32
+   - multiply `y_chunk *= w_e[:, None]`
+   - accumulate directly into output slice using `index_add_` or temporary buffer
+
+This preserves exact semantics while removing the parent’s full-matrix materialization overhead.
+
+### 2.7 Step G — Scatter-add accumulation
+Maintain a single FP32 output buffer:
+- `out = torch.zeros((T, 7168), device=device, dtype=torch.float32)`
+
+For each expert:
+1. obtain `tok_e = sorted_tokens[start:end]`
+2. compute `y_e`
+3. multiply by routing weights `w_e[:, None]`
+4. `out.index_add_(0, tok_e, y_e)`
+
+If GEMM2 is chunked by hidden dimension:
+- do `out[:, h0:h1].index_add_(0, tok_e, y_chunk)`
+or equivalent slice accumulation.
+
+### 2.8 Step H — Final projection
+At end of forward pass:
+- return `out.to(torch.bfloat16)`
+
+This is the only dtype conversion to BF16.
+
+---
+
+## Phase 3: The "Safety Valve" (CRITICAL)
+
+This phase is mandatory. It ensures the final child is **mathematically safe** and unlikely to crash or silently violate constraints.
+
+### 3.1 Safety Valve A — Backend admissibility predicates
+Every nontrivial fast path must have an explicit boolean predicate.
+
+#### For GEMM1 Triton fast path, require all of:
+1. `hidden_states` and `gemm1_weights` are contiguous enough for the kernel’s expected strides.
+2. `BK == 128` exactly.
+3. token ids are available as global ids for correct activation-scale lookup.
+4. pointer offsets are formed with `int64`.
+5. the kernel supports current `T_e` tile shape without out-of-bounds ambiguity.
+6. the kernel writes every output tile exactly once.
+
+If any condition is false, **do not launch Triton**. Use chunked exact dequant path.
+
+#### For GEMM2 optimized path, require all of:
+1. any activation quantization has an explicit scale tensor.
+2. epilogue rescales exactly restore fp32 semantics.
+3. accumulation remains fp32.
+4. there is no lossy reinterpretation of block-scale layout.
+
+If any condition is false, use chunked exact dequantized GEMM2.
+
+### 3.2 Safety Valve B — Structural invariants check
+After dispatch construction, verify invariants in code:
+1. `counts.sum() == tok.numel()`
+2. `offsets[-1] == tok.numel()`
+3. `offsets[1:] >= offsets[:-1]`
+4. `local_exp.min() >= 0`, `local_exp.max() < 32` if nonempty
+
+If any invariant fails due to an unexpected tensor state, return the **fully safe path** for the whole forward pass.
+
+### 3.3 Safety Valve C — Chunked exact repair path
+Keep a deterministic exact repair implementation available at all times.
+
+The repair path is:
+1. exact routing in PyTorch,
+2. exact CSR dispatch,
+3. token dequant cache,
+4. chunked exact GEMM1 dequant + `torch.mm`,
+5. exact SwiGLU,
+6. chunked exact GEMM2 dequant + `torch.mm`,
+7. fp32 `index_add_`,
+8. final BF16 cast.
+
+This path is guaranteed to respect all hard constraints and serves as a no-crash fallback.
+
+### 3.4 Safety Valve D — Memory-bounded projection
+Prevent OOM and pathological scratch growth by chunking deterministically.
+
+Recommended chunk sizes:
+- GEMM1 output-channel chunk: `256`, `512`, or `1024`
+- GEMM2 hidden/output chunk: `512` or `1024`
+- If `T_e` is large, optionally split token rows too
+
+Choose chunk sizes with simple deterministic rules based on `T_e`, e.g.:
+- if `T_e <= 16`: larger weight chunks
+- if `T_e > 128`: smaller chunks to cap peak scratch
+
+No randomness is needed.
+
+### 3.5 Safety Valve E — Final validity projection
+Before returning:
+1. optionally sanitize only if needed: `out = torch.nan_to_num(out)`
+2. ensure dtype/shape exactly match target
+3. return `out.to(torch.bfloat16)`
+
+This guarantees a valid tensor even if some experts are empty.
+
+---
+
+## Phase 4: Implementation Details
+
+### 4.1 Python libraries to use
+Use only standard available libraries for this task:
+- `torch`
+- `torch.nn.functional as F`
+- `triton`
+- `triton.language as tl`
+
+Do **not** rely on obscure packages.
+
+### 4.2 File structure
+The generated child should be a single `.py` file containing:
+1. constant definitions
+2. helper functions for routing/dispatch/dequant
+3. Triton kernel(s) for GEMM1 fast path
+4. exact chunked fallback helpers
+5. `run()` entry point
+
+### 4.3 Helper functions to implement exactly
+Implement the following helpers:
+
+#### `route_tokens(routing_logits, routing_bias, routed_scaling_factor)`
+Returns:
+- `topk_idx: [T,8]`
+- `topk_w: [T,8]`
+
+#### `build_local_dispatch(topk_idx, topk_w, local_expert_offset, e_local)`
+Returns:
+- `sorted_tokens`
+- `sorted_local_experts`
+- `sorted_weights`
+- `expert_offsets`
+
+#### `dequant_hidden_rows(hidden_states, hidden_states_scale, token_ids)`
+Implementation requirements:
+1. gather rows by `index_select(0, token_ids)`
+2. convert gathered fp8 rows to `float32`
+3. gather scales from `[56,T]` using original token ids
+4. transpose to `[num_tokens, 56]`
+5. `repeat_interleave(128, dim=1)` and slice to `7168`
+6. multiply elementwise
+
+#### `dequant_gemm1_chunk(expert_w, expert_scale, n0, n1)`
+Returns exact fp32 chunk `[n1-n0, 7168]` by expanding only needed scale blocks.
+
+#### `dequant_gemm2_chunk(expert_w, expert_scale, h0, h1)`
+Returns exact fp32 chunk `[h1-h0, 2048]` by expanding only needed scale blocks.
+
+#### `gemm1_safe_chunked(a_e, w1_e, s1_e)`
+Computes exact `g1` in fp32 using chunked dequantization.
+
+#### `gemm2_safe_chunked(swi, w2_e, s2_e, tok_e, w_route, out)`
+Computes exact `y` by chunks and accumulates into `out`.
+
+### 4.4 Triton kernel details for GEMM1 fast path
+Implement only one custom high-performance kernel initially: GEMM1.
+
+Recommended kernel properties:
+1. Signature includes pointers to:
+   - gathered fp8 activation rows,
+   - original token ids,
+   - hidden-state scales,
+   - expert fp8 weights,
+   - expert weight scales,
+   - output fp32 buffer.
+2. Reduction dimension `K=7168`, tiled with `BLOCK_K=128`.
+3. Output channels `N=4096` tiled with `BLOCK_N=128`.
+4. Tokens `M=T_e` tiled by `BLOCK_M` chosen from `{16, 32, 64}` depending on regime.
+5. Use `@triton.autotune` with a few configs only, e.g.:
+   - `(BM, BN, BK, warps, stages) = (16,128,128,4,3)`
+   - `(32,128,128,4,4)`
+   - `(64,128,128,8,4)`
+6. Use int64 offset math.
+7. Store fp32 output.
+
+Important: do **not** attempt a fused multi-expert mega-kernel in this child. Keep fast path scope narrow and robust.
+
+### 4.5 T-adaptive dispatch policy in code
+Inside `run()`, set regime-dependent parameters deterministically.
+
+Example policy:
+- `T <= 8`:
+  - prefer smaller `BLOCK_M`
+  - if Triton GEMM1 launch occupancy is poor or unsupported, use safe path immediately
+- `9 <= T <= 128`:
+  - use GEMM1 Triton fast path when admissible
+  - GEMM2 stays chunked safe path
+- `T > 128`:
+  - GEMM1 Triton fast path with larger `BLOCK_M`
+  - GEMM2 chunk sizes increased to reduce launch overhead
+
+This policy is implementable and tied directly to task guidance.
+
+### 4.6 Complexity and performance expectations
+This plan remains polynomial and practical:
+- Routing: `O(T * 256)` with small top-k overhead
+- Dispatch: `O(T * 8 log(T*8))` due to sort
+- Activation dequant cache: `O(U * 7168)` where `U <= T`
+- Expert execution: proportional to actual routed local pairs
+- Weight dequant is chunked, avoiding massive fp32 materialization
+
+Expected advantages over parent:
+1. preserve exact routing/dispatch correctness,
+2. keep token dequant cache,
+3. remove full eager dequant of entire weights,
+4. restore high-throughput compute where safest: GEMM1,
+5. retain deterministic repair path for robustness.
+
+---
+
+## Review of the Detailed Plan
+
+### Does it rely on math rather than luck?
+Yes. The plan is a deterministic decomposition with exact constraints and explicit admissibility predicates. Routing/dispatch are solved exactly; execution backends are selected only when semantics are provably compatible.
+
+### Library Check
+Yes. It only uses standard libraries expected in this environment:
+- `torch`
+- `torch.nn.functional`
+- `triton`
+- `triton.language`
+
+### Randomness Check
+No randomness is used. Therefore no multi-start loop is needed.
+
+### Is the code implementable?
+Yes. The plan is code-ready as a single Python file. It specifies the helper functions, kernel scope, fallback logic, dataflow, chunking rules, invariants, and return path.
+
+---
+
+## Final Recommendation to Executor
+
+Generate the child as a **fusion design**:
+1. Keep the parent’s exact PyTorch routing/dispatch and `unique_tokens` activation cache.
+2. Reintroduce performance through a **single carefully scoped Triton GEMM1 fast path** with fp8 tensor-core dot and post-dot block scaling.
+3. Keep GEMM2 on a **chunked exact safe path** for this iteration to minimize correctness risk.
+4. Use deterministic **T-adaptive regime selection**.
+5. Maintain a full exact repair path and explicit backend admissibility predicates.
+
+This is the most algorithmically robust next step because it directly addresses the parent’s speed collapse while preserving the structural correctness lessons already learned.

@@ -1,0 +1,8 @@
+**Outline 2: Dynamic Shared Memory Tiling (The Tiled Approach)**
+* **Mathematical Formulation**:
+  - Variables ($X$): Shared memory allocation $S$, Tile size $T_v, T_k$.
+  - Constraints ($C$): $S \le 48 \text{ KB}$ per block.
+  - Objective ($f(X)$): Minimize global memory round-trips for the `state` tensor.
+* **Solver Strategy**: Block-level synchronization and memory staging.
+* **Validity Mechanism**: Explicit boundary projections `min(v_idx, V-1)` inside the shared memory load phase to strictly prevent out-of-bounds access.
+* **Why this solution?**: Reduces global memory pressure if V is large, but might introduce `__syncthreads()` overhead which hurt the parent solution. Disadvantage: potential performance regression due to barrier stalling.

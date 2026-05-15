@@ -1,0 +1,6 @@
+Plan 2: BLOCK_M=256 for large batch + expanded autotune
+- Add BLOCK_M=256 configs to autotune for very large seq_len workloads
+- Keep existing FP32 dequant path in GEMM2
+- Advantages: low risk, incremental
+- Disadvantages: registers/SRAM pressure at BLOCK_M=256 may spill; marginal gains expected (3-5%)
+- Expected: ~12.5x (score ~1.25)

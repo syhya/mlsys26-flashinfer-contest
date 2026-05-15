@@ -1,0 +1,32 @@
+### Outline 2: Warp-per-head fused online attention with cp.async double-buffering
+
+**Mathematical Formulation**
+- **Variables (X):**
+  1. Dispatch threshold `tau` separating low-latency and throughput kernels.
+  2. Sparse tile size `Bk` and pipeline stage count `S` for async prefetch.
+  3. For each `(token, head)`, online softmax state `(m, l, O)` where `m in R`, `l in R`, `O in R^512`.
+  4. Shared-memory buffers `Kc_stage[S][Bk][512]`, `Kp_stage[S][Bk][64]`, and `idx_stage[S][Bk]`.
+- **Constraints (C):**
+  1. `idx == -1` entries are ignored completely.
+  2. Online recurrence must satisfy exact invariant:
+     `m' = max(m, x)`, `alpha = exp(m-m')`, `beta = exp(x-m')`, `l' = l*alpha + beta`, `O' = O*alpha + beta*V`.
+  3. `lse = m * log2(e) + log2(l)` if any valid entry else `-INF`.
+  4. All intermediate arithmetic in FP32; final output BF16.
+  5. Explicit BF16 conversion intrinsics only.
+- **Objective f(X):** Minimize end-to-end latency by maximizing overlap of global-memory gather with compute and eliminating intermediate HBM workspace.
+
+**Solver Strategy**
+- Deterministic dispatch + pipeline optimization.
+- Low-latency path: one warp computes one `(token, head)` with direct gather and online recurrence.
+- Throughput path: one block handles multiple heads of a token, uses `cp.async` (when `__CUDA_ARCH__ >= 800`) to prefetch the next sparse tile into shared memory while computing the current tile.
+- Fallback to normal vectorized global->shared copies when async copy is unavailable.
+
+**Validity Mechanism**
+- Online softmax recurrence provides exact normalization independent of tiling.
+- Async path guarded by architecture checks; scalar/vector fallback keeps correctness on all GPUs.
+- Deterministic final repair: if valid count is zero, write zeros and `-INF`; if any path guard fails, dispatch to conservative fused kernel.
+
+**Why this solution?**
+- **Expected improvement:** Best chance to exceed parent by hiding cache gather latency and improving low-token behavior without split-K workspace.
+- **Advantages:** Single-pass exact algorithm, dynamic multi-path dispatch, uses advanced hardware feature (`cp.async`) but keeps safe fallback.
+- **Disadvantages:** More implementation complexity; `cp.async` with BF16 data needs careful byte-level copy handling and can be easy to misuse.

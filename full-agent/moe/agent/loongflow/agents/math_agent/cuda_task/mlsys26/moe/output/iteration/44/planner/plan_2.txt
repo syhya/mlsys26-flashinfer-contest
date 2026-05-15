@@ -1,0 +1,32 @@
+Outline 2: Two-Stage Worklist Triton with Safe GEMM2 Fallback
+
+Mathematical Formulation
+- Variables X:
+  - topk_idx[t,8], topk_w[t,8]
+  - counts[e], offsets[e], token_list[k], expert_list[k], weight_list[k]
+  - worklist1[q]=(expert_id, m_tile) for GEMM1 active tiles
+  - worklist2[r]=(expert_id, m_tile, n_tile) for GEMM2/scatter active tiles
+  - Y[t,h] final fp32 output
+- Constraints C:
+  1. Dispatch must be equivalent to CSR grouping of all local routed token-expert pairs.
+  2. GEMM1 uses fp8 operands with post-dot block-scale multiplication per BK=128 tile.
+  3. GEMM2 may use fp16/fp32 path but must accumulate in fp32.
+  4. Pointer arithmetic in Triton uses int64.
+  5. No empty-CTA work: launch only active worklist items.
+- Objective f(X): maximize throughput by keeping GEMM1 on fp8 tensor cores and eliminating idle CTAs while preserving exact dispatch semantics.
+
+Solver Strategy
+- Deterministic graph-style scheduling:
+  1. Solve routing/dispatch with vectorized PyTorch ops.
+  2. Solve active-tile scheduling by constructing compact worklists from counts and offsets.
+  3. Execute Triton kernels over worklists; use fallback for unsupported/problematic stage.
+
+Validity Mechanism
+- Safety valve compares dispatch invariants: offsets[-1] == num_pairs and counts.sum()==num_pairs.
+- If any Triton kernel precondition fails (shape small, unsupported path, allocation issue), fallback to exact per-expert safe kernel for that stage.
+- Final output always accumulated through fp32 buffer and cast once.
+
+Why this solution?
+- Advantages: directly targets the parent's lost performance while reducing grouped-kernel risk by launching only active expert tiles.
+- Disadvantages: more implementation complexity; scatter-add fusion must be handled carefully.
+- Expected performance: strong upside, especially on skewed routing and medium/large T.

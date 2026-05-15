@@ -1,0 +1,9 @@
+Plan 2: Adopt 302d2eb3 verbatim + add tl.make_block_ptr for W1 weight loads in GEMM1 to enable Blackwell TMA bulk transfers.
+
+- Variables: tile sizes, num_stages, num_warps; W1 access pattern via block pointer with advance().
+- Constraints: BLOCK_N=128, BLOCK_K=128 alignment for TMA descriptors; int64 expert offset; correctness atol=1e-2.
+- Objective: cut GEMM1 K=7168 loop latency by ~5-10% via TMA.
+- Solver: Triton autotune over 14 inherited + new TMA-friendly configs (num_stages=4-6 to exploit deeper async pipelines).
+- Validity: keep the original pointer-arithmetic load path as a separate kernel; pick TMA kernel only if it compiles (Triton autotune drops broken configs silently). Floor preserved by retaining all 302d2eb3 configs.
+- Why: GEMM1 is ~55% of kernel cost; TMA on Blackwell is 1.2-1.5x bandwidth. Lineage has never tried block_ptr.
+- Risks: tl.make_block_ptr semantics are version-fragile in Triton 3.6; expert-batched grouped GEMM with variable rows complicates block_ptr base creation.

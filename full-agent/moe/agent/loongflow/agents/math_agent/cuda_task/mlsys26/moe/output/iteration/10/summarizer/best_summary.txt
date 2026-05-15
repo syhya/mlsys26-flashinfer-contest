@@ -1,0 +1,18 @@
+**1. Executive Summary:**
+This iteration was a critical failure because removing the weight normalization from the routing logic completely broke numerical correctness, performing 1st out of 1 siblings.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   `**Sibling Rank:**` 1 out of 1 children. Top sibling score: 0.0%.
+*   `**Score Delta:**` From parent (81.28%) to child (0.0%).
+*   `**Key Change:**` Removed the sum-based weight normalization (`weights / weights_sum`) in the PyTorch routing phase, directly multiplying the raw masked sigmoid scores by `routed_scaling_factor`.
+*   `**Core Metrics:**` The numerical validation failed entirely (`INCORRECT_NUMERICAL`), dropping the score from 81.28% to 0.0% and preventing any execution time evaluation.
+
+**3. Strategic Analysis (The "So What?"):**
+*   `**Root Cause:**` The execution plan was fundamentally flawed in its assumption about the reference implementation's routing math. The normalization (`weights / weights_sum`) was actually essential for matching the baseline's expected output magnitudes. Removing it caused the calculated routing weights to diverge significantly from the ground truth.
+*   `**Key Insight:**` While theoretical DeepSeek-V3 specifications might suggest no normalization, the specific validation baseline for this task enforces it. Any deviation from the reference math in the PyTorch routing phase guarantees an immediate numerical failure. The persistent 8192.0 absolute error seen in the parent is definitively not caused by this routing logic.
+*   `**Identified Risk:**` Blindly applying architectural theory (e.g., DeepSeek whitepapers) without verifying the specific benchmark's behavior leads to catastrophic regressions. The true source of the 8192.0 error remains hidden in the Triton kernels.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   `Recommend Stripping:` Immediately revert the routing logic to the parent's sum-normalized version (`weights = (weights / weights_sum) * routed_scaling_factor`).
+*   `Recommend Exploration:` The 8192.0 absolute error still needs to be resolved. Investigate other sources within the Triton kernels, such as masking issues during memory loads/stores, out-of-bounds accesses for `expert_offsets_ptr`, or misalignment in the block scale indexing (e.g., `scale_n_offs = n_offs // 128`).
+*   `Warn:` Do not alter the PyTorch routing math any further. Treat the parent's routing implementation as correct and shift all debugging focus exclusively to the Triton GEMM kernels and memory operations.

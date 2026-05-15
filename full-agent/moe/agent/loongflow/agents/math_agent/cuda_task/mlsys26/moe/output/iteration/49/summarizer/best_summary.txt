@@ -1,0 +1,19 @@
+**1. Executive Summary:**
+This iteration was a partial recovery because the executor abandoned the failed atomic-scatter GEMM2 path and restored the parent-of-parent’s scratch-buffer + `index_add_` epilogue, performing 1st out of 1 siblings.
+
+**2. Data-Driven Findings (Facts ONLY):**
+- **Sibling Rank:** 1 out of 1 children of parent `c9929ab3`. Top sibling score: 1.4797.
+- **Score Delta:** From parent **1.4395** to child **1.4797**.
+- **Key Change:** Reverted GEMM2 from global-output `tl.atomic_add` with `reset_to_zero=["OutGlobal_ptr"]` back to local scratch `O[Tk_total, H]` + `output.index_add_(0, sorted_tokens.long(), O)`; GEMM1 and routing remained effectively unchanged.
+- **Core Metrics:** Correctness 1.0; speedup 14.7972x; kernel latency 1.5583 ms; reference latency 16.8981 ms; eval time 67.49 s; max absolute error 40960.0; total workloads 19.
+
+**3. Strategic Analysis (The "So What?"):**
+- **Root Cause:** The outcome was driven by **plan quality and execution quality together**. The plan correctly diagnosed the previous branch’s atomic-scatter GEMM2 as the regression source, and the executor’s actual implementation faithfully removed that mechanism by restoring the non-atomic accumulation path.
+- **Key Insight:** The most important lesson is that the branch’s best available recovery move was not a new optimization, but a **structural rollback** to a safer epilogue design. This confirms that the atomic GEMM2 fusion was the wrong local direction, while also showing that the underlying GEMM1+routing stack remains strong enough to recover quickly once that mistake is removed.
+- **Identified Risk:** The biggest weakness is that this child is still **not competitive with stronger ancestor `302d2eb3`**. It improved over its direct parent, but remains below the earlier non-atomic baseline. That means rollback alone is insufficient; this line risks oscillating around a local basin without introducing a genuinely new high-value optimization.
+
+**4. Actionable Guidance (The "What's Next?"):**
+- **Recommend Fusion:** Fuse this child’s restored non-atomic GEMM2 epilogue back into the stronger ancestor framework centered on `302d2eb3`, and treat `302d2eb3` as the active base for future exploration rather than `c9929ab3`.
+- **Recommend Stripping:** Strip the entire atomic-scatter GEMM2 idea (`tl.atomic_add` into `[T,H]` and autotune `reset_to_zero` on final outputs) from this lineage’s reusable motifs; it has now failed twice as a productive direction.
+- **Recommend Exploration:** Redirect effort toward an actually untested structural lever: real worklist-based GEMM2 dispatch or TMA/`tl.make_block_ptr` weight loading for GEMM1, while keeping the proven scratch-output + `index_add_` epilogue fixed.
+- **Warn:** Do not mistake recovery-to-baseline behavior for frontier progress. This child validates a rollback decision, not a new optimization thesis; continuing to mutate only around epilogue mechanics is likely to waste iterations.

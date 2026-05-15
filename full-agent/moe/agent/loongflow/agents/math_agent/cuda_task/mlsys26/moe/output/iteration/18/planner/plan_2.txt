@@ -1,0 +1,42 @@
+Outline 2: Differential-debug hybrid: Triton grouped GEMM1 + exact PyTorch GEMM2 oracle path
+
+Mathematical Formulation
+- Variables X:
+  - Exact routing/dispatch tensors as in the task.
+  - Intermediate G1[j,n] from grouped GEMM1.
+  - Activated tensor C[j,i] = silu(G1[j,I+i]) * G1[j,i].
+  - Final expert outputs O[j,h] and token output Y[t,h].
+- Constraints C:
+  1. Routing and dispatch are exact.
+  2. GEMM1 respects FP8 block-scale semantics with hidden-state scale indexed by original token id.
+  3. GEMM2 is computed with exact PyTorch float32 dequantization and torch.matmul, not custom Triton.
+  4. Weighted scatter-add is exact with index_add_.
+- Objective f(X):
+  - Maximize score by isolating the first divergent stage and keeping only the likely-correct high-value acceleration (GEMM1).
+
+Solver Strategy
+- Deterministic stagewise solver:
+  1. Solve routing/CSR exactly with vectorized PyTorch.
+  2. Solve GEMM1 with Triton grouped kernel using BLOCK_K=128 and post-dot scaling.
+  3. Solve GEMM2 exactly per expert with torch.matmul on dequantized weights.
+  4. If validation of GEMM1 invariants fails, fall back to exact PyTorch for GEMM1 too.
+- This is a hybrid exact/accelerated decomposition.
+
+Validity Mechanism
+- Guaranteed correctness via exact downstream oracle:
+  - Even if GEMM1 is the only custom kernel, GEMM2 and scatter are exact PyTorch.
+- Safety checks:
+  1. expert_offsets monotonic and terminal equal to total routed pairs.
+  2. Shapes of G1 slices and expert batches are asserted before matmul.
+  3. Any failed assertion routes to full exact fallback.
+- Deterministic, no randomness.
+
+Why this solution?
+- Expected performance improvement: If the persistent error is in GEMM2 or scatter semantics, this removes it while preserving a major chunk of speedup from grouped GEMM1.
+- Advantages:
+  - Strong fault isolation.
+  - Likely more robust than full Triton pipeline.
+  - Easier to implement than fused GEMM2.
+- Disadvantages:
+  - Speed may drop relative to parent.
+  - Still retains some Triton semantic risk in GEMM1.

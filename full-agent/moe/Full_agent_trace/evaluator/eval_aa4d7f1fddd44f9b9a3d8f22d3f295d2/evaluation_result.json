@@ -1,0 +1,42 @@
+{
+  "status": "success",
+  "summary": "Kernel correct but slower. Speedup: 0.67x, Latency: 81.753ms",
+  "score": 0.06730555037631054,
+  "metrics": {
+    "correctness": 1.0,
+    "speedup": 0.6730555037631054,
+    "exec_time_ms": 81.75332567543859,
+    "baseline_time_ms": 18.431917780701752,
+    "compile_time": 0.0,
+    "eval_time": 376.63129782676697
+  },
+  "artifacts": {
+    "eval_backend": "modal+flashinfer-bench",
+    "task_id": "moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048",
+    "execution_time": "376.63s",
+    "kernel_latency_ms": "81.753ms",
+    "reference_latency_ms": "18.432ms",
+    "speedup": "0.67x",
+    "bench_stats": {
+      "reference_latency_ms": 18.431917780701752,
+      "max_relative_error": 11425781.0,
+      "max_absolute_error": 4096.0,
+      "total_workloads": 19
+    },
+    "correctness_check": "Passed",
+    "ncu_profile": {
+      "ncu_set": "full",
+      "ncu_page": "details",
+      "ncu_kernel_name": null,
+      "rows": [
+        {
+          "workload_uuid": "b8f4f012-a32e-4356-b4e1-7665b3d598af",
+          "axes": {
+            "seq_len": 7
+          },
+          "output": "==PROF== Connected to process 558 (/opt/conda/envs/py312/bin/python3.12)\n\n==ERROR== An error was reported by the counter measurement library:\n==ERROR== For more information, see /tmp/nsight-compute-a80b-f0a9.log\n==ERROR== Failed to initialize the profiler: LibraryNotLoaded. Check that a compatible driver library is loaded.\n==ERROR== For more information, see /tmp/nsight-compute-a80b-f0a9.log\n==PROF== Trying to shutdown target application\n==ERROR== The application returned an error code (9).\n"
+        }
+      ]
+    }
+  }
+}

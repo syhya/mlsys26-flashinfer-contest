@@ -1,0 +1,12 @@
+PLAN 1: Fused Score+BlockTopK Kernel for TIER-M (eliminate HBM round-trip + 1 kernel launch)
+
+Math: For each batch b with 2048 < L <= 6144, compute scores in-register/shared, then sort in-block.
+Variables: per-batch scores S[n] for n<L, global indices I[n].
+Constraints: S[n] = sum_h ReLU(scale[t]*sum_d Q[b,h,d]*fp8K[t,d]) * w[b,h]. I[n] = block_table[b, n/64]*64 + n%64.
+Objective: min kernel time while preserving exact top-K by cub::BlockRadixSort.
+
+Solver: cub::BlockRadixSort<float, 256, 24, int32_t> with SortDescendingBlockedToStriped.
+Validity: strided load + BlockedToStriped + strided write (proven pairing). Padding = -1e30f.
+Why: Eliminates scores_buf/indices_buf HBM round-trip for TIER-M AND removes 1 kernel launch. Parent's profile shows ~7 launches; cutting to 6 plus avoiding HBM round-trip is clean gain. Advantage: incremental, low risk, can coexist with TIER-L device CUB sort. Disadvantage: scoring kernel must be specialized (different layout for TIER-M vs TIER-L), code complexity increases.
+
+Fallback: if compile fails, keep dc51d5fc 3-tier verbatim (guaranteed 9.564).

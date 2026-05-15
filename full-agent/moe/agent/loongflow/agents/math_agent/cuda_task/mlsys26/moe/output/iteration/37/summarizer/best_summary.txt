@@ -1,0 +1,42 @@
+## Strategic Summary Report — Solution `ba626bb8` (Iteration 37, Generation 9)
+
+---
+
+### 1. Executive Summary
+
+This iteration was a **modest improvement over its direct parent but a regression vs. the cross-lineage frontier** because the bf16-fused epilogue + 1 added autotune config lifted score from `8e3c776e`'s 1.5395 (15.40x) to **1.5482 (15.48x)** — a +0.0087 gain — yet it underperforms the existing lineage best `302d2eb3` (1.5517, 15.52x) which the plan explicitly intended to surpass.
+
+---
+
+### 2. Data-Driven Findings (Facts ONLY)
+
+- **Sibling Rank:** 1 out of 1 children of parent `8e3c776e` (sole child observed).
+- **Cross-lineage Position:** Ranks **#2** vs the database best `302d2eb3` (1.5517). Gap: **-0.0035 score, +0.020ms latency**.
+- **Score Delta:** Parent `8e3c776e` (1.5395, 15.40x, 1.523ms) → child `ba626bb8` (**1.5482, 15.48x, 1.500ms**). Absolute gain: **+0.0087 (+0.57%)**. Latency reduction: **-0.023ms (-1.5%)**.
+- **Key Change:** (a) Final epilogue rewritten — `O.to(bf16)` then `index_add_` accumulating directly into a `bf16 [T,H]` buffer, eliminating a `[T,7168]` fp32 scratch + the separate fp32→bf16 cast launch. (b) One new autotune config added to GEMM2: `BLOCK_M=64, BLOCK_N=128, num_warps=8, num_stages=4` (13 total). GEMM kernels and `_route_tokens` otherwise byte-identical to parent.
+- **Core Metrics:**
+  - Correctness: **1.0** (Passed)
+  - Max absolute error: **34,816** (vs parent 32,768; vs `302d2eb3` 30,720) — slightly worse, expected from bf16 accumulation
+  - Max relative error: 2.05e11 (vs parent 2.08e11)
+  - Eval time: **79.06s** (vs parent 39.26s; vs `302d2eb3` 591.20s)
+  - Reference latency: 16.85ms; total workloads: 19
+
+---
+
+### 3. Strategic Analysis (The "So What?")
+
+- **Root Cause:** **Plan execution was faithful, but plan strategy was sub-optimal.** The planner correctly identified `302d2eb3` as the database best and explicitly directed copying it as the base — yet the executor's submitted code retains `8e3c776e`'s old `_route_tokens` (the `nonzero + argsort` version), NOT `302d2eb3`'s sentinel-sort refactor. This is a **direct violation of the plan's S4 anti-regression checklist** ("`_route_tokens` = byte-identical to `302d2eb3`"). Consequently, the bf16 epilogue gain (~23µs) is partially offset by the inferior routing path (~27µs slower), netting +0.0087 instead of the predicted +0.04–0.07. The solution genuinely improves over its declared parent, but fails to compound on the lineage frontier.
+- **Key Insight:** The single most important lesson is that **executor compliance with verbatim-copy directives is the load-bearing component of the floor-guarantee strategy.** When the plan says "copy `302d2eb3` verbatim," even a single substituted helper function silently loses the cumulative gains of the prior iteration. The bf16 epilogue itself is a genuine, reusable win (~1.5% latency, marginal correctness cost well within tolerance) — this concept should be **salvaged and fused with `302d2eb3`'s routing refactor** to recover the missing 0.005–0.01 score.
+- **Identified Risk:** (1) **Lineage divergence / shadow regression:** future planners using `ba626bb8` as parent will inherit the inferior routing path and may not realize they're operating below the true frontier. (2) **bf16 accumulation precision drift:** abs error rose from 30,720 → 34,816, eroding the safety margin. With ≤8 contributions per output row, this is acceptable, but stacking further bf16 fusions (e.g., bf16 GEMM2 atomic accum) would compound. (3) The micro-optimization ceiling is now demonstrably saturated — three consecutive iterations have produced +0.018, +0.018, +0.009 deltas in a clear decay pattern.
+
+---
+
+### 4. Actionable Guidance (The "What's Next?")
+
+- **Recommend Fusion [highest priority]:** **Merge `ba626bb8`'s bf16 epilogue with `302d2eb3`'s sentinel-sort `_route_tokens`.** This is a free, mathematically-guaranteed gain — both changes are independent and additive. Expected score: ~1.560 (15.6x). This single fusion recovers the lineage's true potential and should be the immediate next iteration.
+- **Recommend Exploration [high priority]:** **Fused Triton routing kernel.** PyTorch routing micro-optimization is exhausted; the entire sigmoid → group-top2 → masked top-8 → renorm → CSR-build pipeline should be consolidated into 1-2 Triton kernels with atomic CSR construction. Expected payoff: 3-8% on small-T workloads where routing dominates.
+- **Recommend Exploration:** **TMA loads via `tl.make_block_ptr` in GEMM1.** GEMM1 (K=7168) remains the largest single cost (~55% of 1.5ms). Blackwell TMA could deliver 5-10% overall speedup — the highest-value unexplored Triton 3.6.0 feature in this lineage.
+- **Recommend Stripping:** **Prune unused autotune configs** before adding more. Eval time has stabilized around 39-79s for this branch (vs `302d2eb3`'s 591s with 14+13 configs), suggesting some configs are never selected. Inspect autotune cache to remove dead configs and cap kernel count at ≤8 each.
+- **Warn — Lineage hygiene:** Future planners MUST sample from the **global database best**, not just the immediate parent's score. The planner here correctly identified `302d2eb3` as the target but the executor produced a body based on `8e3c776e`. Recommend strengthening executor instruction templates with explicit per-function source attribution checklists ("paste `_route_tokens` from solution_id=302d2eb3 lines X-Y").
+- **Warn — Diminishing returns trajectory:** Three iterations of structural-preservation + tiny-tweak have yielded +0.018, +0.018, +0.009 — clear decay. The next iteration after the bf16+sentinel-sort fusion **must attempt a structural change** (fused routing OR TMA loads), accepting higher variance in exchange for a chance at +0.05–0.15 gains. Continued cosmetic tweaks risk wasting evolutionary budget.
+- **Warn — Precision watch:** bf16 epilogue raised abs error 32k→35k. Combining with future bf16 fusions (e.g., atomic accum in GEMM2) could push past tolerance. Track this metric per iteration; if it crosses ~50k, mandate a precision audit.

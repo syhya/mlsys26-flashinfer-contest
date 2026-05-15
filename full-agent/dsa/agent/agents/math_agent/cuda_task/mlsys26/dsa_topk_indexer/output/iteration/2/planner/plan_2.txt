@@ -1,0 +1,24 @@
+Objective: Implement a highly optimized CUDA kernel for TopK Indexer in Sparse Attention using Fully Fused Block-Level TopK.
+
+Mathematical Formulation:
+- Variables: `Q` (64x128 FP8), `K_page` (64x128 FP8).
+- Objective: Compute scores and keep top 2048 continuously.
+- Constraint: Output exactly 2048 indices.
+
+Solver Strategy: Fused Scoring and Top-K
+1. Single Kernel Launch: One block per batch element.
+2. Computation: 
+   - Load Q into SMEM.
+   - Iterate K pages. Compute 64 scores per page.
+3. Top-K Maintenance:
+   - Use a thread-block local Top-K data structure (e.g., a bitonic sort network or a priority queue in Shared Memory).
+   - Since K=2048, maintaining a sorted list of 2048 elements in SMEM (8KB) is feasible.
+   - Merge the 64 new scores into the Top-2048 list using parallel block primitives.
+4. Output: Write the final 2048 indices directly to the output tensor.
+
+Validity Mechanism:
+The block-level reduction exactly tracks the top elements. Correctness relies on a verified parallel merge algorithm.
+
+Why this solution?
+Advantages: Avoids writing full score arrays to global memory, reducing HBM bandwidth.
+Disadvantages: High register/SMEM pressure, complex parallel merge logic, potential block synchronization overhead.

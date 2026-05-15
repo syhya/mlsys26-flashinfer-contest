@@ -1,0 +1,354 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a numerically correct and faster FP8 block-scale MoE kernel for DeepSeek-style routing on B200, with the explicit near-term goal of fixing the parent’s persistent structural error while retaining enough Triton-level performance to surpass the current 8.13x speedup and move evaluation score toward or above 1.0.
+
+**Selected Outline:** Robust Triton grouped MoE with corrected grid, segmented reductions, and exact masked semantics.
+
+**Rationale for Selection:**
+1. The global perspective shows only one island and the best score is still below 1.0, so the system has not solved the task yet; we should not do minor tuning only.
+2. The parent summary is highly informative: changing FP8/BF16 math changed latency but did **not** eliminate the huge absolute error, which strongly suggests a structural bug rather than a precision-choice bug.
+3. Among the 3 outlines, this one is the most algorithmically robust **and** still performance-oriented: it directly attacks the likely source of incorrectness (grid shape, masking, out-of-bounds N-tiles, segmented accumulation) while preserving the grouped Triton design that already delivered strong speed.
+4. It cleanly decouples:
+   - **Structure finding**: exact routing + CSR dispatch in PyTorch.
+   - **Numeric optimization**: grouped GEMM kernels in Triton.
+   - **Correction/refinement**: deterministic fallback and validation path.
+
+---
+
+## Phase 1: Mathematical Definition
+
+### 1.1 Variables
+Let:
+- `T` = number of tokens.
+- `E_global = 256`, `E_local = 32`, `H = 7168`, `I = 2048`.
+- `q[t,e] = sigmoid(routing_logits[t,e])`.
+- `b[e] = routing_bias[e]` cast to float32.
+- `s_rank[t,e] = q[t,e] + b[e]` be the ranking score.
+- `M[t,e] in {0,1}` be the final routing mask selecting exactly 8 experts per token under the DeepSeek group constraints.
+- `w_route[t,e] = routed_scaling_factor * q[t,e] * M[t,e] / sum_e(q[t,e] * M[t,e])`.
+
+For local work construction:
+- Build a flattened list of routed local token-expert pairs:
+  - `P = {(t_j, e_j_local, w_j)} for j = 0..Tk_total-1`.
+- After sorting by local expert id:
+  - `sorted_tokens[j] = t_j`
+  - `sorted_experts[j] = e_j_local`
+  - `sorted_weights[j] = w_j`
+- `expert_offsets[e]` is CSR-style boundary array so that expert `e` owns rows:
+  - `j in [expert_offsets[e], expert_offsets[e+1])`.
+
+For each pair-row `j` belonging to token `t = sorted_tokens[j]` and local expert `e`:
+- GEMM1 output:
+  - `G1[j,n] = sum_{k=0..H-1} A_fp8[t,k] * W1_fp8[e,n,k] * A_scale[t,k//128] * W1_scale[e,n//128,k//128]`
+  - where `n in [0, 2I)`.
+- SwiGLU activation:
+  - `X1[j,i] = G1[j,i]`
+  - `X2[j,i] = G1[j,I+i]`
+  - `C[j,i] = silu(X2[j,i]) * X1[j,i]`
+- GEMM2 output:
+  - `O[j,h] = sorted_weights[j] * sum_{i=0..I-1} C[j,i] * W2_fp8[e,h,i] * W2_scale[e,h//128,i//128]`
+
+Final output:
+- `Y[t,h] = sum_{j: sorted_tokens[j] = t} O[j,h]`
+- return `Y.to(torch.bfloat16)`.
+
+### 1.2 Constraints
+The child solution must satisfy all of the following hard constraints:
+
+1. **Exact routing semantics**
+   - Use `sigmoid(logits)`.
+   - Use `sigmoid(logits) + bias` only for ranking.
+   - Group experts into 8 groups of 32.
+   - Group score = sum of top-2 scores in each group.
+   - Select top-4 groups.
+   - Select global top-8 experts only among those top-4 groups.
+   - Normalize final weights from raw sigmoid values, not biased values.
+
+2. **Exact FP8 block-scale semantics**
+   - Hidden-state scale lookup uses original token id, not local grouped row id.
+   - Scale rule is multiplicative: `float_val ≈ fp8_val * scale`.
+   - Scale tensors are indexed by 128-sized blocks.
+
+3. **FP32 accumulation**
+   - All GEMM accumulation is float32.
+   - Cast to bf16 only once at final output.
+
+4. **Safety constraints for Triton**
+   - All pointer arithmetic involving expert weights must use int64.
+   - Every load/store for partial tiles must be masked in both M and N dimensions.
+   - Kernel launch dimensions must be based on `Tk_total`, not `T`, for grouped expert rows.
+
+5. **Output validity**
+   - Output shape `[T, 7168]`.
+   - Output dtype `torch.bfloat16`.
+   - Works for arbitrary `T`.
+
+### 1.3 Objective Function
+Primary objective:
+- **Maximize correctness** by eliminating the structural source of large absolute error.
+
+Secondary objective:
+- **Minimize runtime** while preserving correctness by using grouped Triton kernels and GPU-side dispatch.
+
+Equivalent optimization target:
+- Minimize `runtime_ms` subject to all constraints above and numerical agreement within evaluator tolerance.
+
+---
+
+## Phase 2: The Optimization Loop
+
+This phase is a deterministic bounded search over implementation choices, not random guessing.
+
+### 2.1 Step A: Rebuild routing and dispatch structure exactly in PyTorch
+Use only vectorized PyTorch ops for the routing topology:
+- `torch.sigmoid`
+- `torch.topk(..., sorted=True)` for deterministic selection
+- `torch.nonzero(as_tuple=True)`
+- `torch.argsort`
+- `torch.bincount`
+- `torch.cumsum`
+
+Implementation requirements:
+1. Compute `q = sigmoid(logits.float())`.
+2. Compute `s_rank = q + bias.float()`.
+3. Reshape into groups and compute group top-2 sums.
+4. Select top-4 groups per token.
+5. Mask all other experts with `-inf`.
+6. Select top-8 experts globally among surviving groups.
+7. Form normalized routing weights using `q`, not `s_rank`.
+8. Restrict to local experts via `local_expert_offset`.
+9. Flatten local token-expert assignments and sort by local expert id.
+10. Build CSR offsets using `bincount + cumsum`.
+
+This is the fixed “structure solving” stage. No custom kernel should alter or reinterpret these indices.
+
+### 2.2 Step B: Use a bounded multi-config Triton search for grouped GEMM1
+The parent likely has a structural bug in grid sizing and/or masking, so the child should keep the grouped GEMM1 idea but correct its launch model.
+
+The grouped GEMM1 kernel should:
+- Grid dimensions: `(ceil_div(2I, BLOCK_N), ceil_div(Tk_max_or_total_rows_per_expert, BLOCK_M), E_local)`.
+- Critically, the M-axis condition inside the kernel must compare against `Tk = end_idx - start_idx`, and the launch’s second dimension must conceptually tile **pair rows**, not global tokens.
+- All `n_offs` must be masked with `n_mask = n_offs < 2*I`.
+- All loads/stores involving output columns must use `n_mask`.
+- Use `BLOCK_K = 128` to align with one scale block.
+- Keep FP8 inputs in native dtype for `tl.dot`, then multiply by `a_scale * w_scale` after the dot.
+
+Autotune search space should be small and deterministic, for example:
+- `(BLOCK_M, BLOCK_N, num_warps, num_stages)` in:
+  - `(32, 128, 4, 4)`
+  - `(64, 128, 4, 3)`
+  - `(64, 64, 4, 4)`
+  - `(128, 128, 8, 3)`
+
+This is the “bounded discrete optimization loop”: Triton autotuning chooses among a fixed small set of robust tile shapes.
+
+### 2.3 Step C: Use corrected grouped GEMM2 with fused SwiGLU, but prioritize exact semantics over aggressive quantization
+The parent summary strongly suggests the true bug is not FP8-vs-BF16 math. Therefore the child should not spend its main complexity budget on dynamic activation quantization.
+
+Preferred main path:
+- Keep `G1` as float32.
+- In GEMM2 kernel:
+  - Load `x1`, `x2` from `G1`.
+  - Compute `c = x1 * x2 * sigmoid(x2)` in float32.
+  - Dequantize W2 correctly per 128-block.
+  - Perform dot accumulation in float32.
+  - Multiply by routing weight `sorted_weights[j]`.
+
+Two acceptable implementation variants:
+1. **Most robust Triton variant**
+   - Convert `c` to bf16 and dequantized W2 to bf16 only if the kernel remains numerically stable and simpler.
+   - Accumulate in float32.
+2. **Safer fallback variant**
+   - If Triton GEMM2 is unstable or masking is complex, do GEMM2 per expert using PyTorch `torch.matmul` on exact dequantized blocks for that expert.
+
+The key is that this stage must be structurally correct first.
+
+### 2.4 Step D: Use deterministic segmented accumulation
+Instead of trying to fuse everything into a risky custom segmented reduction kernel, accumulate final expert contributions with a deterministic PyTorch reduction:
+- `output = torch.zeros((T, H), dtype=torch.float32, device=device)`
+- `output.index_add_(0, sorted_tokens.long(), O)`
+
+This is already mathematically exact for the planned structure and avoids another likely source of bugs.
+
+### 2.5 Step E: Candidate evaluation order for the executor
+The executor should implement in the following order to maximize success probability:
+
+1. Correct routing and CSR construction.
+2. Fix grouped GEMM1 grid/masking/int64 arithmetic.
+3. Fix grouped GEMM2 grid/masking/int64 arithmetic.
+4. Keep PyTorch `index_add_` for final reduction.
+5. Add fallback path if Triton kernel launch fails or if small `Tk_total` makes Triton inefficient.
+
+---
+
+## Phase 3: The "Safety Valve" (CRITICAL)
+
+This phase is the deterministic repair/validation mechanism that enforces validity even if the fast path is imperfect.
+
+### 3.1 Structural consistency checks before launching kernels
+Before any Triton launch, explicitly validate on GPU/PyTorch side:
+1. `Tk_total == sorted_tokens.numel() == sorted_experts.numel() == sorted_weights.numel()`.
+2. `expert_offsets.shape[0] == E_local + 1`.
+3. `expert_offsets[0] == 0`.
+4. `expert_offsets[-1] == Tk_total`.
+5. `expert_offsets[1:] - expert_offsets[:-1] == torch.bincount(sorted_experts, minlength=E_local)`.
+
+If any check fails, do **not** launch Triton; fall back to a pure PyTorch per-expert implementation.
+
+### 3.2 Exact masking repair inside Triton
+All kernels must enforce these repairs:
+- `m_mask = m_offs < Tk`
+- `n_mask = n_offs < logical_N`
+- `k_mask` only if needed for non-128-tail cases; here `H` and `I` are multiples of 128, so K-tail is unnecessary.
+- Every load from token rows uses `m_mask`.
+- Every load/store in output columns uses `n_mask`.
+- Every final store uses `m_mask[:, None] & n_mask[None, :]`.
+
+This directly addresses the likely root cause of the parent’s 8192 absolute error.
+
+### 3.3 Grid repair
+The parent used `triton.cdiv(T, BLOCK_M)` for grouped kernels, which is suspicious because grouped expert rows live over `Tk_total` segmented rows, not all tokens uniformly.
+
+Repair rule:
+- The execution model must ensure program ids on the M axis only cover the maximum local row count needed for expert segments.
+- Either:
+  1. Launch over `triton.cdiv(Tk_total, BLOCK_M)` and early-return if the tile falls outside the current expert segment, or
+  2. Keep expert as grid dimension but derive M-grid from a safe upper bound such as maximum expert count, not `T`.
+
+The simplest robust plan for the executor:
+- Compute `max_count = expert_counts.max()`.
+- Launch grouped kernels with second dimension `triton.cdiv(max_count, BLOCK_M)`.
+- Inside kernel, use `Tk = end_idx - start_idx` and `if m_idx * BLOCK_M >= Tk: return`.
+
+This avoids the over-tiling mismatch that can create masked/unmasked corruption.
+
+### 3.4 Deterministic fallback implementation
+If any of the following occur:
+- Triton compile failure,
+- runtime launch failure,
+- suspicious empty/non-monotonic offsets,
+- or tiny `Tk_total` where grouped kernels are inefficient,
+
+then switch to a deterministic fallback:
+1. For each local expert `e`, gather its token ids from CSR.
+2. Exact-dequant hidden-state rows and expert weights using PyTorch float32.
+3. Run `torch.matmul` for GEMM1.
+4. Apply SwiGLU in float32.
+5. Run `torch.matmul` for GEMM2.
+6. Multiply by routing weights.
+7. Use `index_add_` to accumulate.
+
+This fallback is polynomial time, code-ready, and guarantees validity.
+
+### 3.5 No-randomness guarantee
+This plan uses no stochastic optimization. Therefore no multi-start loop is required. The only search is Triton autotuning over a fixed finite config set.
+
+---
+
+## Phase 4: Implementation Details
+
+The executor should implement the child as a single self-contained Python file using only:
+- `torch`
+- `triton`
+- `triton.language as tl`
+
+No obscure external packages.
+
+### 4.1 Exact routing implementation
+Required PyTorch functions:
+- `torch.sigmoid`
+- `torch.topk(sorted=True)`
+- `torch.zeros_like`
+- `masked_fill`
+- `scatter_`
+- `torch.nonzero(as_tuple=True)`
+- `torch.argsort`
+- `torch.bincount`
+- `torch.cumsum`
+
+Important exact semantics:
+- Bias is only for ranking.
+- Final normalized expert weights come from `sigmoid(logits)` values.
+- `group_size = 256 // 8 = 32`.
+
+### 4.2 CSR dispatch implementation
+Code-ready dispatch steps:
+1. `expert_mask = (topk_idx >= local_start) & (topk_idx < local_start + E_local)`
+2. `flat_token_idx, flat_k_idx = torch.nonzero(expert_mask, as_tuple=True)`
+3. `local_expert_idx = topk_idx[flat_token_idx, flat_k_idx] - local_start`
+4. `sorted_order = torch.argsort(local_expert_idx)`
+5. `sorted_tokens = flat_token_idx[sorted_order].to(torch.int32)`
+6. `sorted_experts = local_expert_idx[sorted_order].to(torch.int32)`
+7. `sorted_weights = weights[flat_token_idx, topk_idx[flat_token_idx, flat_k_idx]][sorted_order].to(torch.float32)`
+8. `expert_counts = torch.bincount(sorted_experts, minlength=E_local)`
+9. `expert_offsets = torch.zeros(E_local + 1, dtype=torch.int32, device=device)`
+10. `expert_offsets[1:] = torch.cumsum(expert_counts, dim=0)`
+11. `max_count = int(expert_counts.max().item()) if Tk_total > 0 else 0`
+
+### 4.3 Triton GEMM1 kernel details
+Kernel requirements:
+- Use `@triton.autotune`.
+- Declare `BLOCK_K: tl.constexpr = 128`.
+- Use `H` and `N_dim=4096` as runtime values or constexpr if convenient.
+- Convert expert and row offsets to int64 before large stride multiplies.
+- Compute A-scale index using original token ids:
+  - `hidden_states_scale` layout is `[56, T]`, so lookup is by `(k_block, token_id)` via strides.
+- Apply N mask to weight loads and output stores.
+- Output `G1` shape is `[Tk_total, 4096]`, not `[T, 4096]`.
+
+### 4.4 Triton GEMM2 kernel details
+Kernel requirements:
+- Input `G1` float32.
+- Load `x1 = G1[:, :I]`, `x2 = G1[:, I:]` by pointer arithmetic.
+- Compute `c = x1 * x2 * tl.sigmoid(x2)` in float32.
+- Load FP8 W2 tiles with proper int64 expert offsets.
+- Apply W2 block scales indexed by `(h_block, i_block)`.
+- Accumulate in float32.
+- Multiply by per-row `sorted_weights` before store or after accumulation.
+- Output `O` shape `[Tk_total, H]`.
+- Again, store with `m_mask & n_mask`.
+
+### 4.5 Fallback helper functions
+The executor should implement compact helper functions such as:
+- `route_tokens(...)`
+- `build_local_csr(...)`
+- `fallback_exact_dequant_hidden(hidden_states, hidden_states_scale, token_ids)`
+- `fallback_exact_dequant_w1(gemm1_weights[e], gemm1_weights_scale[e])`
+- `fallback_exact_dequant_w2(gemm2_weights[e], gemm2_weights_scale[e])`
+
+Dequantization recipe for fallback:
+- Expand block scales with `repeat_interleave(128, dim=...)`.
+- Slice to exact dimensions.
+- Multiply FP8 tensor cast to float32 by expanded scale tensor.
+
+### 4.6 Final return logic
+Implementation order in `run()`:
+1. Handle `Tk_total == 0` by returning zeros bf16 `[T, H]`.
+2. Run structural checks.
+3. Try fast Triton path.
+4. On exception or explicit validation failure, run deterministic fallback.
+5. Always return `output.to(torch.bfloat16)`.
+
+---
+
+## Why this plan is mathematically and algorithmically robust
+
+1. **It attacks the most likely root cause** identified by the parent summary: structural/masking/indexing error, not precision format.
+2. **It separates hard structure from numeric acceleration**:
+   - Structure is solved exactly with PyTorch vector ops.
+   - Numeric acceleration is isolated in Triton grouped GEMMs.
+3. **It contains a deterministic correction mechanism**:
+   - CSR validation,
+   - exact masking repair,
+   - repaired grid construction,
+   - and a guaranteed-valid fallback.
+4. **It is code-ready** in the target environment using only standard available libraries (`torch`, `triton`).
+5. **It avoids luck**: no random initialization, no stochastic search, no dependence on fragile runtime behavior.
+
+---
+
+## Expected outcome
+
+- Best-case: the executor fixes the 8192 absolute-error structural bug while preserving most of the parent’s grouped Triton speed, producing a materially higher score.
+- Worst-case safe behavior: fallback path preserves correctness and prevents crashes or invalid outputs.
+- Most important directional gain: move from “fast but structurally suspect” to “correct-by-construction fast path with deterministic repair,” which is the most credible route to score >= 1.0.

@@ -1,0 +1,19 @@
+**1. Executive Summary:**
+This iteration resulted in a phantom performance regression because execution noise in the unmodified high-workload kernel masked the marginal gains of warp-reductions, while the primary modification—shared memory transposition—bloated instructions without benefit, performing as the sole child in this generation.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   `**Sibling Rank:**` 1 out of 1 children. Top sibling score: 4.41.
+*   `**Score Delta:**` From parent (4.51) to child (4.41).
+*   `**Key Change:**` Introduced a `SharedStorage` union in `split_k_compute_kernel` to enable `float4` vectorized stores via transposition, and added `__shfl_down_sync` warp reductions in `split_k_reduce_kernel`.
+*   `**Core Metrics:**` Overall execution time increased from 0.046ms to 0.047ms; however, profiling shows `split_k_reduce_kernel` latency dropped (6.50us to 6.14us), while `split_k_compute_kernel` instructions increased by 13% (420,046 to 475,180) with no latency change (7.97us).
+
+**3. Strategic Analysis (The "So What?"):**
+*   `**Root Cause:**` The overall score drop was caused by hardware variance in the unmodified `dsa_forward_kernel` (execution time increased from 538us to 540us). The execution of the plan was correct, but the strategy of using shared memory transposition to force 128-bit stores backfired by trading global memory efficiency for instruction bloat and shared memory bank conflicts.
+*   `**Key Insight:**` For latency-bound kernels with low SM occupancy, adding complex staging buffers (like the `SharedStorage` transposition) to optimize write patterns is counterproductive. Conversely, reducing sequential loops with warp intrinsics (as seen in the reduction kernel) yields reliable speedups.
+*   `**Identified Risk:**` Continuing to optimize the low-workload `split_k` kernels is a strategic error, as over 90% of the execution time in the benchmark is consumed by the high-workload `dsa_forward_kernel`.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   `Recommend Stripping`: Remove the `SharedStorage` transposition logic from `split_k_compute_kernel` and revert to the parent's `float2` direct global memory stores to eliminate instruction bloat and shared memory overhead.
+*   `Recommend Fusion`: Keep the successful `__shfl_down_sync` warp reduction implementation in `split_k_reduce_kernel`, as it objectively improved that phase's latency.
+*   `Recommend Exploration`: Redirect all future Planner focus to the `dsa_forward_kernel` (the high-workload path). Explore optimizing its sparse index loading, maximizing L1 cache reuse for `ckv_cache`, or aggressively unrolling the dot-product loops to improve the ALU pipeline utilization.
+*   `Warn`: Do not evaluate optimizations based solely on the overall benchmark score. Always consult the NCU profile to distinguish between targeted kernel improvements and execution noise in unrelated kernels.

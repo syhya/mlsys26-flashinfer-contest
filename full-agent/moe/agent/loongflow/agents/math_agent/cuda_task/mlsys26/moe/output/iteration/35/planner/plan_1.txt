@@ -1,0 +1,9 @@
+Plan 1: Adopt 302d2eb3 (current global best 15.52x) verbatim as base, then add a fused atomic-add bf16 epilogue to GEMM2 to eliminate the separate index_add_ + .to(bf16) post-pass.
+
+- Variables: kernel configs (preserved from 302d2eb3); new: bf16 atomic accumulation buffer.
+- Constraints: correctness atol=rtol=1e-2; preserve all 14/13 GEMM1/GEMM2 configs from 302d2eb3 (autotune-superset floor guarantee); BLOCK_N=128 invariant.
+- Objective: minimize kernel latency below 1.520ms.
+- Solver: Triton autotune (deterministic min over config set) + fused tl.atomic_add into fp32 output (then convert with separate bf16 cast kernel). Avoid bf16 atomics (precision risk). Floor: 302d2eb3 score 1.5517.
+- Validity: keep separate `O` buffer + index_add_ as fallback if atomic version fails. The autotune is strictly additive (superset).
+- Why: routing already optimized; epilogue scatter is a real overhead (~3% of 1.52ms). Atomic-add directly into pre-zeroed fp32 output[T,H] saves the separate Tk_total*H scratch alloc and one launch.
+- Risks: atomic_add to fp32 across many warps may cause contention; BLOCK_M=256 could be selected and produce many concurrent atomics.

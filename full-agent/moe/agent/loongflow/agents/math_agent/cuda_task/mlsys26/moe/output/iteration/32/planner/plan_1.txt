@@ -1,0 +1,16 @@
+Plan 1: Upgrade parent b550fc5e to match a96d6608 (FP8 TC GEMM2 + tl.range pipelining) AND add BLOCK_M=256 configs + num_warps=16 in FP8 TC path.
+
+Variables: per-tile c_scale (scalar), c_fp8 (BLOCK_M x BLOCK_K FP8).
+Constraints: BLOCK_N=128 (n_block_idx=pid_n), BLOCK_K=128 (scale granularity), int64 ptrs.
+Objective: minimize kernel latency subject to correctness (atol=rtol=1e-2).
+
+Solver: Triton autotuner (finite config enumeration) picks best tile config by latency.
+
+Validity: 
+- Use tl.max(tl.abs(c)) with NO axis → scalar → exact post-dot dequant math
+- Saturating FP8 cast + 1e-12 clamp prevents NaN
+- int64 on pid_e * stride_we for pointer arithmetic
+- torch.zeros for G1, O (not empty)
+
+Expected: a96d6608 got 15.34x with 10 configs; adding BLOCK_M=256 + num_warps=16 to FP8 TC kernels likely gains 2-5% → ~16x.
+Advantages: Proven foundation (a96d6608 1.5338), low risk. Disadvantages: marginal gain; BLOCK_M=256 may spill registers.

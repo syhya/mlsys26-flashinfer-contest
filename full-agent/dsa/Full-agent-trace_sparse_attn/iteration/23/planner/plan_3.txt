@@ -1,0 +1,2 @@
+Plan 3: Fuse validated wins and merge split_k_compute + split_k_reduce into a two-stage pipeline where compute kernel additionally stores partials in reducer-native layout [T,16,S,512] (swap S and H in fastest dim), so reducer reads contiguous float4 per head without stride-16 head skip.
+Advantage: perfect contiguous reducer loads. Disadvantage: compute kernel writes become strided (different head indexing), which may hurt write coalescing and cancel the gain.

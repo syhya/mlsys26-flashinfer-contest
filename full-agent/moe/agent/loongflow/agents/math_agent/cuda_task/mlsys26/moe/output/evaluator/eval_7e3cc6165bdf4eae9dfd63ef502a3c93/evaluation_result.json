@@ -1,0 +1,19 @@
+{
+  "status": "validation_failed",
+  "summary": "Validation failed: INCORRECT_NUMERICAL: ",
+  "score": 0.0,
+  "metrics": {
+    "correctness": 0.0,
+    "speedup": 0.0,
+    "exec_time_ms": 0.0,
+    "baseline_time_ms": 0.0,
+    "compile_time": 0.0,
+    "eval_time": 64.30069947242737
+  },
+  "artifacts": {
+    "eval_backend": "modal+flashinfer-bench",
+    "task_id": "moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048",
+    "execution_time": "64.30s",
+    "error": "INCORRECT_NUMERICAL: "
+  }
+}

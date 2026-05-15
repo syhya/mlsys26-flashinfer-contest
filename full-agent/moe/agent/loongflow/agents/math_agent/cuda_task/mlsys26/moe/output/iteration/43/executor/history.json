@@ -1,0 +1,77 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_a3a",
+        "solution_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/43/executor/0_0/solution_a3a.py",
+        "evaluation_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/43/executor/0_0/evaluation_a3a.json",
+        "score": 0.17772758161795646,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 1.78x (ref: 16.869ms, kernel: 13.360ms)\",\n  \"score\": 0.17772758161795646,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 1.7772758161795645,\n    \"exec_time_ms\": 13.360011070175439,\n    \"baseline_time_ms\": 16.86943260526316,\n    \"compile_time\": 0.0,\n    \"eval_time\": 51.265350103378296\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"51.27s\",\n    \"kernel_latency_ms\": \"13.360ms\",\n    \"reference_latency_ms\": \"16.869ms\",\n    \"speedup\": \"1.78x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 16.86943260526316,\n      \"max_relative_error\": 0.0,\n      \"max_absolute_error\": 0.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  },
+  {
+    "round": 1,
+    "candidates": [
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_d92",
+        "solution_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/43/executor/1_0/solution_d92.py",
+        "evaluation_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/43/executor/1_0/evaluation_d92.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: RUNTIME_ERROR: Traceback (most recent call last):\\n  File \\\"/opt/conda/envs/py312/lib/python3.12/site-packages/flashinfer_bench/bench/evaluators/lowbit.py\\\", line 57, in check_correctness\\n    result = sol_runnable(*inp)\\n             ^^^^^^^^^^^^^^^^^^\\n  File \\\"/opt/conda/envs/py312/lib/python3.12/site-packages/flashinfer_bench/compile/runnable.py\\\", line 95, in __call__\\n    ret = self._callable(*args)\\n          ^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/opt/conda/envs/py312/lib/python3.12/site-packages/torch/utils/_contextlib.py\\\", line 124, in decorate_context\\n    return func(*args, **kwargs)\\n           ^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/root/.cache/flashinfer_bench/cache/triton/fib_triton_agent_ae0ec8a4_52498c/fib_triton_agent_ae0ec8a4_52498c/kernel.py\\\", line 137, in run\\n    w1_cache[e] = _dequant_w1_expert(gemm1_weights, gemm1_weights_scale, e)\\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/root/.cache/flashinfer_bench/cache/triton/fib_triton_agent_ae0ec8a4_52498c/fib_triton_agent_ae0ec8a4_52498c/kernel.py\\\", line 83, in _dequant_w1_expert\\n    return (w * s).permute(0, 2, 1, 3).reshape(2 * INTER, HIDDEN)\\n            ~~^~~\\nRuntimeError: The size of tensor a (128) must match the size of tensor b (56) at non-singleton dimension 1\\n | workload={'seq_len': 7}\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 41.13082218170166\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"41.13s\",\n    \"error\": \"RUNTIME_ERROR: Traceback (most recent call last):\\n  File \\\"/opt/conda/envs/py312/lib/python3.12/site-packages/flashinfer_bench/bench/evaluators/lowbit.py\\\", line 57, in check_correctness\\n    result = sol_runnable(*inp)\\n             ^^^^^^^^^^^^^^^^^^\\n  File \\\"/opt/conda/envs/py312/lib/python3.12/site-packages/flashinfer_bench/compile/runnable.py\\\", line 95, in __call__\\n    ret = self._callable(*args)\\n          ^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/opt/conda/envs/py312/lib/python3.12/site-packages/torch/utils/_contextlib.py\\\", line 124, in decorate_context\\n    return func(*args, **kwargs)\\n           ^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/root/.cache/flashinfer_bench/cache/triton/fib_triton_agent_ae0ec8a4_52498c/fib_triton_agent_ae0ec8a4_52498c/kernel.py\\\", line 137, in run\\n    w1_cache[e] = _dequant_w1_expert(gemm1_weights, gemm1_weights_scale, e)\\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/root/.cache/flashinfer_bench/cache/triton/fib_triton_agent_ae0ec8a4_52498c/fib_triton_agent_ae0ec8a4_52498c/kernel.py\\\", line 83, in _dequant_w1_expert\\n    return (w * s).permute(0, 2, 1, 3).reshape(2 * INTER, HIDDEN)\\n            ~~^~~\\nRuntimeError: The size of tensor a (128) must match the size of tensor b (56) at non-singleton dimension 1\\n\",\n    \"error_detail\": {\n      \"status\": \"RUNTIME_ERROR\",\n      \"log\": \"Traceback (most recent call last):\\n  File \\\"/opt/conda/envs/py312/lib/python3.12/site-packages/flashinfer_bench/bench/evaluators/lowbit.py\\\", line 57, in check_correctness\\n    result = sol_runnable(*inp)\\n             ^^^^^^^^^^^^^^^^^^\\n  File \\\"/opt/conda/envs/py312/lib/python3.12/site-packages/flashinfer_bench/compile/runnable.py\\\", line 95, in __call__\\n    ret = self._callable(*args)\\n          ^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/opt/conda/envs/py312/lib/python3.12/site-packages/torch/utils/_contextlib.py\\\", line 124, in decorate_context\\n    return func(*args, **kwargs)\\n           ^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/root/.cache/flashinfer_bench/cache/triton/fib_triton_agent_ae0ec8a4_52498c/fib_triton_agent_ae0ec8a4_52498c/kernel.py\\\", line 137, in run\\n    w1_cache[e] = _dequant_w1_expert(gemm1_weights, gemm1_weights_scale, e)\\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/root/.cache/flashinfer_bench/cache/triton/fib_triton_agent_ae0ec8a4_52498c/fib_triton_agent_ae0ec8a4_52498c/kernel.py\\\", line 83, in _dequant_w1_expert\\n    return (w * s).permute(0, 2, 1, 3).reshape(2 * INTER, HIDDEN)\\n            ~~^~~\\nRuntimeError: The size of tensor a (128) must match the size of tensor b (56) at non-singleton dimension 1\\n\",\n      \"axes\": {\n        \"seq_len\": 7\n      }\n    }\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_e17",
+        "solution_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/43/executor/1_1/solution_e17.py",
+        "evaluation_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/43/executor/1_1/evaluation_e17.json",
+        "score": 0.18687630787194154,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 1.87x (ref: 16.638ms, kernel: 12.642ms)\",\n  \"score\": 0.18687630787194154,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 1.8687630787194154,\n    \"exec_time_ms\": 12.641738973684213,\n    \"baseline_time_ms\": 16.637910228070176,\n    \"compile_time\": 0.0,\n    \"eval_time\": 65.89594912528992\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"65.90s\",\n    \"kernel_latency_ms\": \"12.642ms\",\n    \"reference_latency_ms\": \"16.638ms\",\n    \"speedup\": \"1.87x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 16.637910228070176,\n      \"max_relative_error\": 0.0,\n      \"max_absolute_error\": 0.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  },
+  {
+    "round": 2,
+    "candidates": [
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_f70",
+        "solution_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/43/executor/2_0/solution_f70.py",
+        "evaluation_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/43/executor/2_0/evaluation_f70.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL:  | max_rel_err=85247.078125, max_abs_err=1140736.0 | workload={'seq_len': 32}\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 66.00511384010315\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"66.01s\",\n    \"error\": \"INCORRECT_NUMERICAL: \",\n    \"error_detail\": {\n      \"status\": \"INCORRECT_NUMERICAL\",\n      \"log\": \"\",\n      \"axes\": {\n        \"seq_len\": 32\n      },\n      \"correctness\": {\n        \"max_relative_error\": 85247.078125,\n        \"max_absolute_error\": 1140736.0,\n        \"extra\": {\n          \"matched_ratio\": 0.6279950823102678\n        }\n      }\n    }\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_6e0",
+        "solution_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/43/executor/2_1/solution_6e0.py",
+        "evaluation_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/43/executor/2_1/evaluation_6e0.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL:  | max_rel_err=683246.625, max_abs_err=1086464.0 | workload={'seq_len': 1}\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 57.408724308013916\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"57.41s\",\n    \"error\": \"INCORRECT_NUMERICAL: \",\n    \"error_detail\": {\n      \"status\": \"INCORRECT_NUMERICAL\",\n      \"log\": \"\",\n      \"axes\": {\n        \"seq_len\": 1\n      },\n      \"correctness\": {\n        \"max_relative_error\": 683246.625,\n        \"max_absolute_error\": 1086464.0,\n        \"extra\": {\n          \"matched_ratio\": 0.0806361607142857\n        }\n      }\n    }\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_616",
+        "solution_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/43/executor/2_2/solution_616.py",
+        "evaluation_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/43/executor/2_2/evaluation_616.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL:  | max_rel_err=78560.1796875, max_abs_err=753152.0 | workload={'seq_len': 1}\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 24.42935299873352\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"24.43s\",\n    \"error\": \"INCORRECT_NUMERICAL: \",\n    \"error_detail\": {\n      \"status\": \"INCORRECT_NUMERICAL\",\n      \"log\": \"\",\n      \"axes\": {\n        \"seq_len\": 1\n      },\n      \"correctness\": {\n        \"max_relative_error\": 78560.1796875,\n        \"max_absolute_error\": 753152.0,\n        \"extra\": {\n          \"matched_ratio\": 0.0838448660714286\n        }\n      }\n    }\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

@@ -1,0 +1,13 @@
+**Mathematical Formulation**:
+Variables $X$: Vectorization width for HBM writes (1, 2, 4).
+Constraints $C$: Alignment of `O_tmp` in HBM must be multiple of 16 bytes.
+Objective $f(X)$: Minimize memory transactions $= \frac{\text{Bytes}}{16 \times X}$.
+
+**Solver Strategy**:
+Linear Programming mapping (`scipy.optimize.linprog` conceptually) to map 512 dimensions to 128 threads perfectly, yielding $X=4$ (`float4`).
+
+**Validity Mechanism**:
+Use a Shared Memory staging buffer (reusing `smem_Kc`) with `__syncthreads()` as a strict synchronization barrier to guarantee data consistency before the vector write.
+
+**Why this solution?**:
+Mathematically halves HBM write instructions. Disadvantage: Requires careful thread index algebraic manipulation.

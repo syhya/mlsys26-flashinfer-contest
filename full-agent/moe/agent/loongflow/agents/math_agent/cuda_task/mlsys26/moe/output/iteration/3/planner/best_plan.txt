@@ -1,0 +1,51 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized FP8 block-scale Mixture-of-Experts (MoE) operation that significantly outperforms the baseline latency while mathematically guaranteeing exact numerical correctness ($rtol=1e-2, atol=1e-2$), directly solving the parent's massive 8192.0 absolute error bug.
+
+**Selected Outline:** Triton Grouped GEMM with FP8 Dynamic Quantization for SwiGLU
+
+**Rationale for Selection:**
+1. **Fixes the Parent's Bottleneck:** The parent bypassed FP8 Tensor Cores in GEMM2 by casting weights to FP32. This plan dynamically quantizes the SwiGLU intermediate output to FP8 within the kernel, enabling 4x FP8 Tensor Core throughput for the second matmul.
+2. **Fixes the Accuracy Bug:** The parent suffered from uninitialized memory reads (via `torch.empty`) and `tl.exp` overflows. This plan uses deterministic initializations and numerically stable activations.
+
+---
+
+**Best Plan:**
+
+**Phase 1: Mathematical Definition**
+*   **Variables ($X$)**: 
+    *   $T_{map}$: Token-to-expert CSR offset arrays.
+    *   $Triton_{params}$: Kernel tile sizes ($BLOCK\_M, BLOCK\_N$).
+*   **Constraints ($C$)**: 
+    *   $BLOCK\_K == 128$ strictly, to align exactly with PyTorch's FP8 block-scale layout.
+    *   Pointer arithmetic must not exceed $2^{31}-1$ bounds.
+*   **Objective ($f(X)$)**: Minimize execution time using FP8 Tensor Cores for both GEMM1 and GEMM2 while strictly bounding absolute error.
+*   **Routing Math**: $Scores = \sigma(logits) + bias$. Deterministically select Top-8 experts using `sorted=True` to eliminate arbitrary tie-breaking discrepancies.
+
+**Phase 2: The Optimization Loop (Vectorized Dispatch & Autotuning)**
+*   **Vectorized Dispatch**: Execute the token-to-expert assignment purely on the GPU to avoid CPU-GPU sync overhead. Use `torch.argsort` to group tokens, `torch.bincount` to count tokens per expert, and `torch.cumsum` to build the CSR offset pointers.
+*   **Multi-Start Parameter Search**: Apply `@triton.autotune` as a multi-start search over the optimal execution configuration. Provide at least 4 configs varying `BLOCK_M` $\in \{16, 32, 64\}$, `BLOCK_N` $\in \{64, 128\}$, and `num_warps` $\in \{4, 8\}$. Triton will benchmark all starts and deterministically select the fastest one.
+
+**Phase 3: The "Safety Valve" (CRITICAL)**
+This phase enforces strict validity constraints to guarantee the generated solution does not crash or produce the 8192.0 absolute error seen in the parent.
+*   **Memory Initialization Safety**: Replace all instances of `torch.empty` with `torch.zeros` for the intermediate $G_1$ and final $O$ tensors. This guarantees that masked-out threads or early-exiting blocks leave $0.0$ instead of random HBM garbage, fixing the massive error spikes.
+*   **Numerical Overflow Safety**: In the SwiGLU activation, replace the mathematically unstable `x2 / (1.0 + tl.exp(-x2))` with the natively protected `x2 * tl.sigmoid(x2)`.
+*   **Pointer Overflow Safety**: Enforce `.to(tl.int64)` on all expert indices (`e_idx`) and coordinate offsets *before* multiplying them by tensor strides.
+
+**Phase 4: Implementation Details**
+*   **Step 4.1: Deterministic Routing (PyTorch)**: Compute `s = 1.0 / (1.0 + torch.exp(-logits))`, add bias, and apply group-limited Top-K routing. Mandate `sorted=True` in `torch.topk` calls to match reference determinism exactly.
+*   **Step 4.2: Triton Grouped GEMM1 (Exact Block Scale)**: 
+    *   Load $A_{fp8}$ and $W_{1fp8}$.
+    *   Execute `dot_res = tl.dot(A_fp8, W_1fp8, out_dtype=tl.float32)`.
+    *   Apply block scales mathematically correctly: `acc += dot_res * a_scale * w_scale`.
+*   **Step 4.3: Dynamic FP8 Quantization & Fused SwiGLU**:
+    *   Inside `grouped_gemm2_kernel`, read $x_1$ and $x_2$. Compute $c = x_2 \cdot tl.sigmoid(x_2) \cdot x_1$.
+    *   *Crucial Step:* Compute the row-wise max: `c_max = tl.max(tl.abs(c), axis=1)`.
+    *   Calculate the exact dynamic scale: `c_scale = tl.maximum(c_max / 448.0, 1e-12)`.
+    *   Cast to FP8: `c_fp8 = (c / c_scale[:, None]).to(tl.float8_e4m3fn)`.
+*   **Step 4.4: Triton Grouped GEMM2 (Full FP8)**:
+    *   Load $W_{2fp8}$ (do NOT cast to `float32` like the parent did).
+    *   Execute `dot_res = tl.dot(c_fp8, W_2fp8, out_dtype=tl.float32)`.
+    *   Apply scales and routing weights: `acc += dot_res * c_scale[:, None] * w2_scale * w_routing[:, None]`.
+*   **Step 4.5: Deterministic Scatter Add**:
+    *   Accumulate the final valid tokens back into the sequence shape using `output.index_add_(0, sorted_tokens.long(), O)` and return as `bfloat16`.

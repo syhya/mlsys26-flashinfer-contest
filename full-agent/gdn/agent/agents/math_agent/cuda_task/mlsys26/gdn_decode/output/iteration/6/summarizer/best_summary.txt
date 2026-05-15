@@ -1,0 +1,17 @@
+**1. Executive Summary:**
+This iteration was a successful structural enhancement because it introduced a dual-kernel architecture with deterministic runtime dispatch, maintaining peak execution speed while resolving the parent's rigid dimension constraints.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   **Sibling Rank:** 1 out of 1 children. Top sibling score: 827.21%.
+*   **Score Delta:** From parent (777.01%) to child (827.21%).
+*   **Key Change:** Decoupled the architecture into a heavily templated fast-path kernel for specific dimensions ($K=128, V=128$, specific head counts) and a dynamic-loop generic fallback kernel for arbitrary sizes, governed by a PyTorch runtime router.
+*   **Core Metrics:** Execution latency remained exceptionally stable and optimal (0.00838ms vs parent's 0.00840ms), with the apparent score increase driven by baseline variance. Correctness strictly maintained at 1.0.
+
+**3. Strategic Analysis (The "So What?"):**
+*   **Root Cause:** The successful outcome is driven by both a highly strategic plan and precise execution. The plan correctly identified that to safely generalize without losing the parent's FMA and warp-autonomy optimizations, the system needed a "safety valve" (the generic kernel) completely separated from the optimized path.
+*   **Key Insight:** Utilizing a dual-kernel or multi-kernel architectural pattern—routing dynamically based on tensor properties at runtime—is the ultimate way to achieve both absolute peak performance (via hardcoded/templated unrolling) and bulletproof robustness.
+*   **Identified Risk:** The templated fast-path is overly specific (`NUM_V_HEADS=8, NUM_Q_HEADS=4, V=128, K=128`). While the generic kernel provides a safety net, any input deviating slightly from these exact constants will trigger the fallback, potentially resulting in a steep performance cliff.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   **Recommend Exploration:** The dual-kernel routing mechanism is excellent, but the fast-path coverage is too narrow. Recommend expanding the template instantiations to cover a broader grid of common configurations (e.g., $K \in \{64, 128, 256\}$) to widen the "catchment area" of peak performance before relying on the generic fallback.
+*   **Recommend Fusion:** The architectural pattern established here—`float4` vectorized state memory access, zero `__syncthreads()` in the V-loop (warp autonomy), and C++ deterministic runtime dispatch—represents an optimal local maximum. This blueprint MUST be preserved and fused as the baseline for any future GDN memory-bound tasks.

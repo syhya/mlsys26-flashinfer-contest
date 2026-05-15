@@ -1,0 +1,28 @@
+Outline 2: Grouped Triton FP8 GEMM with oracle-guided verification
+
+Mathematical Formulation
+Variables (X):
+- Same routing and dispatch variables as Outline 1.
+- Tile schedule variables G over grouped expert/token tiles.
+- Intermediate tensors G1 and S for GEMM1 and SwiGLU.
+Constraints (C):
+- Same exact routing and block-scale constraints.
+- Triton kernels must use int64 pointer arithmetic for expert weight offsets.
+- Scale lookup must use original global token ids, not local packed row ids.
+- All masked loads/stores must preserve exact zero contribution outside valid domains.
+Objective f(X):
+- Maximize throughput subject to numerical error <= tolerance.
+
+Solver Strategy
+- Deterministic kernel design with grouped tiling.
+- Use Triton autotune over a finite config set for BM/BN/BK/warps/stages.
+- Use a local oracle check: compare selected expert-batch outputs from Triton path against exact eager formulas during development mode.
+
+Validity Mechanism
+- Safety valve: if any kernel precondition fails (small batch, suspicious layout, unsupported path), fallback to eager exact expert path.
+- Repair step: re-run failed experts with exact dequantized torch.mm and overwrite those output slices.
+
+Why this solution?
+- Expected improvement: highest ceiling because it restores grouped GPU parallelism and FP8 tensor cores.
+- Advantages: potentially best speed.
+- Disadvantages: highest implementation risk; likely repeats prior structural bugs in indexing/masking/store logic.

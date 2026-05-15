@@ -1,0 +1,12 @@
+PLAN 2: Radix-Select for TIER-L (replace cub::DeviceSegmentedRadixSort with per-batch block radix-select)
+
+Math: Find K-th largest score threshold T, then output positions with score>=T (breaking ties by index order).
+Variables: threshold T in float; filter pass picks first K indices with score >= T.
+Constraints: exactly K outputs (or fewer if L<K, padded with -1).
+Objective: avoid O(N log N) sort, use O(N) radix-select per batch.
+
+Solver: Iterate over 8 bits at a time (radix=256) building histogram, find bucket containing K-th element, refine. Use cub::BlockScan for the filter+compact step. One block per batch, threads load strided items.
+Validity: After finding T, a two-pass filter (atomicAdd counter for <T ties) guarantees exactly K outputs. Pad remaining to -1.
+Why: eliminates device-wide CUB segmented sort launch (~0.010-0.020 ms overhead). Advantage: large win on TIER-L. Disadvantage: radix-select is non-trivial to implement correctly; tie-breaking is subtle; higher risk of correctness regression.
+
+Fallback: if radix-select fails, revert to dc51d5fc CUB sort path.

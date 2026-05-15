@@ -1,0 +1,30 @@
+Outline 2: Native-op fusion plan using torch._scaled_mm for GEMM1 and chunked exact GEMM2
+
+Mathematical Formulation
+- Variables (X):
+  - Exact routing/dispatch tensors as in Outline 1.
+  - A_e = gathered fp8 hidden rows for expert e
+  - W1_e, W2_e = expert fp8 weights with block scales
+  - G1_e, S_e, Y_e = expert outputs
+- Constraints (C):
+  1. Routing semantics identical to DeepSeek no-aux routing.
+  2. FP8 dequantization semantics must match per-128 block scales.
+  3. GEMM1 and GEMM2 accumulate in fp32 only.
+  4. Output shape/dtype fixed.
+- Objective f(X): maximize performance subject to exact semantics.
+
+Solver Strategy
+- Exact discrete structure via PyTorch ops.
+- Use cuBLAS-backed torch._scaled_mm where scale layout can be represented exactly for GEMM1.
+- Use deterministic chunked dequant+mm for GEMM2 because SwiGLU output is fp32 and requantization is risky.
+- This is a hybrid exact solver: exact routing + exact linear algebra backend selection.
+
+Validity Mechanism
+- Admissibility gate before calling torch._scaled_mm: if scale layout/output dtype contract not exact, switch to safe dequant path.
+- Chunked GEMM2 with direct output slice accumulation to bound memory while preserving exact arithmetic order within fp32 tolerance.
+- Return safe zero-output path if no local tokens.
+
+Why this solution?
+- Expected to improve significantly over full eager dequantization by accelerating the largest input-side GEMM.
+- Advantages: leverages proven vendor backend, reduces custom kernel risk.
+- Disadvantages: torch._scaled_mm API/layout mismatch risk on block-scale tensors; if unsupported, may collapse back to slower path.

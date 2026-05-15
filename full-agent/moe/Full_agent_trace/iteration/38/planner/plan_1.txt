@@ -1,0 +1,5 @@
+Plan 1: Fusion of 302d2eb3 (sentinel-sort routing) + ba626bb8 (bf16 epilogue) — both proven independent gains.
+- Mathematical model: identical pipeline; bf16 final accumulator with ≤8 contributions per row.
+- Solver: deterministic; no search.
+- Validity: Both ingredients proven correct individually. Floor = max(parent ingredients).
+- Why: highest-confidence improvement. Expected score ~1.56-1.60.

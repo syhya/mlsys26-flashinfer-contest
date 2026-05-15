@@ -1,0 +1,17 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_840",
+        "solution_file_path": "output/e8df8e8a-4678-4efd-8c20-4ea3828823f0/8/executor/0_0/solution_840.py",
+        "evaluation_file_path": "output/e8df8e8a-4678-4efd-8c20-4ea3828823f0/8/executor/0_0/evaluation_840.json",
+        "score": 3.9432747023594055,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 39.43x (ref: 3.819ms, kernel: 0.096ms)\",\n  \"score\": 3.9432747023594055,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 39.432747023594054,\n    \"exec_time_ms\": 0.09559075,\n    \"baseline_time_ms\": 3.8193378333333334,\n    \"compile_time\": 0.0,\n    \"eval_time\": 201.3621335029602\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_topk_indexer_fp8_h64_d128_topk2048_ps64\",\n    \"execution_time\": \"201.36s\",\n    \"kernel_latency_ms\": \"0.096ms\",\n    \"reference_latency_ms\": \"3.819ms\",\n    \"speedup\": \"39.43x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 3.8193378333333334,\n      \"max_relative_error\": 0.0,\n      \"max_absolute_error\": 0.0,\n      \"total_workloads\": 12\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

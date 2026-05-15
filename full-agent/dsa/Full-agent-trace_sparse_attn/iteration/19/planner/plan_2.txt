@@ -1,0 +1,34 @@
+Outline 2: Isolated small-path structural experiment — keep large fused kernel byte-stable, redesign only num_tokens-small regime with exact partition+merge.
+
+Mathematical Formulation
+- Variables X:
+  1. tau_small: threshold for using redesigned small path.
+  2. P: number of sparse partitions over 2048 slots.
+  3. hg: heads processed per block group.
+  4. Workspace layout O_tmp[T,16,P,512], m_tmp[T,16,P], l_tmp[T,16,P].
+  5. Merge order for partial states.
+- Constraints C:
+  1. Each partition computes exact partial online-softmax state (m_p,l_p,O_p) in FP32.
+  2. Exact merge equations:
+     m=max(m_a,m_b), l=l_a*exp(m_a-m)+l_b*exp(m_b-m), O=O_a*exp(m_a-m)+O_b*exp(m_b-m).
+  3. No normalization in partial kernel.
+  4. Invalid sparse indices contribute neutral state only.
+  5. Large path remains algebraically identical to incumbent.
+  6. Explicit BF16 conversions only; base-2 lse.
+- Objective f(X): minimize small-workload latency by increasing block-level parallelism while preserving exact equivalence through sufficient-statistics merge.
+
+Solver Strategy
+- Deterministic grid search over finite topology set:
+  1. tau_small in {64, 96}
+  2. P in {32, 64}
+  3. hg in {4, 8}
+- Fix one robust code-ready point, e.g. tau_small=96, P=64, hg=4, rather than runtime autotuning.
+
+Validity Mechanism
+- Reduction kernel is the exact correction step: recompute final state from partial states, normalize once, write bf16 output and fp32 base-2 lse.
+- Empty partition writes neutral state (m=-INF,l=0,O=0), guaranteeing algebraic elimination.
+- If implementation risk emerges, host dispatch can conservatively route all workloads to incumbent path.
+
+Why this solution?
+- Advantages: attacks the only repeatedly discussed weak regime without destabilizing large path; mathematically exact; clear decoupling between structure finding (partition topology) and exact easy solve (merge).
+- Disadvantages: higher implementation risk than Outline 1; prior attempts in this direction failed when replacing incumbent too broadly.

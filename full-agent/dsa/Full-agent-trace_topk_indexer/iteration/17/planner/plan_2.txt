@@ -1,0 +1,13 @@
+PLAN 2: Host-side histogram dispatch + conditional launches (eliminate dead launches)
+
+Variables: per-tier batch counts c_S, c_M, c_L.
+Constraints: correct classification of each batch.
+Objective: Skip kernel launches when their tier is empty; reduce launch overhead floor.
+
+Strategy: Add a tiny classify_kernel that reads seq_lens[b] and increments atomic counters + writes lists of batch indices per tier into device buffers. Host issues each tier kernel over its list only (use cudaMemcpyAsync of counters OR use cudaGraph). Simpler alternative: launch tier kernels with grid=batch_size but early-return — this is already what parent does; overhead is low. Better: use CUDA graphs to amortize launch overhead across 6+ kernels per call.
+
+Validity: classification is deterministic; per-batch tier determined by L only.
+
+Why: Parent summary notes "6 kernels per call" is the floor. CUDA graphs can cut launch overhead 5-10x.
+Advantage: Orthogonal to algorithmic changes; low risk.
+Disadvantage: Benefit is only ~0.005-0.010ms (launch overhead), smaller than fusion gain. CUDA graph setup is tricky with variable batch_size.

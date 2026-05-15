@@ -1,0 +1,173 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Surpass the current lineage best (`8e3c776e`, score=1.5395, 15.40x speedup, 1.523ms) while guaranteeing we NEVER regress below 15.34x. The parent `105fe0b8` (11.66x) is a weaker cousin; we must cross-lineage-import the proven-best kernel from `8e3c776e` verbatim and then add carefully chosen new autotune configs that can only improve (never hurt) performance.
+
+**Selected Outline:** Plan 1 — Adopt `8e3c776e` verbatim as a guaranteed floor + expand GEMM1/GEMM2 autotune with 2 safe new configs.
+
+**Rationale for Selection:**
+1. **Plan 1 has a mathematically guaranteed floor of 15.34x**: Since all configs from `8e3c776e` are preserved, the autotuner can always select a known-good config. Adding new configs can only help (autotuner picks the best).
+2. **Plan 2 (Split-K with atomics)** carries real correctness risk (FP8 + atomic FP32 accumulation interaction) and touches the hottest kernel in the pipeline. Too risky for a single iteration.
+3. **Plan 3 (Fused Triton routing)** would require re-implementing fragile DeepSeek no-aux topk math in Triton. Correctness risk is severe; even a 5-15% upside doesn't justify the crash probability.
+4. **Cross-lineage insight**: The parent `105fe0b8` (11.66x) is far behind the global best `8e3c776e` (15.40x). Strategic planning REQUIRES using the global frontier, not the local parent, as our base.
+
+---
+
+## Phase 1: Mathematical Definition
+
+**Variables:**
+- `T`: token count; `E_local=32`; `H=7168`; `I=2048`
+- Tile dims: `BLOCK_M ∈ {16,32,64,128,256}`, `BLOCK_N=128`, `BLOCK_K=128`
+- Per-tile scalar quantization: `c_scale = max(|c|)/448.0` (NO axis arg)
+- `c_fp8 = (c/c_scale).to(tl.float8e4nv)`
+
+**Complete MoE math (preserved from 8e3c776e):**
+```
+G1[j,n] = Σ_k( hidden[tok[j],k] * W1[e,n,k] ) * h_scale[k//128,tok[j]] * w1_scale[e,n//128,k//128]
+C[j,i]  = G1[j,i] * G1[j,I+i] * sigmoid(G1[j,I+i])
+O[j,h]  = Σ_i( C_fp8[j,i]*c_scale * W2[e,h,i]) * w2_scale[e,h//128,i//128]
+       = dot(C_fp8, W2_fp8)[j,h] * c_scale * w2_scale   (both scalars → exact)
+Y[tok[j],h] += routing_weight[j] * O[j,h]
+```
+
+**Constraints (hard, must hold):**
+- C1: `BLOCK_N=128` for ALL GEMM2 configs (enables `n_block_idx=pid_n` shortcut)
+- C2: `BLOCK_K=128` strictly (one K-tile = one 128-block scale)
+- C3: `pid_e.to(tl.int64)` before every stride multiply (int32 overflow prevention)
+- C4: `tl.max(tl.abs(c))` NO axis argument (scalar, not vector)
+- C5: `torch.zeros` (not `torch.empty`) for G1, O, output
+- C6: `(start_idx + m_offs).to(tl.int64)` for output row offsets
+
+---
+
+## Phase 2: The Optimization Loop
+
+**Step A: Import `8e3c776e` verbatim as base.** Copy:
+- `grouped_gemm1_kernel` (13 autotune configs including BLOCK_M=256 num_warps=8/16 num_stages=3)
+- `grouped_gemm2_kernel` (12 configs, FP8 TC path via `tl.float8e4nv`)
+- `_route_tokens` (proven correct DeepSeek routing)
+- `run()` driver (CSR dispatch, index_add_ scatter)
+
+DO NOT MODIFY any of the above. This guarantees floor = 15.34x (lower bound across benchmark noise).
+
+**Step B: Add 2 new autotune configs to EACH kernel (safe additions):**
+
+For GEMM1 autotune list, append:
+```python
+triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=8, num_stages=4),  # deeper pipeline for wide tiles
+triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=16, num_stages=3), # high warp count, low stages
+```
+
+For GEMM2 autotune list, append the SAME 2 configs:
+```python
+triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=8, num_stages=4),
+triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=16, num_stages=3),
+```
+
+Rationale:
+- `BLOCK_M=256, num_stages=4`: The parent 8e3c776e has BLOCK_M=256 only with num_stages=3. Deeper pipeline (4 stages) may better hide DRAM latency for prefill workloads.
+- `BLOCK_M=128, num_warps=16, num_stages=3`: 8e3c776e has `num_warps=16, num_stages=4`. The `num_stages=3` variant uses less SMEM, potentially higher occupancy.
+
+These are purely additive; autotuner benchmarks each and picks the best.
+
+**Step C: Do NOT change GEMM2 kernel body.** Keep `tl.float8e4nv` alias (proven working). Keep `tl.max(tl.abs(c))` scalar. Keep `tl.range()` pipelining.
+
+---
+
+## Phase 3: The "Safety Valve" (CRITICAL)
+
+**S1. Floor guarantee via config preservation.** All 13 GEMM1 + 12 GEMM2 configs from `8e3c776e` are preserved verbatim. The Triton autotuner always benchmarks all configs for the given `MAX_TK` key and selects the minimum-latency one. Therefore kernel_latency ≤ latency_of(best 8e3c776e config) for every workload. Floor: score ≥ 1.5338 (minus ~0.01 benchmark noise).
+
+**S2. Correctness-preserving kernel body.** We do NOT modify any kernel body — only the `configs=[...]` list inside `@triton.autotune`. Triton autotune configs are semantically transparent: they cannot cause correctness failures, only performance differences or compile-time errors (which cause the autotuner to silently drop that config from the pool).
+
+**S3. Compile-failure safety.** If either of the 2 new configs fails to compile (e.g., register spill at BLOCK_M=256,num_stages=4 due to insufficient SMEM on some architectures), Triton's autotune mechanism silently excludes them and selects from the remaining configs. There is NO crash path.
+
+**S4. Explicit anti-regression checklist for executor:**
+- [ ] GEMM1 configs list: 13 original + 2 new = 15 configs
+- [ ] GEMM2 configs list: 12 original + 2 new = 14 configs
+- [ ] GEMM2 kernel body: uses `tl.float8e4nv` (NOT `tl.float8_e4m3fn`)
+- [ ] `c_abs_max = tl.max(tl.abs(c))` — NO axis argument
+- [ ] `tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32)` — both operands FP8
+- [ ] K-loop uses `tl.range(0, I, BLOCK_K)` and `tl.range(0, H, BLOCK_K)` (NOT plain range)
+- [ ] `pid_e.to(tl.int64)` before all expert-stride multiplies
+- [ ] `n_block_idx = pid_n` (valid since ALL configs have BLOCK_N=128 — verify all 14)
+- [ ] `_route_tokens` copied verbatim from 8e3c776e
+- [ ] `run()` copied verbatim from 8e3c776e
+
+**S5. Edge-case fallbacks (inherited from 8e3c776e):**
+```python
+if routed is None or Tk_total == 0 or max_count == 0:
+    return torch.zeros((T, H), dtype=torch.bfloat16, device=device)
+```
+
+---
+
+## Phase 4: Implementation Details
+
+**Libraries:** `torch`, `triton`, `triton.language as tl` only.
+
+**Exact file layout (single .py):**
+1. `@triton.autotune` + `@triton.jit grouped_gemm1_kernel` — verbatim from 8e3c776e, autotune list = 13 originals + 2 new (total 15)
+2. `@triton.autotune` + `@triton.jit grouped_gemm2_kernel` — verbatim from 8e3c776e, autotune list = 12 originals + 2 new (total 14)
+3. `def _route_tokens(...)` — verbatim from 8e3c776e
+4. `@torch.no_grad() def run(...)` — verbatim from 8e3c776e
+
+**Exact GEMM1 autotune list (15 configs):**
+```python
+configs=[
+    triton.Config({"BLOCK_M": 16,  "BLOCK_N": 128}, num_warps=4,  num_stages=4),
+    triton.Config({"BLOCK_M": 32,  "BLOCK_N": 128}, num_warps=4,  num_stages=4),
+    triton.Config({"BLOCK_M": 32,  "BLOCK_N": 128}, num_warps=4,  num_stages=5),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128}, num_warps=4,  num_stages=3),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128}, num_warps=4,  num_stages=4),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128}, num_warps=4,  num_stages=5),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 64},  num_warps=4,  num_stages=4),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8,  num_stages=3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8,  num_stages=4),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8,  num_stages=5),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=16, num_stages=4),
+    triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=8,  num_stages=3),
+    triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=16, num_stages=3),
+    # === NEW (2 additions) ===
+    triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=8,  num_stages=4),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=16, num_stages=3),
+],
+key=["MAX_TK"],
+```
+
+**Exact GEMM2 autotune list (14 configs):**
+```python
+configs=[
+    triton.Config({"BLOCK_M": 16,  "BLOCK_N": 128}, num_warps=4,  num_stages=4),
+    triton.Config({"BLOCK_M": 32,  "BLOCK_N": 128}, num_warps=4,  num_stages=4),
+    triton.Config({"BLOCK_M": 32,  "BLOCK_N": 128}, num_warps=4,  num_stages=5),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128}, num_warps=4,  num_stages=3),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128}, num_warps=4,  num_stages=4),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128}, num_warps=4,  num_stages=5),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8,  num_stages=3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8,  num_stages=4),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8,  num_stages=5),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=16, num_stages=4),
+    triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=8,  num_stages=3),
+    triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=16, num_stages=3),
+    # === NEW (2 additions) ===
+    triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=8,  num_stages=4),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=16, num_stages=3),
+],
+key=["MAX_TK"],
+```
+
+**Verify BLOCK_N=128 for ALL 14 GEMM2 configs:** ✓ (manual check — every entry has BLOCK_N: 128)
+
+**Executor directive — use the EXACT source of `8e3c776e`:** When retrieving, reference solution_id `8e3c776e` for the complete kernel bodies. The ONLY modification is appending the 2 new Config entries to each autotune list.
+
+---
+
+## Expected Performance Improvement
+
+- **Floor (guaranteed):** score ≥ 1.5338 (15.34x), since all 8e3c776e configs preserved
+- **Expected:** score ~1.55–1.60 (15.5–16.0x), if either new config wins on any of the 19 workloads
+- **Upside mechanism:** `num_stages=4` at BLOCK_M=256 may better pipeline GEMM1's K=7168 loop (56 iterations). The `num_warps=16, num_stages=3` variant trades pipeline depth for higher warp occupancy.
+- **Kernel latency target:** 1.45–1.50ms (from 1.523ms)
+- **No randomness:** Triton autotune is deterministic benchmarking across the config set.
+
+This plan relies on math (Triton autotune guarantees minimum over a superset), not luck. It is code-ready: the executor copies `8e3c776e` verbatim and appends 4 lines total (2 per kernel).

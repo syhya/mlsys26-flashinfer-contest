@@ -1,0 +1,20 @@
+### Outline 3: Two-Stage Streaming Kernel with Direct Global Loads and Deterministic Reducer
+
+**Mathematical Formulation**
+- **Variables (X):** sparse tile size Ktile in {16,32,64}; whether to stage Kc/Kp in shared memory or stream directly from global memory; number of partial passes P; vectorized load width v=16 bytes; reduction topology R.
+- **Constraints (C):** exact FP32 dot and online softmax algebra; no reads for invalid indices; explicit BF16 conversions only; fixed output shapes and ABI.
+- **Objective f(X):** minimize memory traffic and synchronization cost, especially in the small path.
+
+**Solver Strategy**
+- Deterministic architecture selection: compare two fixed topologies conceptually and choose direct-stream partial computation plus exact reducer.
+- This is a bounded structural optimization, not stochastic search.
+
+**Validity Mechanism**
+- Every partial pass computes exact (m,l,O) on its assigned subset.
+- Final reducer merges partial states exactly and performs the only normalization step.
+- If direct-stream alignment/vectorization predicates fail, fallback to parent shared-memory staging code path.
+
+**Why this solution?**
+- **Expected improvement:** lower shared-memory footprint and fewer synchronizations for some workloads.
+- **Advantages:** potential simplification of loads; may increase occupancy.
+- **Disadvantages:** highest performance uncertainty; direct global streaming may regress due to cache misses; more likely to underperform the strong incumbent.

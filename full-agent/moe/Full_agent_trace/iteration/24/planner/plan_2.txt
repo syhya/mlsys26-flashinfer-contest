@@ -1,0 +1,51 @@
+Plan 2: Hybrid torch._scaled_mm with Triton Routing Fusion
+
+**Mathematical Formulation:**
+
+Variables:
+- X = {expert dispatch structure, GEMM backend selection per expert}
+- For each expert e with Tk_e routed tokens:
+  - If Tk_e >= threshold (e.g., 64): use torch._scaled_mm (cuBLAS FP8)
+  - If Tk_e < threshold: use exact PyTorch dequant + torch.mm
+  
+Constraints:
+- torch._scaled_mm requires specific scale tensor layouts
+- Must handle variable Tk_e per expert (some may be 0)
+- Final accumulation must be deterministic (use index_add_)
+- All intermediate results in FP32 before final bf16 cast
+
+Objective:
+- Minimize total latency while guaranteeing correctness
+- Leverage cuBLAS optimized FP8 kernels for large batches
+- Avoid custom Triton GEMM bugs by using PyTorch native ops
+
+**Solver Strategy:**
+1. Use vectorized PyTorch for routing (no change from parent)
+2. Build CSR dispatch on GPU (no change)
+3. For GEMM1:
+   - Attempt torch._scaled_mm with proper scale tensor reshaping
+   - If unsupported layout, fall back to per-expert torch.mm with exact dequant
+4. For SwiGLU: simple PyTorch ops (silu + multiply)
+5. For GEMM2:
+   - Same adaptive strategy as GEMM1
+   - Apply routing weights before scatter-add
+
+**Validity Mechanism:**
+1. Pre-flight check: validate torch._scaled_mm is available and supports required dtypes
+2. Per-expert shape validation before each GEMM call
+3. Catch any torch._scaled_mm exceptions and fall back to exact dequant path
+4. Final output shape/dtype assertion
+5. Deterministic fallback: if any step fails, run full exact PyTorch oracle
+
+**Why this solution:**
+- Advantages: Eliminates custom Triton bugs by using battle-tested PyTorch/cuBLAS; torch._scaled_mm may be faster than hand-written Triton for large matrices; simpler codebase
+- Disadvantages: torch._scaled_mm may have restrictive scale tensor layout requirements; may not support block-scale convention directly; could be slower than optimized Triton for small batches
+- Expected improvement: Score 0.6-0.8 by trading peak performance for reliability
+
+**Implementation Libraries:**
+- torch (all operations)
+- torch._scaled_mm (FP8 cuBLAS backend)
+- No triton needed (reduces complexity)
+- No external solvers
+
+**Randomness:** None - deterministic algorithm

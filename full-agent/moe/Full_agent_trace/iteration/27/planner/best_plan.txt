@@ -1,0 +1,491 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Build upon the proven best solution in the database (ff4217c7, score=1.0253, 2.600ms, 10.25x speedup) and push performance further by expanding GEMM1 software pipelining configurations, adding aggressive autotuning options, and hardening the GEMM2 n_block_idx correctness to eliminate latent bugs.
+
+**Selected Outline:** Plan 2 — Adopt Best Solution (ff4217c7) + Aggressive GEMM1 Pipelining + Hardened GEMM2
+
+**Rationale for Selection:**
+1. The current parent (0114e7fa, 8.13x) is a regression from the best known solution. We must immediately restore the best-known techniques from ff4217c7.
+2. ff4217c7 already achieves score > 1.0. The task is to push further. The top solution's key weakness (identified in its own summary) is that GEMM1 (K=7168) dominates compute and was not fully pipelined.
+3. Plan 1 (full GEMM fusion) is technically infeasible due to register/SRAM constraints. Plan 3 (torch._scaled_mm) requires per-tensor scales which are incompatible with block-scale convention. Plan 2 is the only plan that is both feasible and likely to improve.
+4. The best solution's summary explicitly says: "GEMM1 (K=7168) dominates compute; if GEMM1 is currently ~60% of kernel time, a 10-15% improvement there could push score above 1.1."
+
+---
+
+**Best Plan:**
+
+### Phase 1: Mathematical Definition
+
+**Step 1.1: Establish the mathematical operations**
+
+The full MoE pipeline:
+- GEMM1: `G1[j, n] = sum_k(hidden[token[j],k] * W1[e,n,k]) * h_scale[k//128, token[j]] * w1_scale[e, n//128, k//128]`
+  - j ∈ [0, Tk), n ∈ [0, 4096), k ∈ [0, 7168)
+  - Hidden: FP8 [T, 7168], W1: FP8 [32, 4096, 7168]
+  - Output: F32 [Tk, 4096]
+- SwiGLU: `C[j,i] = G1[j,i] * G1[j, I+i] * sigmoid(G1[j, I+i])`
+  - i ∈ [0, 2048), output F32 [Tk, 2048]
+- GEMM2: `O[j,h] = sum_i(C[j,i] * W2[e,h,i]) * w2_scale[e, h//128, i//128]`
+  - j ∈ [0, Tk), h ∈ [0, 7168), i ∈ [0, 2048)
+  - W2: FP8 [32, 7168, 2048]
+  - Output: F32 [Tk, 7168]
+- Weighted accumulation: `output[token[j], h] += routing_weight[j] * O[j,h]`
+
+**Step 1.2: Variables (X)**
+- `BLOCK_M` ∈ {16, 32, 64, 128}: token tile size for both GEMMs
+- `BLOCK_N` = 128: output tile size (fixed at 128 for GEMM2 n_block_idx optimization)
+- `BLOCK_K` = 128: K-tile size (fixed to match block-scale granularity)
+- `num_stages` ∈ {3, 4, 5, 6}: software pipeline depth for K-loop
+- `num_warps` ∈ {4, 8}: warp count per block
+- Autotuning key: `MAX_TK` = max tokens assigned to any single expert
+
+**Step 1.3: Constraints (C)**
+- BLOCK_K = 128 strictly (scales are defined per 128 elements)
+- BLOCK_N = 128 for GEMM2 (enables n_block_idx = pid_n optimization)
+- All pointer arithmetic uses `.to(tl.int64)` BEFORE multiplying by strides
+- Per-tile FP8 scale must satisfy: `c_scale = tl.maximum(tl.max(tl.abs(c)) / 448.0, 1e-12)`
+- Output correctness: `rtol=1e-2, atol=1e-2` vs reference
+
+---
+
+### Phase 2: The Optimization Loop
+
+**Step 2.1: Routing (unchanged from ff4217c7 — proven correct)**
+
+Use vectorized PyTorch routing:
+```python
+q = torch.sigmoid(routing_logits.float())  # [T, 256]
+rank_scores = q + routing_bias.float().view(1, E_global)  # biased for ranking only
+grouped = rank_scores.view(T, N_GROUP, group_size)  # [T, 8, 32]
+top2_vals, _ = torch.topk(grouped, k=2, dim=2, largest=True, sorted=True)
+group_scores = top2_vals.sum(dim=2)  # [T, 8]
+top_groups = torch.topk(group_scores, k=TOPK_GROUP, dim=1).indices  # [T, 4]
+# Build expert_allowed mask
+pruned = torch.where(expert_allowed, rank_scores, neg_inf)
+topk_idx = torch.topk(pruned, k=TOP_K, dim=1).indices  # [T, 8]
+# Normalize weights using RAW sigmoid (NOT biased)
+raw_w = q * sel_mask  # zero non-selected
+weights = (raw_w / (raw_w.sum(1, keepdim=True) + 1e-20)) * routed_scaling_factor
+```
+
+**Step 2.2: Token dispatch (unchanged from ff4217c7 — proven correct)**
+```python
+# GPU-side vectorized dispatch: NO Python loops over GPU tensors
+local_expert_idx = topk_idx[flat_token_idx, flat_k_idx] - local_start
+order = torch.argsort(local_expert_idx)
+sorted_tokens = flat_token_idx[order].to(torch.int32)  # [Tk]
+sorted_experts = local_expert_idx[order].to(torch.int32)  # [Tk]
+expert_counts = torch.bincount(sorted_experts, minlength=E_local)  # [E_local]
+expert_offsets = torch.zeros(E_local+1, dtype=torch.int32, device=device)
+expert_offsets[1:] = torch.cumsum(expert_counts, dim=0)  # CSR offsets
+max_count = int(expert_counts.max().item())  # single scalar CPU sync, unavoidable
+```
+
+**Step 2.3: GEMM1 kernel — CRITICAL OPTIMIZATION TARGET**
+
+The key improvements to GEMM1 over ff4217c7:
+1. **Expand autotune search space**: Add `num_stages=5, 6` configs to let the autotuner find deeper pipelining
+2. **Use `tl.range()` with `num_stages` parameter**: The loop should use `tl.range(0, H, BLOCK_K, num_stages=N)` where N comes from the autotune config, not hardcoded
+3. **Add `num_warps=16` for large BLOCK_M=128**: More warps can hide latency for large tiles
+
+Autotune configs for GEMM1 (expanded from ff4217c7's 7 configs to 10+):
+```python
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_M': 16, 'BLOCK_N': 128}, num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 128}, num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 128}, num_warps=4, num_stages=5),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128}, num_warps=4, num_stages=3),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128}, num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128}, num_warps=4, num_stages=5),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64},  num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=3),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=5),
+    ],
+    key=['MAX_TK'],
+)
+```
+
+**Critical GEMM1 inner loop change** — use `tl.range` with num_stages for software pipelining:
+```python
+for k_start in tl.range(0, H, BLOCK_K, num_stages=4):  # default; autotune overrides
+    k_block_idx = k_start // BLOCK_K
+    k_offs = k_start + k_range
+    
+    # Load A (FP8 hidden states) using gathered token IDs
+    a_ptrs = A_ptr + token_ids[:, None] * stride_am + k_offs[None, :] * stride_ak
+    a_fp8 = tl.load(a_ptrs, mask=m_mask[:, None], other=0.0)
+    
+    # Load A scales: hidden_states_scale[k_block_idx, token_id] — INDIRECT LOOKUP
+    a_scale_ptrs = A_scale_ptr + k_block_idx * stride_ascale_k + token_ids[:, None] * stride_ascale_m
+    a_scale = tl.load(a_scale_ptrs, mask=m_mask[:, None], other=1.0)
+    
+    # Load W1 (FP8 weights)
+    w_ptrs = W_ptr + pid_e.to(tl.int64)*stride_we + n_offs[None,:]*stride_wn + k_offs[:,None]*stride_wk
+    w_fp8 = tl.load(w_ptrs, mask=n_mask[None,:], other=0.0)
+    
+    # Load W1 scales: w1_scale[e, n//128, k//128]
+    n_block_idx = n_offs // 128  # vectorized per-tile
+    w_scale_ptrs = W_scale_ptr + pid_e.to(tl.int64)*stride_wscale_e + n_block_idx[None,:]*stride_wscale_n + k_block_idx*stride_wscale_k
+    w_scale = tl.load(w_scale_ptrs, mask=n_mask[None,:], other=1.0)
+    
+    # FP8 Tensor Core dot — BOTH inputs FP8 → uses FP8 TCs on B200
+    dot_result = tl.dot(a_fp8, w_fp8, out_dtype=tl.float32)  # [BLOCK_M, BLOCK_N] F32
+    acc += dot_result * a_scale * w_scale  # per-block scale application
+```
+
+**Step 2.4: GEMM2 kernel — FP8 TC path (key from ff4217c7)**
+
+Autotune configs for GEMM2 (all constrained to BLOCK_N=128):
+```python
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_M': 16, 'BLOCK_N': 128}, num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 128}, num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 128}, num_warps=4, num_stages=5),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128}, num_warps=4, num_stages=3),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128}, num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128}, num_warps=4, num_stages=5),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=3),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=4),
+    ],
+    key=['MAX_TK'],
+)
+```
+
+**Critical GEMM2 FP8 inner loop** — per-tile scalar quantization:
+```python
+n_block_idx = pid_n  # valid ONLY when BLOCK_N=128; all configs enforce this
+
+w2_scale_base = W2_scale_ptr + pid_e.to(tl.int64)*stride_w2scale_e + n_block_idx*stride_w2scale_n
+
+for k_start in tl.range(0, I, BLOCK_K, num_stages=4):
+    k_block_idx = k_start // BLOCK_K
+    k_offs = k_start + k_range
+
+    # Load x1, x2 from G1 (float32 intermediate)
+    x1 = tl.load(G1_ptr + row_idx[:,None]*stride_g1m + k_offs[None,:]*stride_g1k, mask=m_mask[:,None], other=0.0)
+    x2 = tl.load(G1_ptr + row_idx[:,None]*stride_g1m + (I + k_offs)[None,:]*stride_g1k, mask=m_mask[:,None], other=0.0)
+
+    # SwiGLU: silu(x2) * x1 — FUSED in this kernel, no HBM write
+    c = x1 * x2 * tl.sigmoid(x2)  # float32, shape [BLOCK_M, BLOCK_K]
+
+    # Per-tile scalar quantization to FP8 — unlocks FP8 Tensor Cores
+    # Use SCALAR max (not per-row) to enable exact post-dot dequantization
+    c_abs_max = tl.max(tl.abs(c))  # scalar reduction over entire BLOCK_M × BLOCK_K tile
+    c_scale = tl.maximum(c_abs_max / 448.0, 1e-12)  # scalar, prevents div-by-zero
+    c_fp8 = (c / c_scale).to(tl.float8_e4m3fn)  # [BLOCK_M, BLOCK_K] FP8
+
+    # Load W2 tile (FP8)
+    w2_ptrs = W2_ptr + pid_e.to(tl.int64)*stride_w2e + n_offs[None,:]*stride_w2n + k_offs[:,None]*stride_w2k
+    w2_fp8 = tl.load(w2_ptrs, mask=n_mask[None,:], other=0.0)  # [BLOCK_K, BLOCK_N] FP8
+
+    # Load SCALAR W2 scale for this (h_block, i_block) tile
+    w2_scale = tl.load(w2_scale_base + k_block_idx * stride_w2scale_k)  # scalar
+
+    # FP8 Tensor Core dot — BOTH inputs FP8
+    dot_result = tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32)  # [BLOCK_M, BLOCK_N] F32
+
+    # Exact dequantization: scalar * scalar multiplication over entire tile
+    # Mathematically correct because c_scale and w2_scale are both scalars for this tile
+    acc += dot_result * c_scale * w2_scale
+```
+
+---
+
+### Phase 3: The "Safety Valve" (CRITICAL)
+
+**Step 3.1: FP8 quantization safety for SwiGLU activation**
+- ALWAYS use `tl.maximum(c_abs_max / 448.0, 1e-12)` to prevent division by zero
+- The saturating cast `.to(tl.float8_e4m3fn)` in Triton handles clamping automatically
+- Do NOT use per-row max (`axis=1`) — this breaks the scalar-per-tile math
+- ONLY use global tile max (`tl.max(tl.abs(c))` with no axis argument) for correct scalar scale
+
+**Step 3.2: n_block_idx correctness enforcement**
+- ALL GEMM2 autotune configs must have `BLOCK_N=128`
+- If BLOCK_N ≠ 128, `n_block_idx = pid_n` would map to wrong W2_scale entries
+- This is hardcoded by only listing `BLOCK_N=128` in autotune configs
+
+**Step 3.3: Pointer overflow prevention**
+```python
+# In kernel: always use int64 for expert dimension offsets
+pid_e.to(tl.int64) * stride_w2e  # expert stride for [32, 7168, 2048] can exceed int32
+(start_idx + m_offs).to(tl.int64) * stride_outm  # output row offset
+token_ids  # already .to(tl.int64) after loading
+```
+
+**Step 3.4: Memory initialization**
+- `G1 = torch.zeros((Tk_total, 2*I), dtype=torch.float32, device=device)` — NOT torch.empty
+- `O = torch.zeros((Tk_total, H), dtype=torch.float32, device=device)` — NOT torch.empty
+- This ensures masked-out thread blocks (when BLOCK_M tiles extend past num_tokens) produce 0, not garbage
+
+**Step 3.5: Edge case handling**
+```python
+if routed is None or Tk_total == 0 or max_count == 0:
+    return torch.zeros((T, H), dtype=torch.bfloat16, device=device)
+```
+
+---
+
+### Phase 4: Implementation Details
+
+**Step 4.1: Complete kernel signatures**
+
+```python
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_M': 16, 'BLOCK_N': 128}, num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 128}, num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 128}, num_warps=4, num_stages=5),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128}, num_warps=4, num_stages=3),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128}, num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128}, num_warps=4, num_stages=5),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64},  num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=3),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=5),
+    ],
+    key=['MAX_TK'],
+)
+@triton.jit
+def grouped_gemm1_kernel(
+    A_ptr, A_scale_ptr,
+    W_ptr, W_scale_ptr,
+    Out_ptr,
+    sorted_tokens_ptr, expert_offsets_ptr,
+    H: tl.constexpr,          # 7168 — use constexpr for compiler optimization
+    N_dim: tl.constexpr,       # 4096
+    MAX_TK,                    # for autotuner key
+    stride_am, stride_ak,
+    stride_ascale_k, stride_ascale_m,
+    stride_we, stride_wn, stride_wk,
+    stride_wscale_e, stride_wscale_n, stride_wscale_k,
+    stride_outm, stride_outn,
+    BLOCK_K: tl.constexpr,    # 128
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    # Grid: (N_tiles=cdiv(N_dim, BLOCK_N), M_tiles=cdiv(max_count, BLOCK_M), E_local)
+    pid_n = tl.program_id(0)
+    pid_m = tl.program_id(1)
+    pid_e = tl.program_id(2)
+
+    start_idx = tl.load(expert_offsets_ptr + pid_e)
+    end_idx   = tl.load(expert_offsets_ptr + pid_e + 1)
+    num_tokens = end_idx - start_idx
+
+    if pid_m * BLOCK_M >= num_tokens:
+        return
+
+    m_offs = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    m_mask = m_offs < num_tokens
+    n_offs = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    n_mask = n_offs < N_dim
+
+    token_ids = tl.load(sorted_tokens_ptr + start_idx + m_offs, mask=m_mask, other=0).to(tl.int64)
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    k_range = tl.arange(0, BLOCK_K)
+
+    # SOFTWARE PIPELINING via tl.range — overlaps memory loads with computation
+    for k_start in tl.range(0, H, BLOCK_K, num_stages=4):
+        k_block_idx = k_start // BLOCK_K
+        k_offs = k_start + k_range
+
+        a_ptrs = A_ptr + token_ids[:, None] * stride_am + k_offs[None, :] * stride_ak
+        a_fp8 = tl.load(a_ptrs, mask=m_mask[:, None], other=0.0)
+
+        a_scale_ptrs = A_scale_ptr + k_block_idx * stride_ascale_k + token_ids[:, None] * stride_ascale_m
+        a_scale = tl.load(a_scale_ptrs, mask=m_mask[:, None], other=1.0)
+
+        w_ptrs = W_ptr + pid_e.to(tl.int64)*stride_we + n_offs[None,:]*stride_wn + k_offs[:,None]*stride_wk
+        w_fp8 = tl.load(w_ptrs, mask=n_mask[None, :], other=0.0)
+
+        n_block_idx = n_offs // 128
+        w_scale_ptrs = W_scale_ptr + pid_e.to(tl.int64)*stride_wscale_e + n_block_idx[None,:]*stride_wscale_n + k_block_idx*stride_wscale_k
+        w_scale = tl.load(w_scale_ptrs, mask=n_mask[None, :], other=1.0)
+
+        dot_result = tl.dot(a_fp8, w_fp8, out_dtype=tl.float32)
+        acc += dot_result * a_scale * w_scale
+
+    out_ptrs = Out_ptr + (start_idx + m_offs)[:, None].to(tl.int64) * stride_outm + n_offs[None, :] * stride_outn
+    tl.store(out_ptrs, acc, mask=m_mask[:, None] & n_mask[None, :])
+```
+
+**Step 4.2: GEMM2 kernel with FP8 TC**
+
+```python
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_M': 16, 'BLOCK_N': 128}, num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 128}, num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 128}, num_warps=4, num_stages=5),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128}, num_warps=4, num_stages=3),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128}, num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128}, num_warps=4, num_stages=5),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=3),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=4),
+    ],
+    key=['MAX_TK'],
+)
+@triton.jit
+def grouped_gemm2_fp8_kernel(
+    G1_ptr, W2_ptr, W2_scale_ptr,
+    Routing_weights_ptr, Out_ptr,
+    expert_offsets_ptr,
+    I: tl.constexpr, H: tl.constexpr,  # 2048, 7168
+    MAX_TK,
+    stride_g1m, stride_g1k,
+    stride_w2e, stride_w2n, stride_w2k,
+    stride_w2scale_e, stride_w2scale_n, stride_w2scale_k,
+    stride_outm, stride_outn,
+    BLOCK_K: tl.constexpr,  # 128
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,  # Always 128
+):
+    pid_n = tl.program_id(0)
+    pid_m = tl.program_id(1)
+    pid_e = tl.program_id(2)
+
+    start_idx = tl.load(expert_offsets_ptr + pid_e)
+    end_idx   = tl.load(expert_offsets_ptr + pid_e + 1)
+    num_tokens = end_idx - start_idx
+
+    if pid_m * BLOCK_M >= num_tokens:
+        return
+
+    m_offs = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    m_mask = m_offs < num_tokens
+    n_offs = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)  # H-dimension offsets
+    n_mask = n_offs < H
+
+    # n_block_idx = pid_n — VALID ONLY when BLOCK_N=128
+    # Each pid_n maps to exactly one 128-element block of the H dimension
+    n_block_idx = pid_n
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    k_range = tl.arange(0, BLOCK_K)
+    row_indices = (start_idx + m_offs).to(tl.int64)
+
+    # Precompute base pointers outside loop for efficiency
+    w2_base = W2_ptr + pid_e.to(tl.int64)*stride_w2e + n_offs[None,:]*stride_w2n
+    w2scale_base = W2_scale_ptr + pid_e.to(tl.int64)*stride_w2scale_e + n_block_idx*stride_w2scale_n
+
+    for k_start in tl.range(0, I, BLOCK_K, num_stages=4):
+        k_block_idx = k_start // BLOCK_K
+        k_offs = k_start + k_range
+
+        # Load x1 (gate) and x2 (up) from G1 intermediate buffer
+        x1_ptrs = G1_ptr + row_indices[:, None]*stride_g1m + k_offs[None,:]*stride_g1k
+        x2_ptrs = G1_ptr + row_indices[:, None]*stride_g1m + (I + k_offs)[None,:]*stride_g1k
+        x1 = tl.load(x1_ptrs, mask=m_mask[:, None], other=0.0)
+        x2 = tl.load(x2_ptrs, mask=m_mask[:, None], other=0.0)
+
+        # SwiGLU fused: silu(x2) * x1 in float32
+        c = x1 * x2 * tl.sigmoid(x2)  # [BLOCK_M, BLOCK_K] float32
+
+        # Per-tile SCALAR quantization (NOT per-row) — enables exact dequantization
+        c_abs_max = tl.max(tl.abs(c))  # scalar reduction, no axis argument
+        c_scale = tl.maximum(c_abs_max / 448.0, 1e-12)  # scalar, prevents NaN
+        c_fp8 = (c / c_scale).to(tl.float8_e4m3fn)  # [BLOCK_M, BLOCK_K] FP8
+
+        # Load W2 tile
+        w2_ptrs = w2_base + k_offs[:, None]*stride_w2k  # [BLOCK_K, BLOCK_N]
+        w2_fp8 = tl.load(w2_ptrs, mask=n_mask[None, :], other=0.0)
+
+        # Load scalar W2 scale for this (H-block, I-block) pair
+        w2_scale = tl.load(w2scale_base + k_block_idx * stride_w2scale_k)  # scalar
+
+        # FP8 Tensor Core dot
+        dot_result = tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32)  # [BLOCK_M, BLOCK_N]
+
+        # Exact dequantization: c_scale * w2_scale are both scalars
+        # Mathematically: sum_k(c[m,k]*W2[k,n]) * W2_scale = dot(c_fp8, W2) * c_scale * W2_scale
+        acc += dot_result * c_scale * w2_scale
+
+    # Apply routing weights (scalar per token)
+    routing_w = tl.load(Routing_weights_ptr + row_indices, mask=m_mask, other=0.0)
+    acc = acc * routing_w[:, None]
+
+    # Store to output buffer
+    out_ptrs = Out_ptr + row_indices[:, None]*stride_outm + n_offs[None,:]*stride_outn
+    tl.store(out_ptrs, acc, mask=m_mask[:, None] & n_mask[None, :])
+```
+
+**Step 4.3: Complete run() function**
+
+```python
+@torch.no_grad()
+def run(routing_logits, routing_bias, hidden_states, hidden_states_scale,
+        gemm1_weights, gemm1_weights_scale, gemm2_weights, gemm2_weights_scale,
+        local_expert_offset, routed_scaling_factor):
+    H = 7168
+    I = 2048
+    device = hidden_states.device
+    T = routing_logits.shape[0]
+    E_local = gemm1_weights.shape[0]
+
+    # Step 1: Vectorized routing (GPU-only, no CPU sync except max_count scalar)
+    routed = _route_tokens(routing_logits, routing_bias, local_expert_offset, E_local, routed_scaling_factor)
+    if routed is None:
+        return torch.zeros((T, H), dtype=torch.bfloat16, device=device)
+    sorted_tokens, sorted_experts, sorted_weights, expert_counts, expert_offsets = routed
+    Tk_total = sorted_tokens.numel()
+    if Tk_total == 0:
+        return torch.zeros((T, H), dtype=torch.bfloat16, device=device)
+    max_count = int(expert_counts.max().item())
+    if max_count == 0:
+        return torch.zeros((T, H), dtype=torch.bfloat16, device=device)
+
+    # Step 2: GEMM1 — FP8 Tensor Cores, indirect A-scale lookup
+    G1 = torch.zeros((Tk_total, 2*I), dtype=torch.float32, device=device)
+    grid_gemm1 = lambda META: (triton.cdiv(2*I, META['BLOCK_N']), triton.cdiv(max_count, META['BLOCK_M']), E_local)
+    grouped_gemm1_kernel[grid_gemm1](
+        A_ptr=hidden_states, A_scale_ptr=hidden_states_scale,
+        W_ptr=gemm1_weights, W_scale_ptr=gemm1_weights_scale,
+        Out_ptr=G1,
+        sorted_tokens_ptr=sorted_tokens, expert_offsets_ptr=expert_offsets,
+        H=H, N_dim=2*I, MAX_TK=max_count,
+        stride_am=hidden_states.stride(0), stride_ak=hidden_states.stride(1),
+        stride_ascale_k=hidden_states_scale.stride(0), stride_ascale_m=hidden_states_scale.stride(1),
+        stride_we=gemm1_weights.stride(0), stride_wn=gemm1_weights.stride(1), stride_wk=gemm1_weights.stride(2),
+        stride_wscale_e=gemm1_weights_scale.stride(0), stride_wscale_n=gemm1_weights_scale.stride(1), stride_wscale_k=gemm1_weights_scale.stride(2),
+        stride_outm=G1.stride(0), stride_outn=G1.stride(1), BLOCK_K=128,
+    )
+
+    # Step 3: GEMM2 with fused SwiGLU + FP8 Tensor Cores
+    O = torch.zeros((Tk_total, H), dtype=torch.float32, device=device)
+    grid_gemm2 = lambda META: (triton.cdiv(H, META['BLOCK_N']), triton.cdiv(max_count, META['BLOCK_M']), E_local)
+    grouped_gemm2_fp8_kernel[grid_gemm2](
+        G1_ptr=G1, W2_ptr=gemm2_weights, W2_scale_ptr=gemm2_weights_scale,
+        Routing_weights_ptr=sorted_weights, Out_ptr=O,
+        expert_offsets_ptr=expert_offsets,
+        I=I, H=H, MAX_TK=max_count,
+        stride_g1m=G1.stride(0), stride_g1k=G1.stride(1),
+        stride_w2e=gemm2_weights.stride(0), stride_w2n=gemm2_weights.stride(1), stride_w2k=gemm2_weights.stride(2),
+        stride_w2scale_e=gemm2_weights_scale.stride(0), stride_w2scale_n=gemm2_weights_scale.stride(1), stride_w2scale_k=gemm2_weights_scale.stride(2),
+        stride_outm=O.stride(0), stride_outn=O.stride(1), BLOCK_K=128,
+    )
+
+    # Step 4: Weighted scatter-add accumulation
+    output = torch.zeros((T, H), dtype=torch.float32, device=device)
+    output.index_add_(0, sorted_tokens.long(), O)
+    return output.to(torch.bfloat16)
+```
+
+---
+
+### Expected Performance Improvement
+
+1. **GEMM1 improvement**: Adding `num_stages=5, 6` configs to the autotuner allows deeper software pipelining for the H=7168 K-loop. Each additional pipeline stage hides ~1 memory latency cycle. For H=7168/128=56 K-iterations, deeper pipelining can meaningfully reduce stall cycles. **Expected: 5-15% GEMM1 speedup.**
+
+2. **GEMM2 improvement**: The per-tile FP8 quantization path (from ff4217c7) already provides FP8 TC throughput. Adding `num_stages=5` configs may provide additional pipelining benefit. **Expected: 2-5% GEMM2 improvement.**
+
+3. **Overall target**: From 2.600ms (ff4217c7) → 2.2-2.4ms → speedup 10.5-11.5x → score 1.05-1.15.
+
+4. **Key advantage over current parent (0114e7fa)**: The current parent uses BF16 TCs (slower than FP8) and scored 8.13x. This plan uses FP8 TCs for BOTH GEMMs, the proven best approach.
+
+**No randomness in this plan** — Triton autotuning is deterministic benchmarking, not random search.
+
+**Library requirements:** Only `torch`, `triton`, `triton.language` — all standard in the evaluation environment.

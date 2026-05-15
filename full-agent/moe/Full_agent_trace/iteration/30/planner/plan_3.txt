@@ -1,0 +1,65 @@
+## Plan 3: Deeper Autotune Search + num_warps=16 + Separate num_stages Per Loop
+
+### Mathematical Formulation
+
+**Variables (X):**
+- GEMM1 and GEMM2 remain structurally identical to b550fc5e (BF16/FP32 path in GEMM2)
+- Expand GEMM1 autotune: add num_warps=16 for BLOCK_M=128
+- Expand GEMM2 autotune: add num_warps=16 for BLOCK_M=128
+- No structural changes to kernels
+
+**Constraints (C):**
+Same as b550fc5e (proven correct):
+- tl.range() pipelining in both K-loops
+- FP8 TCs in GEMM1 (unchanged)
+- FP32 dequant in GEMM2 (unchanged from b550fc5e)
+- All correctness guarantees from b550fc5e preserved
+
+**Objective:** Find if num_warps=16 provides additional ILP on B200 for large tiles.
+
+### Solver Strategy
+
+@triton.autotune with expanded configs:
+
+GEMM1 expanded configs (11 configs, adds num_warps=16):
+```
+triton.Config({'BLOCK_M': 16,  'BLOCK_N': 128}, num_warps=4,  num_stages=4),
+triton.Config({'BLOCK_M': 32,  'BLOCK_N': 128}, num_warps=4,  num_stages=4),
+triton.Config({'BLOCK_M': 32,  'BLOCK_N': 128}, num_warps=4,  num_stages=5),
+triton.Config({'BLOCK_M': 64,  'BLOCK_N': 128}, num_warps=4,  num_stages=3),
+triton.Config({'BLOCK_M': 64,  'BLOCK_N': 128}, num_warps=4,  num_stages=4),
+triton.Config({'BLOCK_M': 64,  'BLOCK_N': 128}, num_warps=4,  num_stages=5),
+triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64},  num_warps=4,  num_stages=4),
+triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8,  num_stages=3),
+triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8,  num_stages=4),
+triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8,  num_stages=5),
+triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=16, num_stages=4),
+```
+
+GEMM2 same expansion (10 configs, all BLOCK_N=128).
+
+### Validity Mechanism
+
+Structural code identical to b550fc5e — proven correct, no new risks.
+Additional configs either work or autotuner discards them (benchmarking is safe).
+
+### Why This Solution?
+
+**Expected Performance Improvement:**
+- If num_warps=16 is selected for BLOCK_M=128: ~3-7% improvement on large batches
+- B200 has 128 threads/warp × 8 warps = 1024 threads max per block currently
+  → With num_warps=16: 2048 threads per block (may saturate SM compute)
+- Diminishing returns expected since b550fc5e already at 12.01x
+- Expected: 12.01x → ~12.3-12.5x, score 1.23-1.25
+
+**Advantages:**
+1. Zero correctness risk — identical kernel code
+2. Conservative autotune expansion
+3. Guaranteed not to regress from b550fc5e
+
+**Disadvantages:**
+1. Very limited upside — BF16/FP32 GEMM2 ceiling ~12.5x
+2. Most improvement already extracted by b550fc5e's 10 configs
+3. The 4-5% extra gain from num_warps=16 is uncertain
+4. Does NOT unlock FP8 TCs for GEMM2 (leaves 2x throughput on the table)
+5. Compilation time increases with more configs

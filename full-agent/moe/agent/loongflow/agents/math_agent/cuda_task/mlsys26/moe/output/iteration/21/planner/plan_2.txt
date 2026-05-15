@@ -1,0 +1,81 @@
+### Plan 2: Cached Expert Weight Dequantization with Batched cuBLAS
+
+**Mathematical Formulation:**
+
+Variables:
+- X ∈ R^{T×H}: hidden states (FP8 with block scales)
+- W1_dequant ∈ R^{E×2I×H}: GEMM1 weights dequantized once to FP32
+- W2_dequant ∈ R^{E×H×I}: GEMM2 weights dequantized once to FP32
+- expert_batch_indices ∈ Z^{E}: CSR-style offsets for grouped computation
+- G1 ∈ R^{Tk×2I}: GEMM1 output (FP32)
+- S ∈ R^{Tk×I}: SwiGLU output (FP32)
+- Y ∈ R^{T×H}: final output (BF16)
+
+Constraints:
+1. Dequantize all 32 expert weights ONCE at the start using exact block-scale semantics
+2. For each expert e with token count Tk_e:
+   - Gather hidden states for expert's tokens
+   - Use torch.mm or torch.bmm for GEMM1 (FP32 accumulation)
+   - Compute SwiGLU in FP32
+   - Use torch.mm for GEMM2 (FP32 accumulation)
+3. Hidden state dequantization: only dequant the gathered token rows, not full tensor
+4. All accumulation in FP32, final cast to BF16
+
+Objective:
+- Maximize f(X) = correctness_score, with secondary objective of minimizing latency
+- Primary: max_abs_error <= 1e-2 * reference_max (hard constraint)
+- Secondary: minimize total_latency
+
+**Solver Strategy:**
+
+Use a deterministic sequential algorithm:
+1. **Pre-processing Phase** (one-time per call):
+   - Exact routing using PyTorch ops (proven correct)
+   - Build CSR dispatch structure on GPU (proven correct)
+   - Dequantize all 32 expert weights using exact block-scale semantics
+     - For W1[e]: reshape to [2I//128, 128, H//128, 128], multiply scales, reshape back
+     - For W2[e]: reshape to [H//128, 128, I//128, 128], multiply scales, reshape back
+   - Cache dequantized weights in dict for reuse
+
+2. **Expert Computation Loop**:
+   - For each expert e in active_experts:
+     - Extract token indices: tok_ids = sorted_tokens[offsets[e]:offsets[e+1]]
+     - Gather hidden states: X_e = hidden_states[tok_ids]  (FP8)
+     - Dequantize X_e using exact block-scale lookup: X_e_fp32 = X_e.float() * hidden_states_scale[kb, tok_ids]
+     - GEMM1: G1_e = torch.mm(X_e_fp32, W1_dequant[e].T)  (FP32)
+     - SwiGLU: S_e = F.silu(G1_e[:, I:]) * G1_e[:, :I]  (FP32)
+     - GEMM2: Y_e = torch.mm(S_e, W2_dequant[e].T)  (FP32)
+     - Apply routing weights: Y_e *= routing_weights[offsets[e]:offsets[e+1], None]
+     - Store in grouped output buffer
+
+3. **Post-processing Phase**:
+   - Scatter-add grouped outputs to final tensor using index_add_
+   - Cast to BF16
+
+**Validity Mechanism:**
+
+1. **Exact Block-Scale Dequantization**: Use the proven correct reshape-multiply-reshape pattern from slow child
+2. **No Approximations**: All GEMMs use PyTorch's numerically stable torch.mm with FP32 accumulation
+3. **Deterministic Dispatch**: No custom kernels for dispatch, use proven PyTorch vectorized ops
+4. **Fallback-Free**: This IS the fallback - guaranteed to work for any input shape
+
+**Why This Solution:**
+
+Advantages:
+- Mathematically guaranteed correctness (uses only proven PyTorch ops)
+- Eliminates ALL custom kernel numerical risks
+- Expert weight dequantization is amortized (once per call, not per token)
+- Hidden state dequantization is minimal (only gathered tokens)
+- No complex Triton kernel debugging needed
+
+Disadvantages:
+- Slower than optimized Triton kernels (likely 3-4x speedup vs 8x)
+- Python loop over 32 experts introduces overhead
+- Memory overhead for cached dequantized weights (~3.5GB for 32 experts)
+- Does not leverage FP8 tensor cores
+
+Expected Performance:
+- Target: 3-4x speedup (better than current parent's 2.77x due to weight caching)
+- Numerical error: should be minimal (< 100 max_abs_error)
+- Score estimate: 0.3-0.4 (30-40%)
+- This is a "safety baseline" - guaranteed to work, can be improved later

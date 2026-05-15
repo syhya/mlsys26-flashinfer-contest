@@ -1,0 +1,15 @@
+PLAN 3: Persistent / Worklist GEMM2 kernel + retain FP8 TC body
+
+Math model: Identical GEMM math.
+
+Strategy:
+- Replace 3D grid (N_tiles, M_tiles, E_local) with a 1D worklist of active (expert, m_tile, n_tile) triples. Build worklist on GPU after routing using expert_counts.
+- For experts with 0 tokens, no CTAs are launched (currently they early-return but still cost scheduling).
+- Each Triton program reads (e, mt, nt) from worklist and processes one tile.
+- Combine with persistent kernel (one program per SM, loops over many tiles) to amortize launch overhead - especially helpful for small T.
+
+Validity: Math unchanged; only dispatch changes. Worklist construction uses bincount + cumsum + repeat_interleave (deterministic).
+
+Why: For skewed token-to-expert distributions, eliminates idle CTAs (could be 30-50% of launched CTAs).
+
+Risk: Medium - worklist construction adds GPU work; may not help when expert distribution is uniform.

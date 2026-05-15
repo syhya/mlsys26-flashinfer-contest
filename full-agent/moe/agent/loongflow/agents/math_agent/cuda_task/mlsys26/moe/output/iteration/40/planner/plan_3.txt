@@ -1,0 +1,7 @@
+Plan 3: Rebase onto dce0e38f + minimal-risk PyTorch routing micro-opts + 1 new autotune config.
+- Variables: routing PyTorch ops (replace argsort+gather chain with sort()), 1 autotune entry.
+- Constraints: byte-equivalent math; autotune superset.
+- Solver: Triton autotune; PyTorch ops.
+- Validity: Math-equivalent refactor; autotune superset cannot regress.
+- Why: Floor-guaranteed but yields ~+0.005-0.01 only (saturated).
+- Disadvantage: Diminishing returns; summary explicitly warns micro-opts saturated.

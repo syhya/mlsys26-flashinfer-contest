@@ -1,0 +1,10 @@
+[solution]
+name = "ML Team-gdn-decode-v2"                        # Customize before submitting
+definition = "gdn_decode_qk4_v8_d128_k_last"
+author = "ML Team"                                   # Customize before submitting
+
+[build]
+language = "cuda"                                      # python | triton | cuda
+entry_point = "kernel.cu::gdn_forward"
+destination_passing_style = false
+binding = "torch"                                     # torch | tvm-ffi

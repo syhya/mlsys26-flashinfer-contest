@@ -1,0 +1,33 @@
+Outline 1: Hybrid grouped-expert FP8 pipeline with exact routing and safe GEMM2 oracle
+
+Mathematical Formulation
+- Variables (X):
+  - R = routing selections and normalized weights: topk_idx[T,8], topk_w[T,8]
+  - D = dispatch structure: tok[K], exp[K], w[K], offs[E_local+1]
+  - For each expert e and chunk c: G1_e_c, S_e, Y_e_c
+- Constraints (C):
+  1. Routing must exactly implement sigmoid -> biased group top2 sum -> top4 groups -> global top8 experts.
+  2. Hidden-state scales are indexed by original global token id.
+  3. All GEMM accumulations are FP32.
+  4. Output is scatter-add of all local expert contributions and returned as bf16 [T,7168].
+  5. No full dense fp32 materialization of all experts at once.
+- Objective f(X): maximize score = correctness_pass * speedup, with correctness lexicographically dominant.
+
+Solver Strategy
+- Deterministic decomposition, not stochastic search.
+- Use exact PyTorch tensor ops for routing/dispatch.
+- Use grouped-by-expert compute structure with chunked kernels/backends:
+  - GEMM1 uses fast grouped path (Triton or batched safe backend) over expert-sorted token batches.
+  - SwiGLU fused logically with GEMM2 scheduling.
+  - GEMM2 uses exact safe oracle path first, then optimized chunking.
+- This is equivalent to block-coordinate optimization: first solve discrete structure exactly, then solve continuous linear subproblems by matmul.
+
+Validity Mechanism
+- Safety valve: if any fast path is unsupported or suspicious, fall back per expert/chunk to exact dequantize+torch.mm.
+- Final projection: accumulate in fp32, cast once to bf16.
+- Dispatch offsets built with bincount/cumsum to guarantee exact assignment partition.
+
+Why this solution?
+- Expected to recover much of the parent speed while isolating the likely faulty stage (probably GEMM2/scatter path).
+- Advantages: preserves sparse structure, limits risky custom code to one stage, keeps a deterministic oracle fallback.
+- Disadvantages: more implementation complexity; still may underperform if grouped fast path remains numerically fragile.

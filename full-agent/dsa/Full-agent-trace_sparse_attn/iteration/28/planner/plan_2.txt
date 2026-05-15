@@ -1,0 +1,14 @@
+Plan 2: Reduce Split-K Factor S and Parallelize Reducer Math
+
+Variables X: S (split-K factor) ∈ {32, 16}. Current S=64. Also change per-s work: 64 slots per partition instead of 32.
+Constraints C: S must divide 2048. Each partition = 2048/S sparse slots. Keep layout [T,S,16,512] or switch.
+Objective f(X): Reduce reducer work (fewer s partitions to merge per (t,h,d)), reduce workspace memory allocation (T*S*16*512 floats).
+
+Solver Strategy: Pick S=32. Each partial kernel processes 64 sparse slots (two tiles of 32 each). Reducer iterates over only 32 partitions.
+
+Validity Mechanism: Exact online-softmax merge still holds. Correctness by same equations.
+
+Why: Current S=64 creates 64 scale_smem entries. Halving S reduces reducer latency and workspace. But compute kernel does 2x work per block, which may hurt small-T occupancy.
+
+Advantages: Reduces workspace allocation cost and reducer serial work.
+Disadvantages: Reduces parallelism for small T; may hurt small-T path where parallelism was the goal. Higher risk than Plan 1.

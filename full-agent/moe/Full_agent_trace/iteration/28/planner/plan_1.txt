@@ -1,0 +1,69 @@
+## Plan 1: Fuse Best-of-Both — FP8 TCs in GEMM2 + Expanded Autotuning from a8623435
+
+### Mathematical Formulation
+
+**Variables (X):**
+- `BLOCK_M` ∈ {16, 32, 64, 128}: token tile size, autotuned
+- `BLOCK_N` = 128: output tile size (fixed for GEMM2 n_block_idx = pid_n shortcut)
+- `BLOCK_K` = 128: K-tile size (fixed for block-scale alignment)
+- `num_stages` ∈ {3, 4, 5}: software pipeline depth for K-loop, autotuned
+- `num_warps` ∈ {4, 8}: warp count, autotuned
+- Autotuning key: `MAX_TK` (max per-expert token count — proven superior over `T`)
+
+**Constraints (C):**
+- BLOCK_K = 128 strictly (scales defined per 128 elements)
+- BLOCK_N = 128 for GEMM2 (enables n_block_idx = pid_n optimization)
+- All pointer arithmetic uses `.to(tl.int64)` before stride multiplication
+- GEMM2: per-tile SCALAR quantization (NOT per-row) for c_fp8
+  - c_scale = tl.maximum(tl.max(tl.abs(c)) / 448.0, 1e-12) — global tile max
+  - Mathematically exact dequantization: acc += dot(c_fp8, w2_fp8) * c_scale * w2_scale
+- Correctness: rtol=1e-2, atol=1e-2
+
+**Objective f(X):**
+Minimize total kernel latency by combining:
+1. FP8 tensor cores in BOTH GEMMs (from ff4217c7, proven correct at 10.25x)
+2. Expanded 10-config autotune search space (from a8623435, proven better at 10.60x with BF16)
+3. Software pipelining via `tl.range(..., num_stages=N)` in K-loops
+
+### Solver Strategy
+The core insight is that ff4217c7 achieves FP8 TCs in GEMM2 (theoretically faster) but only has 7 autotune configs with key=MAX_TK. The best solution a8623435 has 10 configs (BF16 GEMM2) and achieves 10.60x. 
+
+Fusing both: FP8 TCs for GEMM2 + 10 expanded configs (including BLOCK_M=16, 32 with num_stages=4,5) should outperform both.
+
+The key difference from ff4217c7:
+1. Use the same FP8 GEMM2 kernel with per-tile scalar quantization
+2. Expand the autotune configs to 10 (match a8623435's config space)
+3. Use `tl.range(0, I, BLOCK_K, num_stages=4)` in GEMM2 loop (ff4217c7 used plain `range()`)
+4. Add GEMM1 expanded configs too (10 configs as in a8623435)
+
+### Validity Mechanism
+1. BLOCK_N=128 in ALL GEMM2 autotune configs — n_block_idx = pid_n is exact
+2. c_scale = tl.maximum(..., 1e-12) prevents division by zero
+3. torch.zeros initialization for G1 and O — no garbage from masked threads
+4. Edge case guards: return zeros if Tk_total=0 or max_count=0
+
+### Why This Solution?
+
+**Expected Performance Improvement:**
+- From ff4217c7 (10.25x, 2.600ms): FP8 TCs + expanded configs → ~10.8-11.2x, ~2.3-2.4ms
+- From a8623435 (10.60x, 2.419ms): FP8 TCs for GEMM2 (vs BF16) → ~1.5-10% GEMM2 speedup
+
+**Advantages:**
+1. Combines the best features of both top solutions
+2. FP8 TCs are theoretically ~4x faster than FP32 TCs (B200 spec)
+3. Expanded autotune space finds optimal configs for all workload sizes
+4. `tl.range()` with `num_stages` enables software pipelining in GEMM2 K-loop
+5. Mathematically exact dequantization (same as ff4217c7, proven correct)
+
+**Disadvantages:**
+1. Per-tile scalar quantization adds minor overhead (tl.max + division)
+2. Expanded autotune causes longer first-call compilation time (~261s for a8623435)
+3. Risk: autotuner might select non-128 BLOCK_N if configs are not constrained
+
+**Implementation Key Points:**
+GEMM1: Use a8623435's exact kernel (10 configs, tl.range with num_stages)
+GEMM2: Use ff4217c7's FP8 TC approach but with:
+  - 10 expanded autotune configs (not 6)
+  - `tl.range(0, I, BLOCK_K, num_stages=4)` instead of `range()` for software pipelining
+  - n_block_idx = pid_n (faster than n_offs // 128)
+  - Precomputed w2_base and w2scale_base outside loop

@@ -1,0 +1,5 @@
+Outline 3: CuTe-Based Hierarchical Tiling 
+Mathematical Formulation: Formulate the attention operation as generalized MMA operations with CuTe layouts.
+Solver Strategy: Use CuTe's `make_layout` and `make_tma_copy` abstractions to generate optimal PTX for memory and compute.
+Validity Mechanism: Rely on CuTe's layout validation and static assertions for correct memory access patterns.
+Why this solution?: Best for achieving peak Tensor Core utilization on modern architectures (Ampere/Hopper).

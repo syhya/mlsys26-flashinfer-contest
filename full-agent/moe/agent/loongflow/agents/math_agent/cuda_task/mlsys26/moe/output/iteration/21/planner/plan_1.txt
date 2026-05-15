@@ -1,0 +1,62 @@
+### Plan 1: Hybrid Precision Grouped GEMM with Exact Block-Scale Semantics
+
+**Mathematical Formulation:**
+
+Variables:
+- X ∈ R^{T×H}: hidden states (FP8 with block scales)
+- W1 ∈ R^{E×2I×H}: GEMM1 weights (FP8 with block scales)
+- W2 ∈ R^{E×H×I}: GEMM2 weights (FP8 with block scales)
+- G1 ∈ R^{Tk×2I}: GEMM1 output (FP32)
+- S ∈ R^{Tk×I}: SwiGLU output (FP32)
+- Y ∈ R^{T×H}: final output (BF16)
+
+Constraints:
+1. GEMM1: G1 = (X_fp8 * X_scale) @ (W1_fp8 * W1_scale)^T, accumulate in FP32
+2. SwiGLU: S = silu(G1[:, I:]) * G1[:, :I], compute in FP32
+3. GEMM2: Y_grouped = S @ (W2_fp8 * W2_scale)^T, accumulate in FP32
+4. Block-scale lookup: X_scale[kb, token_id], W1_scale[e, nb, kb], W2_scale[e, hb, ib]
+5. No dynamic re-quantization of activations
+6. All pointer arithmetic in int64
+7. Full tail masking on all dimensions
+
+Objective:
+- Maximize f(X) = speedup_ratio, subject to max_abs_error <= 1e-2 * reference_max
+
+**Solver Strategy:**
+
+Use Triton grouped GEMM kernels with the following architecture:
+1. GEMM1: FP8 tensor core dot with post-multiply block scales (proven fast from grandparent)
+2. SwiGLU: Separate Triton pointwise kernel or PyTorch ops (FP32 only, no quantization)
+3. GEMM2: Modified grouped kernel that:
+   - Loads FP8 weight tiles
+   - Applies block scales to convert to FP32 BEFORE tl.dot
+   - Keeps SwiGLU activations in FP32 throughout
+   - Accumulates in FP32
+   - NO dynamic activation quantization
+
+**Validity Mechanism:**
+
+1. **Correctness Oracle**: Use the slow child (77a118a7) exact dequant logic as reference for unit tests
+2. **Numerical Safety Valve**: 
+   - For each expert, if Tk_e < 16, fall back to eager PyTorch path with exact dequant
+   - For Tk_e >= 16, use optimized Triton kernel
+3. **Masking Enforcement**: Every tl.load and tl.store must have explicit m_mask & n_mask
+4. **Scale Lookup Validation**: Assert hidden_states_scale indexing uses original global token_id, not local index
+
+**Why This Solution:**
+
+Advantages:
+- Preserves the fast grouped dispatch structure from grandparent (8.63x speedup baseline)
+- Eliminates the main numerical hazard (dynamic FP8 quantization of SwiGLU)
+- Uses exact block-scale semantics proven correct in slow child
+- Hybrid fallback ensures correctness even for edge cases
+
+Disadvantages:
+- GEMM2 will be slower than grandparent's FP8 dot (but still faster than eager dequant)
+- More complex branching logic
+- May need careful tuning of the Tk threshold
+
+Expected Performance:
+- Target: 5-7x speedup (between slow child 2.77x and fast grandparent 8.63x)
+- Numerical error: should match slow child's improved error profile (max_abs ~4096)
+- Score estimate: 0.5-0.7 (50-70%)

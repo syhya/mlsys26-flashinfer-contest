@@ -1,0 +1,37 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a strictly correct and ultra-fast CUDA kernel for the GDN prefill forward pass by extending double-buffered pipelining with full `float4` vectorized arithmetic, achieving maximal hardware utilization and score >= 1.0.
+
+**Selected Outline:** Vectorized `float4` Register Math & Pipelining (Outline 1)
+
+**Rationale for Selection:**
+1. **Mathematical Guarantee:** Using 128-bit aligned vector loads (`float4`) mathematically guarantees perfectly coalesced memory transactions, halving instruction latency compared to scalar loads.
+2. **Resource Efficiency:** Casting thread-local state arrays into `float4` arrays reduces the FMA loop iterations from 128 to 32, maximizing ILP (Instruction Level Parallelism) without exceeding register limits.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Definition & Memory Model**
+    *   **Variables ($X$)**: Vectorization factor $V=4$ (`float4`). Thread configuration $N=128$.
+    *   **Constraints ($C$)**: The maximum registers per thread must not exceed hardware limits. PyTorch tensor pointers must be 16-byte aligned to safely use `float4`.
+    *   **Objective Function ($f(X)$)**: Minimize total FMA instructions and memory load cycles by packing 4 `float` elements into single SIMD instructions.
+    *   **Memory Model**: Define `float4 state_reg_f4[32]` per thread instead of `float state_reg[128]`. Allocate `__shared__` memory padded to geometrically avoid bank conflicts: `float state_transpose[128][33]`.
+
+2.  **Phase 2: The Optimization Loop (Vectorized Software Pipeline)**
+    *   **Initialization Step**: Check if `state` is defined. If so, cooperatively load it into `float4 state_reg_f4[32]` using the `state_transpose` shared memory array to ensure coalesced reads. If not, zero-initialize `state_reg_f4` deterministically.
+    *   **Pipelined Loop (`for t = seq_start; t < seq_end; t++`)**:
+        *   **Prefetching**: Load next token's $q, k$ into the alternate buffer of `smem.qk`. Load $v, a, b$ into local registers.
+        *   **Vectorized Math**: Compute $x, g, beta$ using `expf` and `log1pf`.
+        *   **Dot Product Reduction**: Loop `k_idx` from 0 to 31 (`#pragma unroll 32`). Load `smem.qk.k` as `float4`. Perform exactly four `fmaf` operations per iteration between `smem_k_f4` and `state_reg_f4[k_idx]`.
+        *   **State Update**: Compute $new\_v$, $delta\_v$. Loop `k_idx` from 0 to 31 again. Update `state_reg_f4[k_idx]` with 4 `fmaf` instructions and accumulate the 4 results into `o_val`.
+        *   **Pipeline Advance**: Swap buffer indices and synchronize threads (`__syncthreads()`).
+
+3.  **Phase 3: The "Safety Valve" (CRITICAL Correction/Refinement)**
+    *   **Mathematical Bounds Correction**: To strictly enforce numerical correctness (rtol=1e-2) and prevent `NaN` or `Inf` due to exponential explosion, apply a projection step: `sp_x = (x > 20.0f) ? x : log1pf(expf(x))`.
+    *   **Scale Refinement Mechanism**: Prior to execution, run a parameter repair: `if (scale == 0.0f) { scale = 1.0f / std::sqrt(128.0f); }`.
+    *   **Alignment Verification**: To prevent `CUDA Error 74 (Misaligned Address)` when using `float4` pointer casting on PyTorch tensors, apply `tensor.contiguous()` explicitly in the C++ wrapper to guarantee 16-byte alignment.
+    *   **Fallback Constraints**: If `num_seqs <= 0` or sequence range `seq_start >= seq_end` is detected, safely return empty tensors or skip execution to avoid illegal memory access faults.
+
+4.  **Phase 4: Implementation Details**
+    *   **Framework**: Use pure PyTorch C++ API (`<torch/extension.h>`) and standard CUDA math libraries (`<cuda_bf16.h>`). No external Python solvers are used because this is an exact low-level hardware implementation; structural topology is handled by CUDA block mappings.
+    *   **Intrinsics**: Use `__float2bfloat16`, `__bfloat162float`, `expf`, `fmaf`.
+    *   **Compiler Directives**: Enforce `__launch_bounds__(128)` to explicitly guide the PTX compiler to avoid register spilling, acting as a deterministic structural constraint.

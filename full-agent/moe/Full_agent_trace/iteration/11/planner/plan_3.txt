@@ -1,0 +1,33 @@
+### Outline 3: Fully Reframed Dense-Masked Local-Expert Execution Using Standard PyTorch Ops Only
+
+**Mathematical Formulation**
+- **Variables (X):**
+  - Dense top-k routing indices `idx` and weights `w`.
+  - Boolean assignment mask per local expert.
+  - Temporary gathered hidden state batches per expert.
+- **Constraints (C):**
+  - Routing exactly matches reference topology.
+  - Per-expert token batches are extracted only from assigned local experts.
+  - GEMM1 output split into `x1, x2`, SwiGLU exact in FP32, GEMM2 exact in FP32 accumulation.
+  - Scatter-add must sum all contributions for duplicate token assignments.
+- **Objective (f(X)):**
+  - Maximize robustness and correctness while still beating baseline through efficient batched PyTorch/cuBLAS usage.
+
+**Solver Strategy**
+- Deterministic dense-masked decomposition:
+  1. Compute routing exactly.
+  2. For each local expert (fixed 32-loop), gather assigned tokens with boolean mask / `nonzero`.
+  3. Perform exact blockwise dequantization only for current expert weights and gathered activation rows.
+  4. Run standard `matmul`/`mm` in FP32 or BF16 input + FP32 accumulation.
+  5. Scatter-add weighted outputs.
+- This is a direct exact solver of the operator with no custom kernels.
+
+**Validity Mechanism**
+- Every expert path is independent and uses plain PyTorch semantics, which guarantees valid bounds and deterministic behavior.
+- Add zero-token early continue for experts with no assignments.
+- Final safety valve: if memory usage for temporary dequant exceeds a threshold, chunk K/N dimensions in blocks of 128 to preserve correctness without OOM.
+
+**Why this solution?**
+- **Expected performance improvement:** likely lower than Triton variants, but can still outperform reference by avoiding unnecessary global dequantization and exploiting sparsity from routing.
+- **Advantages:** strongest correctness robustness; easiest to make score >= 1.0; no Triton crash risk.
+- **Disadvantages:** probably not enough raw speed to exceed the current best score unless cuBLAS FP8 path is available through PyTorch.

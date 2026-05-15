@@ -1,0 +1,33 @@
+### Outline 2: Exact Routing + torch._scaled_mm Hybrid GEMM2 + Deterministic Shape Dispatch
+
+Mathematical Formulation
+- Variables X:
+  - Routing tensors E[t, r], W[t, r], sorted tokens S, expert offsets P
+  - GEMM1 output G1 in fp32
+  - Per-row activation quantization scales q[j]
+  - GEMM2 outputs O_e for each expert batch
+  - Dispatch regime d(T) in {small, medium, large}
+- Constraints C:
+  - Routing exactly follows sigmoid -> group top2 sum -> top4 groups -> top8 experts.
+  - GEMM1 and GEMM2 accumulate in FP32.
+  - GEMM2 must produce numerically safe approximation within benchmark tolerance.
+  - For every token row j, q[j] > 0 and corrected output uses exact scale multiplication.
+  - No change to final weighted scatter-add semantics.
+- Objective f(X): choose d(T) and backend per stage to minimize measured latency while maintaining correctness.
+
+Solver Strategy
+- Piecewise deterministic solver:
+  - small T: use Triton grouped kernels with smaller BM and possible split-K candidate.
+  - medium/large T: use PyTorch native torch._scaled_mm or torch.mm-based batched expert path for GEMM2 after per-row quantization to fp16.
+  - Backend choice is a hard-coded dispatch table based on T thresholds; no randomness.
+
+Validity Mechanism
+- If native scaled path is unavailable or shape unsupported, deterministically fall back to known-correct Triton kernel.
+- Use exact post-scale correction from per-row q[j].
+- Keep routing and GEMM1 on proven code path.
+- After backend selection, final result always passes through the same FP32 accumulation and bf16 cast.
+
+Why this solution?
+- Expected improvement: moderate, especially if native kernels on B200 outperform custom GEMM2 for larger Tk.
+- Advantages: leverages vendor-tuned kernels; lower Triton complexity.
+- Disadvantages: API behavior of torch._scaled_mm may be version-sensitive; batching by expert may require loops and extra memory movement.

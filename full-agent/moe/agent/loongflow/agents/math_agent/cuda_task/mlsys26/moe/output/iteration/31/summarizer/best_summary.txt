@@ -1,0 +1,40 @@
+## Strategic Summary Report — Solution `a96d6608` (Iteration 31, Generation 9)
+
+---
+
+### 1. Executive Summary
+
+This iteration was a **pivotal breakthrough** because it finally fused FP8 tensor-core GEMM2 (`tl.dot(c_fp8, w2_fp8)` with scalar per-tile quantization) with `tl.range()` software pipelining — the long-planned but twice-failed combination — dramatically outperforming the sole-child baseline by jumping from 12.23x → **15.34x speedup**, the largest single-step gain in this lineage's recent history.
+
+---
+
+### 2. Data-Driven Findings (Facts ONLY)
+
+- **Sibling Rank:** 1 out of 1 children of parent `464404d0`. No sibling competition. Lineage high-water mark trajectory: 0.803 → 0.872 → 1.025 (`ff4217c7`, first FP8 TC GEMM2) → 1.201 (`b550fc5e`, tl.range pipelining) → 1.223 (`464404d0`, num_warps=16 added) → **1.534** (this child, fusion of all three).
+- **Score Delta:** Parent `464404d0` (1.2233, 12.23x, 2.169ms) → child `a96d6608` (**1.5338, 15.34x, 1.547ms**). Absolute gain: **+0.3105 (+25.4% relative)**. Kernel latency reduction: **-0.622ms (-28.7%)**.
+- **Key Change:** GEMM2 kernel body replaced — SwiGLU output is now per-tile scalar-quantized to FP8 (`tl.max(tl.abs(c))` with NO axis arg, then `(c / c_scale).to(tl.float8e4nv)`) and `tl.dot(c_fp8, w2_fp8)` runs on B200 FP8 tensor cores, while retaining the parent's `tl.range()` K-loop for software pipelining. GEMM1, routing, and `run()` copied verbatim.
+- **Core Metrics:**
+  - Correctness: **1.0** (Passed)
+  - Max absolute error: **36,864.0** (up from parent's 8192.0 — 4.5x larger but still within tolerance)
+  - Max relative error: 1.43e11 (up from parent's 7.4e9 — expected from lossy FP8 quantization of activations)
+  - Eval time: 68.92s; Total workloads: 19
+  - Note: executor used the alias `tl.float8e4nv` (equivalent to `tl.float8_e4m3fn`), resolving the fallback issue that stalled prior iterations.
+
+---
+
+### 3. Strategic Analysis (The "So What?")
+
+- **Root Cause:** A rare case of **both plan AND execution quality converging**. The plan was unusually prescriptive — copy-paste ready kernel code, an explicit executor checklist, and repeated warnings against the `axis=1` failure mode and `tl.float8_e4m3fn`-unavailable myth. The executor followed through faithfully (using the equivalent `tl.float8e4nv` alias), breaking the two-iteration pattern where executors silently regressed to FP32 dequant. The ~29% kernel latency drop is almost exactly what FP8 TC throughput (~2x vs FP32 dequant on the GEMM2 critical path, which was ~50% of remaining time) would predict.
+- **Key Insight:** The single most important lesson is that **prescriptive, copy-paste plans with explicit anti-regression checklists can break executor drift**. Two prior iterations stalled on the same FP8 TC fusion because executors attributed compile errors to a wrong root cause. Once the plan enumerated the exact failure mode (`tl.max(tl.abs(c), axis=1)` vs `tl.max(tl.abs(c))`) and demanded ff4217c7-style code verbatim, the correct path was executed. **Evolution's bottleneck was communication fidelity, not algorithmic novelty.**
+- **Identified Risk:** Numerical error has grown substantially — max_abs_error quadrupled (8192→36864) and max_rel_error grew ~19x. The solution still passes the current `atol=1e-2, rtol=1e-2` check, but any future tolerance tightening would break this and every descendant. Additionally, per-tile scalar quantization over [BLOCK_M × BLOCK_K]=up to [128×128] tiles assumes uniform magnitude distribution; tiles with outliers will suffer severe precision loss on the small-magnitude elements. This is a latent precision cliff.
+
+---
+
+### 4. Actionable Guidance (The "What's Next?")
+
+- **Recommend Exploration (high priority):** Now that FP8 TC GEMM2 is proven, explore applying the SAME per-tile scalar-quantization trick to the activation side of GEMM1 IF the hidden_states pre-quantization can be relaxed. Since GEMM1's K=7168 dominates runtime (~55% of the 1.547ms budget), even a 10-20% GEMM1 speedup via tighter pipelining (e.g., `tl.make_block_ptr` + TMA on Blackwell) or BLOCK_K=256 experiments could push to 17-18x.
+- **Recommend Exploration:** Test `BLOCK_M=256` configs now that FP8 TCs halve the accumulator pressure per element. Large-batch (prefill) workloads in the 19-benchmark suite likely have per-expert token counts that would benefit from wider M-tiles. Add `triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=16, num_stages=3/4)` to both kernels' autotune spaces.
+- **Recommend Fusion:** The routing Python pipeline (`_route_tokens`) remains untouched and uses ~8 separate PyTorch kernel launches (sigmoid, 3×topk, scatter, nonzero, argsort, bincount, cumsum). For small-T decode workloads this is likely now a significant fraction of the 1.547ms budget. Fuse the entire routing pipeline into 1-2 Triton kernels using atomics — this is the next major algorithmic lever.
+- **Recommend Exploration:** Investigate sub-tile (per-row or 2D-blocked) FP8 quantization as a precision safety net. Currently scalar-per-tile; a [BLOCK_M × 1] per-row scale would halve max_abs_error with minimal overhead (one extra `tl.max(axis=1)` per K-iter) — useful insurance if tolerance is ever tightened.
+- **Warn:** Do NOT regress the GEMM2 FP8 TC path in any future child. Subsequent planners must treat `grouped_gemm2_kernel` as a stable foundation and build atop it. Any child that "refactors" this kernel without preserving the exact `tl.max(tl.abs(c))` + `to(tl.float8e4nv)` + `tl.dot(c_fp8, w2_fp8)` triad will regress to ≤12.23x.
+- **Warn:** The persistent/growing max_abs_error (now 36864) is a ticking clock. Before attempting further FP8 aggressiveness in GEMM1, audit which of the 19 workloads produces this error — likely a small-T edge case where a single outlier dominates a BLOCK_M×BLOCK_K tile. A targeted fix there protects the entire downstream lineage.

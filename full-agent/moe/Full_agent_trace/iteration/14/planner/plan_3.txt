@@ -1,0 +1,31 @@
+Outline 3: Two-path hybrid solver with torch._scaled_mm micro-kernelization and deterministic semantic fallback
+
+Mathematical Formulation
+Variables (X):
+- Routing/CSR variables as before.
+- Packed expert batches per expert e with token block A_e in fp8, hidden-state scales S_A, weight blocks W1_e/W2_e and scale blocks S_W1/S_W2.
+- Intermediate outputs G1_e, C_e, O_e.
+Constraints (C):
+- Exact DeepSeek routing.
+- FP8 block scales interpreted multiplicatively over 128-sized blocks.
+- FP32 accumulation semantics.
+- Output [T,7168] bf16.
+Objective f(X):
+- Minimize total runtime by selecting per-expert compute backend while preserving correctness.
+
+Solver Strategy
+- Deterministic branch-and-bound style backend selection, not random.
+- For each expert e, choose backend based on Tk_e:
+  1) small Tk_e: explicit dequant + torch.mm (better launch robustness);
+  2) medium/large Tk_e: Triton grouped GEMM1 and grouped GEMM2 or torch._scaled_mm if supported by runtime shape/scale layout.
+- The ‘solver’ is a rule-based deterministic optimizer over a finite backend set, equivalent to discrete optimization on expert workloads.
+
+Validity Mechanism
+- Standardized helper functions produce one canonical dequant interpretation; all backends must agree with this canonical form on a micro-check using first active expert and one token block.
+- If torch._scaled_mm path cannot express the exact block-scale layout directly, reject that branch and use Triton/PyTorch exact branch.
+- Final safety valve always falls back to exact PyTorch per-expert implementation.
+
+Why this solution?
+- Expected performance improvement: best upside if backend selection matches workload regime; especially promising because B200 may reward built-in FP8 matmul.
+- Advantages: diverse from current parent; can exploit vendor libraries; explicit finite-choice optimization.
+- Disadvantages: integration complexity; torch._scaled_mm scale-layout compatibility may be awkward for this block-scaled MoE format; higher implementation risk than Outline 1.

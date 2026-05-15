@@ -1,0 +1,13 @@
+PLAN 3: Radix-select for TIER-L (find K-th threshold then filter) instead of full sort
+
+Variables: kth_threshold[b] (float), filtered indices.
+Constraints: exact top-K set (ties broken arbitrarily).
+Objective: Replace O(N log N) device-wide CUB sort with O(N) per-batch radix-select.
+
+Strategy: For each TIER-L batch, run a block-level radix-select kernel that finds the 2048-th largest score via iterative digit-bucket elimination (similar to CUB DeviceRadixSort internal). Then a second pass filters scores >= threshold into the output array.
+
+Validity: Exact when threshold is unique. Must handle ties (can produce > K or < K items; use second-pass counting and tie-break by index).
+
+Why: For long sequences, full sort is wasteful when we only want top-2048.
+Advantage: O(N) complexity vs O(N log N).
+Disadvantage: Tie-handling is tricky — must guarantee exactly K items returned with correct set. Complex kernel to implement correctly. The parent's TIER-L baseline already works; correctness risk.

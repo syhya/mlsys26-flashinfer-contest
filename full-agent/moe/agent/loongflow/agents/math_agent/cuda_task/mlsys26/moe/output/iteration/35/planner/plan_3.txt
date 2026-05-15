@@ -1,0 +1,9 @@
+Plan 3: Adopt 302d2eb3 verbatim + worklist-based GEMM2 dispatch (compact (expert,m_tile) work pairs) to eliminate empty CTAs from the skewed expert distribution.
+
+- Variables: worklist tensor [num_active_tiles, 2] (expert_id, m_tile_id); kernel grid = (n_tiles, num_active_tiles).
+- Constraints: build worklist on GPU using cumsum; correctness preserved; BLOCK_N=128.
+- Objective: reduce wasted CTA launches when many experts have <BLOCK_M tokens.
+- Solver: PyTorch vectorized worklist construction + modified Triton kernel reading (e_idx, m_id) from worklist instead of program_id(2)=expert.
+- Validity: if worklist construction fails or num_active_tiles==0, fall back to 302d2eb3's exact grid. Floor preserved.
+- Why: B200 has 148 SMs; with 32 experts × few m_tiles each, current grid often has many early-exit CTAs.
+- Risks: extra GPU sync to read num_active_tiles for grid size; routing already does one .item() sync (max_count) so we can fuse them.

@@ -1,0 +1,52 @@
+## Strategic Summary Report — Solution `464404d0` (Iteration 30, Generation 8)
+
+---
+
+### 1. Executive Summary
+
+This iteration was a **modest incremental improvement** because the addition of a single `num_warps=16` config to both GEMM1 and GEMM2 autotune search spaces allowed the autotuner to find a marginally better tile configuration for large-batch workloads, pushing score from 1.2014 (parent `b550fc5e`, 12.01x) to **1.2233 (12.23x)** — a +0.022 absolute gain — making it the sole child of `b550fc5e` and the new high-water mark of this evolutionary lineage, though the planned FP8 TC innovation for GEMM2 was once again not realized.
+
+---
+
+### 2. Data-Driven Findings (Facts ONLY)
+
+- **Sibling Rank:** 1 out of 1 children of parent `b550fc5e`. No sibling competition. Full lineage context: grandparent `ff4217c7` scored 1.0253 (10.25x); parent `b550fc5e` scored 1.2014 (12.01x); this child `464404d0` scored 1.2233 (12.23x). Lineage high-water mark history: 0.803 → 0.872 → 1.025 → 1.201 → **1.223**.
+- **Score Delta:** From parent `b550fc5e` (1.2014, 12.01x) to child `464404d0` (1.2233, 12.23x): **+0.0219 absolute gain (+1.82% relative improvement).**
+- **Key Change:** Added a single new autotune config — `triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=16, num_stages=4)` — to both GEMM1 (now 11 configs) and GEMM2 (now 11 configs). The rest of the code is structurally identical to parent `b550fc5e`. The plan's primary intent (FP8 TCs in GEMM2 via `tl.float8_e4m3fn`) was NOT implemented — the executor fell back to the FP32 dequant path again, citing `tl.float8_e4m3fn` unavailability.
+- **Core Metrics:**
+  - Correctness: **1.0** (Passed)
+  - Speedup: **12.233x** (parent: 12.014x; delta: +0.219x)
+  - Kernel latency: **2.169ms** (parent: 2.320ms; delta: -0.151ms, -6.5% reduction)
+  - Reference latency: 17.804ms (parent: 17.443ms; benchmark variation ~2.1%)
+  - Max absolute error: **8192.0** (unchanged — persistent lineage artifact through all 7 ancestors)
+  - Max relative error: 7,400,000,000 (slightly increased from parent's 6,450,000,000)
+  - Eval time: **63.35s** (parent: 129.96s — significantly faster, indicating 11 configs compiled faster or autotuner cache was leveraged)
+  - Total workloads: 19
+
+---
+
+### 3. Strategic Analysis (The "So What?")
+
+- **Root Cause:** The outcome was driven by **execution quality, not plan quality**. The plan called for a high-upside FP8 TC fusion in GEMM2 (expected +10-15% speedup) but the executor fell back to adding only `num_warps=16`. The 6.5% kernel latency improvement came entirely from the autotuner discovering that `num_warps=16` with `BLOCK_M=128` provides better SM utilization for the dominant large-batch workload shapes in the 19-workload benchmark. The half-point speedup gain is real but far below the theoretical ceiling of what was planned.
+
+- **Key Insight:** The single most important lesson is that **`num_warps=16` for `BLOCK_M=128` tiles is a genuinely useful addition to the autotune search space**, confirmed by a measurable 0.151ms kernel latency reduction. This is non-trivial — it means the B200's higher SM occupancy allows 16 warps (512 threads) to be productively scheduled for large tile sizes without register spillage, which was not exploited by any prior solution in this lineage. However, this same result also reveals that autotune search space expansion is now approaching a point of diminishing returns: each additional config yields smaller gains (+1.76x from 7→10 configs in `b550fc5e`, then only +0.22x from 10→11 configs in this child). The evolutionary energy should shift decisively toward the FP8 TC GEMM2 path.
+
+- **Identified Risk:** There are two key risks:
+  1. **Executor regression pattern on FP8 TCs**: This is now the second consecutive iteration (`b550fc5e` and `464404d0`) where the executor claimed `tl.float8_e4m3fn` was unavailable and fell back to FP32 dequant. Yet ancestor solution `ff4217c7` (generation 6, score=1.025) successfully used this exact cast. This is a systematic failure pattern in the executor phase, not a fundamental environment limitation. If future iterations continue to fail on this, the lineage will stall at ~12.2x.
+  2. **Autotune saturation**: The current search space (11 configs per kernel) appears to be approaching saturation. The marginal gains from adding more configs are diminishing rapidly. The next meaningful performance jump must come from a fundamentally different architectural change, not from expanding the autotune grid.
+
+---
+
+### 4. Actionable Guidance (The "What's Next?")
+
+- **Recommend Fusion [CRITICAL PRIORITY]:** The next child MUST successfully combine `tl.float8_e4m3fn` (proven correct in `ff4217c7`) with `tl.range()` software pipelining (proven +12% in `b550fc5e`) in GEMM2. The Planner should copy `ff4217c7`'s EXACT `grouped_gemm2_fp8_kernel` code (specifically: `c_abs_max = tl.max(tl.abs(c))` with NO axis argument, then `c_fp8 = (c / c_scale).to(tl.float8_e4m3fn)`, then `tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32)`) and ONLY change `range()` to `tl.range()` for the K-loop. Do NOT write a new FP8 kernel from scratch. The executor must be explicitly instructed: "copy `ff4217c7`'s GEMM2 kernel body unchanged, except change `for k_start in range(0, I, BLOCK_K):` to `for k_start in tl.range(0, I, BLOCK_K):`." This combination has never been attempted and represents the highest-confidence path to >13x speedup.
+
+- **Recommend Fusion:** Retain the `num_warps=16` config discovered by this child in all future iterations. It is now empirically proven to contribute ~0.15ms latency reduction for this problem shape and should be treated as a permanent fixture in the autotune search space. Add it to BOTH GEMM1 and GEMM2 configs in the base template.
+
+- **Recommend Exploration:** After successfully achieving the FP8 TC + tl.range() fusion in GEMM2, explore whether `num_warps=16` specifically for the FP8 TC path provides additional gains. The FP8 TC path has higher arithmetic intensity (fewer register moves per multiply-add) and may benefit even more from 16-warp occupancy than the FP32 dequant path.
+
+- **Recommend Exploration:** Investigate `BLOCK_M=256` as a new autotune tier for very large batch workloads. The B200 has larger per-SM SRAM than A100, and with BLOCK_N=128 fixed, BLOCK_M=256 requires only 256*128*4=128KB of accumulator buffer per warp group — potentially feasible. If any workload in the 19-benchmark suite has seq_len ≥ 1024 (implying per-expert token counts of ~256+), this could yield an additional 5-10% gain.
+
+- **Warn [EXECUTOR DIRECTIVE]:** The executor for the next iteration must NOT interpret any comment claiming `tl.float8_e4m3fn` is unavailable. This attribute HAS been available in the eval environment since at least iteration 26 (solution `ff4217c7`, score=1.025, which passed correctness=1.0 using this exact cast). The prior two executors appear to have encountered a compilation error caused by incorrect `tl.max` usage (using `axis=1` instead of no axis) and misattributed the failure to `tl.float8_e4m3fn` unavailability. The rule is: **if `tl.max(tl.abs(c))` without an axis argument compiles, the FP8 cast will also compile.** Verify this first with a minimal inline test before falling back.
+
+- **Warn:** The persistent max absolute error of 8192.0 (present across all solutions from generation 4 onward) has not been investigated. While it passes the current tolerance check (atol=1e-2, rtol=1e-2), it represents a discrete failure mode for a specific workload (likely seq_len=7 based on the ncu_profile data from `46817723`). If evaluation tolerance is ever tightened, this would cause an immediate correctness failure across the entire lineage. This technical debt should be addressed before the lineage reaches a score plateau.

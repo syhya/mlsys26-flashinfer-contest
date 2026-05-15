@@ -1,0 +1,23 @@
+Outline 3: Rebase onto global best 6da80c61 and prune/retune autotune space plus selective config expansion under a strict fallback floor.
+
+Mathematical Formulation
+- Variables (X): reduced autotune config sets for GEMM1/GEMM2; selective added configs such as BLOCK_M=256/BLOCK_N=128 with varied num_stages or num_warps.
+- Constraints (C):
+  1. Kernel bodies remain unchanged from 6da80c61.
+  2. All retained configs must satisfy BLOCK_K=128, GEMM2 BLOCK_N=128, FP32 accumulation, int64 pointer safety.
+  3. The file must remain self-contained and deterministic.
+- Objective f(X): minimize kernel latency while also reducing autotune/eval overhead.
+
+Solver Strategy
+- Finite discrete search via Triton autotune over a carefully chosen subset/superset of configs.
+- Keep configs empirically known to work; add at most 1-2 new candidates likely to help skewed T distributions.
+
+Validity Mechanism
+- Since kernel bodies are unchanged, correctness is guaranteed up to existing path behavior.
+- Safety valve: if any new config compiles poorly, Triton autotune ignores or loses to inherited configs.
+- Optional explicit flag can revert to the exact parent config lists.
+
+Why this solution?
+- Expected improvement: small but robust; can improve both runtime and evaluation cost by avoiding config bloat.
+- Advantages: lowest implementation risk and simplest to execute.
+- Disadvantages: likely tiny upside because global best already exploited many config-level gains.

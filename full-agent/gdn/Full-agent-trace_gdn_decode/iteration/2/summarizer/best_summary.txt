@@ -1,0 +1,18 @@
+**1. Executive Summary:**
+This iteration was a highly successful optimization because expanding the grid to parallelize the V-dimension across multiple blocks significantly improved SM occupancy, outperforming its sibling-less baseline.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   **Sibling Rank:** 1 out of 1 children. Top sibling score: 97.00%.
+*   **Score Delta:** From parent (70.55%) to child (97.00%).
+*   **Key Change:** Multi-block V-dimension parallelization, increasing the grid size from 8 to 256 blocks by distributing V-rows across the grid (`dim3 grid(B, num_v_heads, V / 4)`).
+*   **Core Metrics:** Execution time reduced from 0.0337ms to 0.0240ms (speedup increased from 705.5x to 970.0x). Achieved GPU SM occupancy increased from ~6.2% to ~11.8%. Warp stalls due to L1TEX scoreboard dependencies decreased from ~73.9% to ~40.7%-49.6%.
+
+**3. Strategic Analysis (The "So What?"):**
+*   **Root Cause:** The improvement is directly attributed to the high-quality execution of the plan. By distributing the workload over 256 independent blocks instead of confining it to 8, the kernel allowed the hardware scheduler to distribute work across more SMs, successfully hiding a significant portion of the L1TEX memory fetch latency.
+*   **Key Insight:** For small batch operations, parallelizing loops across the grid rather than strictly within a block is essential for maximizing GPU hardware utilization. The algebraically decoupled equations proved perfectly stable when scaled across multiple independent blocks.
+*   **Identified Risk:** While occupancy doubled and stalls decreased, the kernel still vastly underutilizes the GPU (only ~11.8% achieved occupancy). L1TEX memory dependency remains the dominant stall reason, indicating that global memory bandwidth for the large `state` tensor is still a severe limiting factor.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   **Recommend Fusion:** The combination of exact algebraic decoupling and multi-block V-dimension distribution is highly robust and performant. This architectural foundation MUST be preserved in future iterations.
+*   **Recommend Exploration:** The remaining ~40-49% L1TEX stalls must be addressed. Explore asynchronous memory copies (e.g., `cuda::memcpy_async`) or pre-fetching `state` tensor chunks into `__shared__` memory to further hide memory latency. Additionally, experiment with different values of $V_{PB}$ (V-rows per block) or thread block dimensions to push occupancy higher.
+*   **Warn:** If shared memory is introduced to cache the `state` tensor, strictly minimize `__syncthreads()` usage. The NCU profiler notes that with the current low number of active blocks per multiprocessor, excessive synchronization will cause the hardware to idle.

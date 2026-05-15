@@ -1,0 +1,12 @@
+Plan 2: Three-tier dispatch: Fast-path (L<=2048) + Medium-path (2048<L<=~8192 block-level topk) + Long-path (full CUB)
+
+Mathematical: partition batches by seq_len into 3 buckets. Medium uses single-batch kernel with BlockRadixSort or device-wide sort over smaller range; long uses existing pipeline.
+
+Solver Strategy: Data-structure selection per bucket.
+
+Validity: Each batch dispatched to exactly one path. CUB sort or block sort are both deterministic exact top-K.
+
+Why: Attacks now-dominant CUB sort cost for medium sequences. However, added complexity risks bugs in block-level radix sort (shared memory size, thread count).
+
+Advantages: Potentially larger gain on medium-length workloads.
+Disadvantages: Higher implementation risk; untested block-topk; may not help if workloads are bimodal (very short or very long).

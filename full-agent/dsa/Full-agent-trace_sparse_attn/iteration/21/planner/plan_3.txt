@@ -1,0 +1,5 @@
+Plan 3: Aggressive small-path partition+merge with hg=4, P=64 multi-block.
+- Variables: P=64 partitions x 16 heads x T blocks; exact merge reducer.
+- Solver: Re-decompose small path with multi-block partial-state computation.
+- Risks: Two prior siblings tried this and either regressed or were silently dropped.
+- Why: Highest theoretical ceiling but also highest implementation risk.

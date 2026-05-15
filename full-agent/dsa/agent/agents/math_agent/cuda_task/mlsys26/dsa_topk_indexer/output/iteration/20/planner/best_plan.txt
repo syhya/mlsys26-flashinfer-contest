@@ -1,0 +1,230 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Recover from the parent's regression (`baa28cba`, score 7.86, 0.057 ms) by restoring the proven 3-tier (S/M/L) architecture of solution `dc51d5fc` (score 9.564, 0.036 ms — the database champion). Preserve correctness=1.0. The current island parent is significantly below the population best; the algorithmically most robust action is a strict, byte-equivalent restoration of the known-good algorithm.
+
+**Selected Outline:** Plan 1 — Strict Revert to grandparent `dc51d5fc` (3-tier S/M/L baseline = 9.564).
+
+**Rationale for Selection:**
+1. The current parent (`baa28cba`, 7.86) and recent siblings of the lineage's best (`90a94780` 9.00, `baa28cba` 7.86) all attempted some form of fusion / radix-select / TIER-L2 extension and ALL regressed below the proven baseline 9.564.
+2. The strategic summaries explicitly recommend re-anchoring on `dc51d5fc` and treating it as a "safe base" before any further experimentation.
+3. Mathematically guaranteed: the source code of `dc51d5fc` already passed correctness=1.0 across 12 workloads, and absolute kernel latency is the lowest measured (0.036 ms).
+4. **Decouples Structure (3 disjoint tiers by L) from Parameters (CUB primitives = exact algorithms)**.
+5. Zero new code paths = zero new failure modes. Any speculative fusion introduces NEW bug surfaces that have repeatedly failed in this lineage.
+
+---
+
+### Phase 1: Mathematical Definition
+
+For each batch `b`:
+- Let `L = seq_lens[b]`, `K = TOPK = 2048`, `P = page_size = 64`, `N = max_num_pages * 64`.
+- Per-token score: `score[b, p·64 + t] = Σ_h ReLU(scale[t] · Σ_d Q[b,h,d] · fp8(K[t,d])) · weights[b,h]`, valid iff `p·64 + t < L`.
+- Output `topk_indices[b, 0..min(K,L)-1]` = any permutation of indices of top-`min(K,L)` scores; remaining positions = -1.
+- Global index encoding: `block_table[b, p] · 64 + t`.
+
+**Strict 3-tier partition (mutually exclusive, exhaustive):**
+
+| Tier | Condition           | Kernel                                              |
+|------|---------------------|-----------------------------------------------------|
+| S    | `L ≤ 2048`          | `emit_short_topk_kernel` (direct enumeration)       |
+| M    | `2048 < L ≤ 6144`   | `block_topk_kernel<256, 24>` (CUB BlockRadixSort)   |
+| L    | `L > 6144`          | `cub::DeviceSegmentedRadixSort` + `extract_topk`    |
+
+Constants:
+```cpp
+constexpr int TOPK_CONST = 2048;
+constexpr int L_MED_MAX  = 6144;
+constexpr int BT_THREADS = 256;
+constexpr int BT_ITEMS   = 24;   // 256 * 24 = 6144
+static_assert(BT_THREADS * BT_ITEMS >= L_MED_MAX, "TIER-M buffer too small");
+```
+
+---
+
+### Phase 2: The Optimization Loop (Kernel Architecture — exact replica of `dc51d5fc`)
+
+**A. `cvt_fp8x4_to_float4(uint32_t)`** — inline device helper using a `union { uint32_t u32; __nv_fp8_e4m3 v[4]; }` cast (the union-cast variant is what `dc51d5fc` used, more reliable than memcpy).
+
+**B. `emit_short_topk_kernel`** (TIER-S):
+```cpp
+__global__ void emit_short_topk_kernel(
+    const int32_t* seq_lens, const int32_t* block_table,
+    int32_t* topk_indices, int max_num_pages, int topk)
+{
+    int b = blockIdx.x; int L = seq_lens[b];
+    if (L > topk) return;
+    for (int i = threadIdx.x; i < topk; i += blockDim.x) {
+        int v = -1;
+        if (i < L) {
+            int p = i >> 6, t = i & 63;
+            v = block_table[b * max_num_pages + p] * 64 + t;
+        }
+        topk_indices[b * topk + i] = v;
+    }
+}
+```
+Launch: `<<<batch_size, 256>>>`.
+
+**C. `compute_scores_kernel`** — verbatim from `dc51d5fc`. Key features:
+- Block size 256 threads, grid `(max_num_pages, batch_size)`.
+- Guards: `if (seq_len <= topk) return;` and `if (p*64 >= seq_len) return;`.
+- Shared memory: `q_smem_f[128][65]` (transposed-Q with +1 padding to avoid bank conflicts), `k_smem[8][128]`, `weights_smem[64]`.
+- Q load: 256 threads dequantize 2048 FP8 bytes via `cvt_fp8x4_to_float4`, scattered into transposed layout `q_smem_f[cg*4+{0..3}][head]` where `head = i/32`, `cg = i%32`.
+- Per-iteration (8 iters per kernel): each warp handles one token row; all 32 lanes load 4 K bytes via `*(uint32_t*)(k_page_base + t*128 + lane_id*4)`, then store as `float4` into `k_smem[warp_id]`.
+- Inner dot product: each lane `lane_id` computes 2 head-scores `val0` (head=lane_id) and `val1` (head=lane_id+32), unrolled over `i = 0..127` with `q_smem_f[i][lane_id]` and `q_smem_f[i][lane_id+32]`.
+- Scale read by lane 0 then broadcast via `__shfl_sync(0xffffffff, scale, 0)`.
+- ReLU + weighted reduction: `if (val0>0) hs += val0*weights_smem[lane_id]; if (val1>0) hs += val1*weights_smem[lane_id+32];`
+- Warp reduction via `__shfl_down_sync` over offsets 16,8,4,2,1.
+- Lane 0 NaN guard: `if (isnan(hs)) hs = -1e20f;` then write `scores_buf[b*N + p*64+t]` and `indices_buf[b*N + p*64+t] = global_page_idx*64 + t`.
+
+**D. `block_topk_kernel<256, 24>`** (TIER-M) — verbatim from `dc51d5fc`:
+```cpp
+template <int BLOCK_THREADS, int ITEMS_PER_THREAD>
+__global__ void block_topk_kernel(
+    const float* scores_buf, const int32_t* indices_buf,
+    const int32_t* seq_lens, int32_t* topk_indices,
+    int N, int topk, int l_med_max)
+{
+    int b = blockIdx.x; int L = seq_lens[b];
+    if (L <= topk) return;          // TIER-S handles
+    if (L > l_med_max) return;      // TIER-L handles
+
+    using BlockRadixSort = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int32_t>;
+    __shared__ typename BlockRadixSort::TempStorage temp_storage;
+
+    float keys[ITEMS_PER_THREAD]; int32_t vals[ITEMS_PER_THREAD];
+    int base = b * N;
+    #pragma unroll
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) {
+        int idx = i * BLOCK_THREADS + threadIdx.x;     // STRIDED LOAD
+        if (idx < L) { keys[i] = scores_buf[base + idx]; vals[i] = indices_buf[base + idx]; }
+        else        { keys[i] = -1e30f; vals[i] = -1; }
+    }
+    BlockRadixSort(temp_storage).SortDescendingBlockedToStriped(keys, vals);
+    #pragma unroll
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) {
+        int out_pos = i * BLOCK_THREADS + threadIdx.x;  // STRIDED WRITE matching BlockedToStriped
+        if (out_pos < topk) topk_indices[b * topk + out_pos] = vals[i];
+    }
+}
+```
+**CRITICAL CORRECTNESS PAIRING:** strided load (`i*BLOCK_THREADS + threadIdx.x`) MUST be paired with `SortDescendingBlockedToStriped` AND strided write of the same form. Do NOT switch to `SortDescending` (blocked output) without changing both load and write patterns.
+
+Launch: `<<<batch_size, 256>>>`.
+
+**E. `generate_offsets_begin_end`** — empty CUB segment for any batch with `L ≤ L_MED_MAX`:
+```cpp
+__global__ void generate_offsets_begin_end(int32_t* begin, int32_t* end,
+    const int32_t* seq_lens, int batch_size, int seg, int l_med_max) {
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b < batch_size) {
+        int L = seq_lens[b];
+        begin[b] = b * seg;
+        end[b]   = (L > l_med_max) ? (b * seg + L) : (b * seg);
+    }
+}
+```
+
+**F. `extract_topk_kernel`** — early-return if `L ≤ L_MED_MAX`:
+```cpp
+__global__ void extract_topk_kernel(const int32_t* idx_sorted, int32_t* topk_indices,
+    const int32_t* seq_lens, int batch_size, int seg, int topk, int l_med_max) {
+    int b = blockIdx.x;
+    if (seq_lens[b] <= l_med_max) return;
+    int actual = min(topk, seq_lens[b]);
+    for (int tid = threadIdx.x; tid < topk; tid += blockDim.x) {
+        topk_indices[b*topk + tid] = (tid < actual) ? idx_sorted[b*seg + tid] : -1;
+    }
+}
+```
+Launch: `<<<batch_size, 1024>>>`.
+
+**G. Host pipeline `topk_indexer_forward`:**
+1. Make all inputs contiguous; allocate `scores_buf[batch_size, N]` (float32), `indices_buf[batch_size, N]` (int32), `topk_indices[batch_size, 2048]` (int32).
+2. Launch `emit_short_topk_kernel<<<batch_size, 256>>>` (TIER-S).
+3. Launch `compute_scores_kernel<<<dim3(max_num_pages, batch_size), 256>>>`.
+4. **One-time** dynamic-smem config (idempotent via `static bool`):
+   ```cpp
+   static bool smem_set = false;
+   if (!smem_set) {
+       cudaFuncSetAttribute((const void*)block_topk_kernel<BT_THREADS, BT_ITEMS>,
+           cudaFuncAttributeMaxDynamicSharedMemorySize, 98304);
+       smem_set = true;
+   }
+   ```
+5. Launch `block_topk_kernel<256,24><<<batch_size, 256>>>` (TIER-M).
+6. Allocate `scores_sorted`, `indices_sorted`, `begin_offsets[batch_size]`, `end_offsets[batch_size]`.
+7. Launch `generate_offsets_begin_end<<<(batch_size+255)/256, 256>>>` with threshold `L_MED_MAX`.
+8. CUB size query: `cub::DeviceSegmentedRadixSort::SortPairsDescending(nullptr, temp_storage_bytes, ...)`.
+9. Allocate temp_storage (uint8); CUB actual call.
+10. Launch `extract_topk_kernel<<<batch_size, 1024>>>` (TIER-L).
+11. Return `topk_indices`.
+
+---
+
+### Phase 3: The "Safety Valve" (CRITICAL — non-negotiable)
+
+1. **Strict partition invariant (mathematical):** Each batch `b` falls into exactly one of {S, M, L} via `L = seq_lens[b]`. Each kernel writes `topk_indices[b,:]` only for its tier and early-returns otherwise. No race possible. Proof by case enumeration on `L`.
+2. **Exact top-K guarantee in every tier:**
+   - S: enumeration of all valid tokens (set-correct since `L ≤ K` ⇒ all valid positions ARE the top-K).
+   - M: `cub::BlockRadixSort` is a deterministic exact sort.
+   - L: `cub::DeviceSegmentedRadixSort` is deterministic exact.
+3. **Padding sentinel `-1e30f`** for out-of-range lanes in TIER-M load — strictly more negative than NaN sentinel `-1e20f`, so NaN-corrected scores still outrank padding.
+4. **NaN guard in scoring:** `if (isnan(head_score)) head_score = -1e20f;` retained.
+5. **`SortDescendingBlockedToStriped` pairing** — flagged correctness-critical by previous strategic summaries.
+6. **Dynamic-smem config**: `cudaFuncSetAttribute` set BEFORE first launch via static bool guard; idempotent.
+7. **Variable-axis support**: no hardcoded batch/page/max_num_pages assumptions; all derived from tensor shapes at runtime.
+8. **Compile-time invariant**: `static_assert(BT_THREADS * BT_ITEMS >= L_MED_MAX);`.
+9. **CUB version compatibility**: Only uses `cub::BlockRadixSort` and `cub::DeviceSegmentedRadixSort::SortPairsDescending` — both stable APIs in CUDA 12+.
+
+---
+
+### Phase 4: Implementation Details
+
+**Single file:** `kernel.cu`.
+**Headers (exact):**
+```cpp
+#include <torch/extension.h>
+#include <cuda_fp8.h>
+#include <tuple>
+#include <cub/cub.cuh>
+#include <cub/block/block_radix_sort.cuh>
+```
+
+**Constants (top of file, after headers):**
+```cpp
+constexpr int TOPK_CONST = 2048;
+constexpr int L_MED_MAX  = 6144;
+constexpr int BT_THREADS = 256;
+constexpr int BT_ITEMS   = 24;
+static_assert(BT_THREADS * BT_ITEMS >= L_MED_MAX, "TIER-M buffer too small");
+```
+
+**Functions in order:**
+1. `inline __device__ float4 cvt_fp8x4_to_float4(uint32_t)` — union-cast variant.
+2. `__global__ void emit_short_topk_kernel(...)`.
+3. `__global__ void compute_scores_kernel(...)`.
+4. `template<int BLOCK_THREADS, int ITEMS_PER_THREAD> __global__ void block_topk_kernel(...)`.
+5. `__global__ void generate_offsets_begin_end(...)`.
+6. `__global__ void extract_topk_kernel(...)`.
+7. `torch::Tensor topk_indexer_forward(...)`.
+8. `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("topk_indexer_forward", ...); m.def("dsa_forward", ...); }` — keep both names.
+
+**Source reference:** Emit code that is functionally and structurally **byte-equivalent to grandparent solution `dc51d5fc`** (the proven 9.564 baseline). Do NOT add: TIER-L2, fused scoring, radix-select, host-side seq_lens inspection, or any new kernels. Do NOT use the parent `baa28cba`'s smem-staging fused approach which regressed to 7.86.
+
+**Randomness:** None. Fully deterministic. No multi-start needed.
+**Library check:** Only `<cuda_fp8.h>` + `<cub/...>` — both standard CUDA 12+, both already validated.
+**Compile target:** SM90+ (Hopper). Already validated.
+
+**Expected Performance:**
+- Current parent (`baa28cba`): 0.057 ms, score 7.86 (regressed).
+- This child: matches grandparent `dc51d5fc` exactly: ~0.034–0.036 ms, **score ≈ 8.6–9.6** (depending on reference baseline noise of ±10%).
+- Best case: 9.564.
+- Worst case: 8.6 (still significantly above current parent's 7.86, +9% guaranteed improvement).
+
+**Fallback:** None needed — the plan IS the fallback. The algorithm has been empirically validated.
+
+**Correctness Verification:**
+- Grandparent `dc51d5fc` already passed: correctness=1.0, max_relative_error=0, max_absolute_error=0, 12/12 workloads. This child re-emits the same algorithm → same correctness guarantees by construction.
+
+**Why this is the right move now:**
+The current lineage has 3 consecutive regressions below the population best (9.564 → 9.36 → 9.00 → 7.86). All regressions involved speculative additions (TIER-L2, smem-staged fusion). Per the "decouple structure from parameters" principle and the "safety valve" mandate, restoration of the proven baseline is the algorithmically most robust action. This re-anchors the island floor at the empirically validated 9.564, providing a stable foundation for future targeted optimization (e.g., true register-resident fusion or radix-select for long tail) in subsequent iterations.

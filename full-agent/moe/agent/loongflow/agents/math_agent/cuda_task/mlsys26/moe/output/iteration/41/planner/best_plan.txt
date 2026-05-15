@@ -1,0 +1,284 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Improve the current global-best FP8 block-scale MoE implementation for DeepSeek-style routing on B200 by preserving the proven-correct high-performance base and adding one structurally meaningful but tightly contained optimization: **apply a TMA/block-pointer weight-load variant to GEMM2**, with a deterministic fallback to the exact current-best path. The task objective is to maximize score by reducing end-to-end latency while strictly maintaining correctness (`score >= 1.0`, output `[T,7168]` bf16, FP32 accumulation, any `T`).
+
+**Selected Outline:** Rebase onto global best `6da80c61` and add a second GEMM2 kernel using `tl.make_block_ptr` / `tl.advance` for W2 loads, while keeping the parent GEMM2 kernel verbatim as an exact fallback.
+
+**Rationale for Selection:**
+1. **Global perspective says fusion, not diversity.** The best score is now `1.5985`, and recent top solutions are tightly clustered around `1.55–1.60`, all on the same strong lineage. That means the frontier is real and mature; the right move is to build on the best algorithmic core, not restart from scratch.
+2. **The assigned parent `a96d6608` is no longer frontier-best.** Its only known child already improved to `302d2eb3`, and the global best has moved further to `6da80c61`. So the child should rebase onto `6da80c61`, not the assigned parent’s older structure.
+3. **This is the most robust structural change.** Fused Triton routing has larger upside but far higher correctness risk because DeepSeek no-aux routing has brittle ranking/tie/order semantics. GEMM2 TMA changes only the load mechanism, not the math.
+4. **It preserves a hard performance floor.** By keeping the exact `6da80c61` path intact and adding a guarded new path, failure or compile mismatch falls back to the current best known implementation.
+
+---
+
+## Phase 1: Mathematical Definition
+
+### 1.1 Variables
+Let the implementation be parameterized by:
+- `K_route`: routing algorithm implementation.
+- `K1`: GEMM1 kernel implementation.
+- `K2_base`: current-best GEMM2 kernel from `6da80c61`.
+- `K2_tma`: new GEMM2 kernel with block-pointer/TMA-style W2 loads.
+- `D`: dispatcher selecting between `K2_tma` and `K2_base`.
+- `C2`: GEMM2 autotune config set.
+
+The child keeps:
+- `K_route = route_tokens from 6da80c61` unchanged.
+- `K1 = grouped_gemm1_kernel / grouped_gemm1_kernel_tma setup from 6da80c61` unchanged.
+- `K2 = {K2_base, K2_tma}` with deterministic guarded dispatch.
+
+### 1.2 Constraints
+The child must satisfy all hard constraints:
+
+#### Routing constraints
+For each token `t` and expert `e`:
+- `q[t,e] = sigmoid(routing_logits[t,e])`
+- `rank[t,e] = q[t,e] + routing_bias[e]`
+- Partition experts into 8 groups of size 32.
+- For each token/group, compute group score as sum of top-2 `rank` values within the group.
+- Select top-4 groups.
+- Mask all other experts.
+- Select global top-8 experts from remaining masked `rank`.
+- Routing weights must be normalized from `q` over those selected top-8 experts and then scaled by `routed_scaling_factor`.
+
+#### GEMM1 constraints
+For routed row `j` belonging to expert `e` and original token `tok[j]`:
+- `G1[j,n] = Σ_k A[tok[j],k] * W1[e,n,k] * sA[k//128, tok[j]] * sW1[e,n//128,k//128]`
+- Accumulation must be FP32.
+
+#### SwiGLU constraints
+For `i in [0, I)`:
+- `x1 = G1[:, :I]`
+- `x2 = G1[:, I:]`
+- `C[:, i] = x1[:, i] * x2[:, i] * sigmoid(x2[:, i])`
+
+#### GEMM2 constraints
+For routed row `j` and hidden dim `h`:
+- `O[j,h] = Σ_i C[j,i] * W2[e,h,i] * sW2[e,h//128,i//128]`
+- Accumulation must be FP32.
+
+#### Scatter constraints
+- Final output is `output[tok[j], h] += routing_weight[j] * O[j,h]`
+- Final dtype is `bfloat16` only at the output.
+
+#### Safety constraints
+- Any expert-base pointer arithmetic in Triton must use `int64`.
+- `T` is dynamic and arbitrary.
+- The implementation must remain self-contained in one Python file.
+
+### 1.3 Objective
+Minimize total latency:
+- `f(X) = total_forward_time(X)`
+subject to all correctness constraints above.
+
+This is a **deterministic constrained model-selection problem** over a finite set of implementation choices, not a stochastic search problem.
+
+---
+
+## Phase 2: The Optimization Loop
+
+### 2.1 Rebase onto `6da80c61` exactly
+Use `6da80c61` as the full structural baseline, not the assigned older parent. Copy these components **verbatim**:
+1. `_route_tokens` from `6da80c61`.
+2. `grouped_gemm1_kernel`.
+3. `grouped_gemm1_kernel_tma`.
+4. `run()` structure, including:
+   - early zero-return edge cases,
+   - allocation strategy,
+   - GEMM1 dispatch with try/except fallback,
+   - bf16 epilogue (`O.to(torch.bfloat16)` then bf16 `index_add_`).
+5. `grouped_gemm2_kernel` from `6da80c61` kept untouched as `K2_base`.
+
+This gives a guaranteed strong baseline equal to the current best known solution.
+
+### 2.2 Add a second GEMM2 kernel: `grouped_gemm2_kernel_tma`
+Construct a new GEMM2 kernel whose math is identical to the current one, but whose W2 loads use `tl.make_block_ptr` and `tl.advance`.
+
+The kernel should preserve the exact FP8 tensor-core pathway:
+- load `x1`, `x2` from `G1`
+- compute `c = x1 * x2 * tl.sigmoid(x2)`
+- compute scalar quantization:
+  - `c_abs_max = tl.max(tl.abs(c))`
+  - `c_scale = tl.maximum(c_abs_max / 448.0, 1e-12)`
+  - `c_fp8 = (c / c_scale).to(tl.float8e4nv)`
+- load `w2_fp8` through a block pointer instead of raw pointer arithmetic
+- do `dot_result = tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32)`
+- post-scale with `c_scale * w2_scale`
+- multiply by routing weight
+- store FP32 intermediate `O`
+
+### 2.3 Mathematical equivalence of the new load path
+The new kernel must describe each expert’s W2 slab as a 2D matrix with shape `(H, I)` using block pointers:
+- base = `W2_ptr + pid_e.to(tl.int64) * stride_w2e`
+- shape = `(H, I)`
+- strides = `(stride_w2n, stride_w2k)`
+- offsets = `(pid_n * BLOCK_N, 0)`
+- block_shape = `(BLOCK_N, BLOCK_K)`
+- order chosen so advancing across K is valid
+
+Each iteration of the K-loop loads the exact same logical tile previously addressed by:
+- `W2_ptr + pid_e * stride_w2e + n_offs[None,:] * stride_w2n + k_offs[:,None] * stride_w2k`
+
+Since TMA changes only the data-movement mechanism, not the mathematical operands, the dot product is mathematically unchanged.
+
+### 2.4 Add only a very small autotune expansion
+Do **not** bloat autotune space aggressively.
+Add at most one new config to the new GEMM2-TMA kernel beyond the inherited practical set, for example one `BLOCK_M=64 or 128` and `BLOCK_N=128` variant if needed.
+
+The main search process is:
+1. Keep `K2_base` as-is.
+2. Add `K2_tma` with a compact config set.
+3. In `run()`, try `K2_tma` first.
+4. If compile/runtime launch fails, use `K2_base`.
+
+This is effectively a deterministic **two-candidate model selection loop** with an exact fallback.
+
+---
+
+## Phase 3: The "Safety Valve" (CRITICAL)
+
+### 3.1 Exact fallback mechanism
+The code must include a deterministic fallback in `run()`:
+- primary path: launch `grouped_gemm2_kernel_tma`
+- fallback path: on any exception, launch the original `grouped_gemm2_kernel`
+
+This guarantees:
+- no crash,
+- no correctness regression from a failed TMA experiment,
+- performance floor approximately equal to `6da80c61`.
+
+### 3.2 Preserve all fragile correctness-critical components
+The following must remain unchanged from `6da80c61`:
+1. Routing implementation.
+2. GEMM1 kernels and dispatch.
+3. GEMM2 FP8 quantization triad semantics.
+4. bf16 epilogue.
+
+### 3.3 Deterministic validity checks embedded by construction
+The child must enforce these exact invariants:
+- `tl.max(tl.abs(c))` has **no axis argument**.
+- FP8 cast uses `tl.float8e4nv`.
+- `tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32)` uses FP8 on both inputs.
+- `acc += dot_result * c_scale * w2_scale` stays in FP32.
+- `pid_e.to(tl.int64)` is used before stride multiplication.
+- `BLOCK_N=128` for GEMM2 so hidden-dim block scale indexing remains exact.
+- output scatter remains outside Triton using bf16 `index_add_` exactly as in `6da80c61`.
+
+### 3.4 Why this safety valve guarantees validity
+This plan decouples:
+- **Structure finding:** introduce a new load mechanism only in GEMM2.
+- **Parameter tuning:** small finite config set handled by Triton autotune.
+- **Hard constraint enforcement:** fallback to the exact already-successful implementation.
+
+So even if the new structural variant underperforms or fails to compile, the returned program still satisfies the task and should retain `score >= 1.0`.
+
+---
+
+## Phase 4: Implementation Details
+
+### 4.1 Allowed libraries
+Use only:
+- `torch`
+- `triton`
+- `triton.language as tl`
+
+No obscure packages. No randomness. No multi-start needed because the algorithm is fully deterministic.
+
+### 4.2 Exact file structure
+The executor should produce a single `.py` file in this order:
+1. imports
+2. `grouped_gemm1_kernel` copied from `6da80c61`
+3. `grouped_gemm1_kernel_tma` copied from `6da80c61`
+4. `grouped_gemm2_kernel` copied from `6da80c61` and preserved as fallback base
+5. `grouped_gemm2_kernel_tma` newly added
+6. `_route_tokens` copied verbatim from `6da80c61`
+7. `run()` copied from `6da80c61`, modified only at GEMM2 dispatch to try TMA first then fallback
+
+### 4.3 Code-ready dispatcher pattern
+Inside `run()`, preserve all logic except GEMM2 launch, which should follow this exact structure:
+```python
+try:
+    grouped_gemm2_kernel_tma[grid_gemm2](
+        G1_ptr=G1,
+        W2_ptr=gemm2_weights,
+        W2_scale_ptr=gemm2_weights_scale,
+        Routing_weights_ptr=sorted_weights,
+        Out_ptr=O,
+        expert_offsets_ptr=expert_offsets,
+        I=I,
+        H=H,
+        MAX_TK=max_count,
+        stride_g1m=G1.stride(0),
+        stride_g1k=G1.stride(1),
+        stride_w2e=gemm2_weights.stride(0),
+        stride_w2n=gemm2_weights.stride(1),
+        stride_w2k=gemm2_weights.stride(2),
+        stride_w2scale_e=gemm2_weights_scale.stride(0),
+        stride_w2scale_n=gemm2_weights_scale.stride(1),
+        stride_w2scale_k=gemm2_weights_scale.stride(2),
+        stride_outm=O.stride(0),
+        stride_outn=O.stride(1),
+        BLOCK_K=128,
+    )
+except Exception:
+    grouped_gemm2_kernel[grid_gemm2](
+        G1_ptr=G1,
+        W2_ptr=gemm2_weights,
+        W2_scale_ptr=gemm2_weights_scale,
+        Routing_weights_ptr=sorted_weights,
+        Out_ptr=O,
+        expert_offsets_ptr=expert_offsets,
+        I=I,
+        H=H,
+        MAX_TK=max_count,
+        stride_g1m=G1.stride(0),
+        stride_g1k=G1.stride(1),
+        stride_w2e=gemm2_weights.stride(0),
+        stride_w2n=gemm2_weights.stride(1),
+        stride_w2k=gemm2_weights.stride(2),
+        stride_w2scale_e=gemm2_weights_scale.stride(0),
+        stride_w2scale_n=gemm2_weights_scale.stride(1),
+        stride_w2scale_k=gemm2_weights_scale.stride(2),
+        stride_outm=O.stride(0),
+        stride_outn=O.stride(1),
+        BLOCK_K=128,
+    )
+```
+
+### 4.4 Kernel-construction specifics for `grouped_gemm2_kernel_tma`
+The new kernel should mirror the current base kernel line-for-line except for W2 tile loads:
+- build `W2_block_ptr = tl.make_block_ptr(...)`
+- each loop iteration do `w2_block = tl.load(W2_block_ptr, boundary_check=(0, 1))`
+- transpose if required to feed `tl.dot`
+- advance with `W2_block_ptr = tl.advance(W2_block_ptr, (0, BLOCK_K))`
+
+All other code should remain as close as possible to the current best kernel.
+
+### 4.5 Anti-regression checklist for executor
+Before finalizing the child, verify:
+- [ ] Rebased on `6da80c61`, not on older parent `a96d6608`
+- [ ] `_route_tokens` unchanged from `6da80c61`
+- [ ] GEMM1 path unchanged from `6da80c61`
+- [ ] Original `grouped_gemm2_kernel` preserved verbatim as fallback
+- [ ] New `grouped_gemm2_kernel_tma` only changes weight-load path
+- [ ] Uses `tl.make_block_ptr` and `tl.advance`
+- [ ] Uses `tl.float8e4nv`
+- [ ] Uses scalar `tl.max(tl.abs(c))`
+- [ ] Uses `pid_e.to(tl.int64)` for expert stride arithmetic
+- [ ] Keeps bf16 epilogue exactly as in `6da80c61`
+- [ ] No `tl.atomic_add`
+- [ ] No routing rewrite
+- [ ] No autotune explosion
+
+---
+
+## Final Review
+
+- **Does this rely on math rather than luck?** Yes. It is a finite deterministic model-selection problem with exact fallback and load-equivalence reasoning.
+- **Library check:** only `torch`, `triton`, `triton.language as tl`.
+- **Randomness check:** none.
+- **Implementable?** Yes. It is a small, code-ready extension of the current best solution.
+- **Decouples structure and parameters?** Yes. The structural change is isolated to GEMM2 weight loading; parameter tuning is limited to a small Triton autotune set; hard validity is enforced by fallback.
+
+This is the most algorithmically robust next child plan: it attacks one of the last meaningful structural levers, keeps the frontier-best implementation intact, and guarantees a valid high-scoring program even if the new path does not win.

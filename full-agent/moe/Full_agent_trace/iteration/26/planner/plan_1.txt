@@ -1,0 +1,111 @@
+## Plan 1: GEMM2 Scale Indexing Fix + FP32 GEMM2 via torch._scaled_mm Hybrid
+
+### Mathematical Formulation
+
+**Variables ($X$):**
+- Token-expert dispatch CSR: `sorted_tokens`, `expert_offsets`, `sorted_weights`
+- Triton GEMM1 kernel: grouped FP8 GEMM with corrected A-scale and W1-scale indexing
+- GEMM2 execution: per-expert torch._scaled_mm with exact FP8 dequant for W2
+
+**Constraints ($C$):**
+- Block scale alignment: BLOCK_K = 128 strictly
+- hidden_states_scale[kb, token_id] indexing must use original token index (not local row)
+- gemm2_weights_scale[e, h_block, i_block] must index h-block for N dimension, i-block for K dimension
+- All GEMM accumulation in FP32
+- Output [T, 7168] bfloat16
+
+**Objective ($f(X)$):**
+Eliminate persistent 8192.0 max absolute error by fixing GEMM2 scale indexing.
+Maintain or improve execution speed vs parent's 2.630ms.
+
+### Solver Strategy
+
+**Root Cause Analysis:**
+The parent solution (46817723) fixed GEMM1's A-scale indexing and achieved 8.72x speedup with correctness=1.0 but still shows max_absolute_error=8192.0 in bench_stats. The key insight from the lineage is that GEMM2's weight dequantization uses:
+```
+n_block_idx = n_offs // 128  # This computes H-dimension block index
+k_block_idx = k_start // BLOCK_K  # This is the I-dimension block index
+```
+In the parent's grouped_gemm2_kernel:
+- W2 layout is [E, H, I] fp8
+- gemm2_weights_scale is [E, H//128, I//128]
+- The kernel currently loads W2 as w2_ptrs with n_offs as H-dimension and k_offs as I-dimension
+- w2_scale is indexed: W2_scale_ptr + e * stride + n_block_idx * stride_w2scale_n + k_block_idx * stride_w2scale_k
+- This appears correct BUT the dequantization order matters: the scale must be applied AFTER the dot, not per-column broadcast
+
+**CRITICAL ISSUE in GEMM2:**
+The parent's GEMM2 dequantizes W2 BEFORE the dot: `w2_f32 = w2_fp8.to(tl.float32) * w2_scale`
+Then does: `acc += tl.dot(swiglu_out, w2_f32, out_dtype=tl.float32)`
+
+This means ALL rows in the BLOCK_M get the SAME w2_scale, but the correct formula requires:
+`result[m,n] = sum_k(swiglu[m,k] * w2[k,n]) * w2_scale[n//128, k//128]`
+
+When BLOCK_K=128, each k-iteration corresponds to one I-block. The w2_scale for that tile is a scalar per n-block, so broadcasting it across the entire BLOCK_M x BLOCK_N tile IS correct for a single k-block. This looks mathematically correct.
+
+**However**: The parent uses `w2_f32 = w2_fp8.to(tl.float32) * w2_scale` and then `tl.dot(swiglu_out, w2_f32)`. This means casting fp8 to float32 THEN scaling THEN doing float32 matmul - this doesn't use FP8 tensor cores. The error could come from dtype issues.
+
+**Plan 1 Fix: Use torch._scaled_mm for GEMM2 (per expert)**
+1. Keep the existing GEMM1 Triton kernel (it works well)
+2. After getting G1 (float32), compute SwiGLU in PyTorch
+3. For GEMM2, re-quantize swiglu output to FP8 using exact PyTorch ops
+4. Use `torch._scaled_mm` for each expert's GEMM2
+5. Apply routing weights and scatter-add
+
+This approach isolates any GEMM2 kernel bug by replacing it with cuBLAS-backed FP8 GEMM.
+
+### Validity Mechanism
+
+1. Use `torch.zeros` for all intermediate tensors
+2. Validate CSR offsets before launching kernels
+3. Use `torch._scaled_mm` with exact scale computation
+4. All-zeros fallback if routing produces empty set
+
+### Why this solution?
+
+**Advantages:**
+- Directly replaces the suspected buggy GEMM2 Triton kernel with cuBLAS
+- torch._scaled_mm is numerically well-tested
+- FP8 tensor cores still used for GEMM2 via cuBLAS path
+- Simpler GEMM2 code reduces risk of indexing bugs
+
+**Disadvantages:**
+- Per-expert loop for _scaled_mm adds overhead
+- Re-quantization step adds extra computation
+- Expert weight gathering may be slow
+
+**Expected improvement:**
+- If GEMM2 Triton has indexing bug, this will eliminate the 8192.0 error
+- Speedup might decrease slightly (2.8-3.0ms) but correctness improves
+
+### Implementation Steps
+
+Phase 1: Mathematical Setup
+- H=7168, I=2048, BLOCK_K=128
+- hidden_states_scale: [56, T] -- index as scale[k_block, token_id]
+- gemm1_weights_scale: [32, 32, 56] -- index as scale[e, n_block, k_block]
+- gemm2_weights_scale: [32, 56, 16] -- index as scale[e, h_block, i_block]
+
+Phase 2: Optimization
+- Keep parent's grouped_gemm1_kernel unchanged (it's correct)
+- For SwiGLU: PyTorch `torch.nn.functional.silu(G1[:, I:]) * G1[:, :I]` (fast, correct)
+- For GEMM2: process per expert using torch._scaled_mm
+
+Phase 3: Safety Valve
+- Re-quantize swiglu output to FP8 per token with block scale computation:
+  ```python
+  # swiglu_expert: [Tk, I] float32
+  # Quantize to fp8 with per-128-element block scales
+  Tk, I = swiglu_expert.shape
+  swiglu_reshaped = swiglu_expert.reshape(Tk, I // 128, 128)
+  swiglu_absmax = swiglu_reshaped.abs().amax(dim=2, keepdim=True)  # [Tk, I//128, 1]
+  swiglu_scale = swiglu_absmax / 448.0  # FP8 E4M3 max is 448
+  swiglu_scale = swiglu_scale.clamp(min=1e-12)
+  swiglu_fp8 = (swiglu_reshaped / swiglu_scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+  swiglu_fp8 = swiglu_fp8.reshape(Tk, I)  # [Tk, I] fp8
+  swiglu_scale_2d = swiglu_scale.reshape(Tk, I // 128)  # [Tk, I//128]
+  ```
+- Then call torch._scaled_mm with proper scale format
+
+Phase 4: Implementation
+- torch._scaled_mm expects scale tensors in specific format: [M, K//128] for A, [K//128, N//128] for B
+- Use exact block-wise scaling for numerical accuracy

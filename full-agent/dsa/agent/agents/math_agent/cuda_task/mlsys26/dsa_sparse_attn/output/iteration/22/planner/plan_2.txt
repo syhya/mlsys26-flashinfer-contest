@@ -1,0 +1,8 @@
+Plan 2: Restore dual-path ancestor (94736692) AND swap O_tmp layout to reducer-native [T,16,S,512] so reducer reads contiguous 512-d slices per (t,h) across partitions with float4 loads, reducing cache thrash.
+
+Variables X: layout_Otmp (reducer-native vs producer-native), tau=128, S=64.
+Constraints C: same as Plan 1.
+Objective f(X): minimize HBM traffic in reducer.
+Solver Strategy: Exact split-K + layout transformation.
+Validity: Same exact merge, same safety valve.
+Why: Attacks the long-identified but never-implemented layout mismatch. Medium risk of indexing bugs; needs careful producer+consumer index rewrite.

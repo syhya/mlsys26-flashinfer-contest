@@ -1,0 +1,458 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Produce a single-file Python implementation for the FP8 block-scale MoE forward pass that keeps evaluation correctness safely at or above the required threshold while improving latency beyond the current parent by introducing a mathematically exact **worklist-based GEMM2 dispatch compaction** with a deterministic fallback to the proven parent path.
+
+**Selected Outline:** Outline 2 — **Worklist-Based GEMM2 Compaction + Parent Fallback**
+
+**Rationale for Selection:**
+1. It is the most algorithmically robust: routing math, GEMM1 math, and final scatter-add remain unchanged from the proven parent.
+2. It directly targets the largest remaining structural inefficiency identified by the parent summary: GEMM2 wastes CTAs by launching over the full expert grid even when routing is sparse/skewed.
+3. It changes only the dispatch topology, not the core numerical formula, which sharply lowers correctness risk.
+4. It includes a deterministic validity mechanism: if worklist construction is inconsistent or degenerate, execution falls back to the known-correct parent GEMM2 kernel.
+5. Global perspective shows island best score 1.5985 while this parent is 1.5294, a gap > 4% but not >10%; evolution is not fully stuck, so a focused structural refinement of the current strong lineage is preferable to a totally different algorithm.
+
+---
+
+## Phase 1: Mathematical Definition
+
+### 1.1 Task model
+We must compute a local-expert FP8 block-scale MoE forward pass with:
+- exact DeepSeek no-aux routing,
+- FP32 accumulation in both GEMMs,
+- correct block-scale handling for FP8 dequantization,
+- final scatter-add into `[T, 7168]` bf16 output.
+
+Let:
+- `T` = number of tokens,
+- `H = 7168`,
+- `I = 2048`,
+- `E_local = 32`,
+- global experts = 256,
+- block size = 128.
+
+Inputs:
+- `routing_logits ∈ R^{T×256}`
+- `routing_bias ∈ R^{256}`
+- `hidden_states ∈ FP8^{T×H}`
+- `hidden_states_scale ∈ R^{(H/128)×T}`
+- `gemm1_weights ∈ FP8^{32×(2I)×H}`
+- `gemm1_weights_scale ∈ R^{32×((2I)/128)×(H/128)}`
+- `gemm2_weights ∈ FP8^{32×H×I}`
+- `gemm2_weights_scale ∈ R^{32×(H/128)×(I/128)}`
+
+Outputs:
+- `Y ∈ BF16^{T×H}`.
+
+### 1.2 Routing equations
+For token `t` and expert `e`:
+1. `q[t,e] = sigmoid(routing_logits[t,e])`
+2. `rank_scores[t,e] = q[t,e] + routing_bias[e]`
+3. Partition experts into 8 groups of size 32.
+4. For each group `g`, compute:
+   \[
+   group\_score[t,g] = top2\_sum\big(rank\_scores[t, experts(g)]\big)
+   \]
+5. Select top-4 groups per token.
+6. Mask experts outside those groups.
+7. Select global top-8 experts from the masked `rank_scores`.
+8. Define normalized routing weights using selected `q` values:
+   \[
+   w[t,e] = routed\_scaling\_factor \cdot \frac{q[t,e] \cdot 1[e \in top8(t)]}{\sum_{j \in top8(t)} q[t,j] + 1e-20}
+   \]
+9. Restrict to local experts in
+   \[
+   [local\_expert\_offset,\ local\_expert\_offset + 32)
+   \]
+
+After filtering local assignments, define routed rows indexed by `j = 0..Tk-1`:
+- `sorted_tokens[j]` = original token id,
+- `sorted_experts[j]` = local expert id in `[0,31]`,
+- `sorted_weights[j]` = routing weight.
+
+### 1.3 GEMM1 equation
+For routed row `j`, token `t = sorted_tokens[j]`, expert `e = sorted_experts[j]`, output channel `n ∈ [0, 2I)`:
+\[
+G1[j,n] = \sum_{k=0}^{H-1}
+A_{fp8}[t,k] \cdot W1_{fp8}[e,n,k] \cdot sA[k//128, t] \cdot sW1[e, n//128, k//128]
+\]
+with FP32 accumulation.
+
+Implementation constraint:
+- use `BLOCK_K = 128` so each reduction tile aligns to one scale block,
+- keep FP8 operands inside `tl.dot`,
+- apply `a_scale * w_scale` after each tile dot accumulation.
+
+### 1.4 SwiGLU equation
+Split `G1` into:
+- `x1 = G1[:, :I]`
+- `x2 = G1[:, I:]`
+
+Then for each routed row `j` and channel `i`:
+\[
+C[j,i] = silu(x2[j,i]) \cdot x1[j,i] = x1[j,i] \cdot x2[j,i] \cdot sigmoid(x2[j,i])
+\]
+
+### 1.5 GEMM2 equation
+For routed row `j`, expert `e = sorted_experts[j]`, output hidden index `h`:
+\[
+O[j,h] = \sum_{i=0}^{I-1} C[j,i] \cdot W2_{fp8}[e,h,i] \cdot sW2[e, h//128, i//128]
+\]
+
+Parent implementation already computes this via tilewise activation quantization:
+- form tile-local `C_tile`,
+- compute scalar
+  \[
+  c\_scale = \max(\max |C\_tile| / 448, 1e-12)
+  \]
+- cast `C_tile / c_scale` to FP8,
+- perform `tl.dot(C_fp8, W2_fp8)` in FP32,
+- multiply the tile result by `c_scale * w2_scale`.
+
+We will **preserve exactly this GEMM2 math**.
+
+### 1.6 Scatter-add equation
+Final output accumulator:
+\[
+Y[sorted\_tokens[j], h] \mathrel{+}= sorted\_weights[j] \cdot O[j,h]
+\]
+implemented as FP32 accumulation followed by a final bf16 cast.
+
+### 1.7 Optimization variables, constraints, objective
+#### Variables (`X`)
+- Dispatch tensors:
+  - `expert_counts[e]`
+  - `expert_offsets[e]`
+  - `tiles_per_expert[e]`
+  - `work_experts[u]`
+  - `work_tile_ids[u]`
+- Kernel launch choice `mode ∈ {dense_grouped, worklist}`
+
+#### Constraints (`C`)
+1. Routing semantics exactly match reference.
+2. GEMM1 and GEMM2 accumulation are FP32.
+3. `BLOCK_K = 128` in both GEMMs.
+4. `hidden_states_scale` must be indexed by original token ids, not local routed-row ids.
+5. Triton large-offset pointer arithmetic must use int64.
+6. Worklist must enumerate exactly all active `(expert, tile_row)` pairs and no inactive ones.
+7. Output shape must be `[T,7168]`, dtype `torch.bfloat16`.
+8. Empty-routing cases must return all zeros safely.
+
+#### Objective (`f(X)`)
+Minimize total latency:
+\[
+f(X) = L_{route} + L_{dispatch} + L_{gemm1} + L_{gemm2} + L_{scatter}
+\]
+subject to constraints `C1..C8`.
+
+The key sub-objective is to reduce GEMM2 launch waste:
+\[
+min\ active\_tile\_launches
+\]
+by replacing dense expert-grid dispatch with a compact worklist when this reduces active program count.
+
+---
+
+## Phase 2: The Optimization Loop
+
+This is a deterministic algorithm-engineering loop, not a random search. No randomness should be introduced.
+
+### 2.1 Rebase on the strongest proven parent structure
+The executor should start from the current parent code and preserve the following pieces exactly unless absolutely necessary:
+1. `_route_tokens(...)`
+2. `grouped_gemm1_kernel`
+3. current fallback `grouped_gemm2_kernel`
+4. final `output.index_add_(0, sorted_tokens.long(), O)`
+
+This ensures the child inherits the current 1.5294-score correctness/stability baseline.
+
+### 2.2 Introduce a compact worklist formulation for GEMM2 only
+The parent launches GEMM2 over a dense 3D grid:
+- hidden tile id,
+- row tile id up to `max_count`,
+- expert id.
+
+That causes many CTAs to early-exit for experts with small or zero token counts. Replace this with a compact enumeration of active row tiles.
+
+For each expert `e`, define:
+\[
+count_e = expert\_counts[e]
+\]
+and for a chosen row tile size `B_M`:
+\[
+tiles_e = \left\lceil \frac{count_e}{B_M} \right\rceil
+\]
+The exact active work set is:
+\[
+U = \{(e, r) \mid 0 \le e < 32,\ 0 \le r < tiles_e\}
+\]
+
+Build this set explicitly using vectorized PyTorch ops.
+
+### 2.3 Exact dispatch construction algorithm
+Implement a helper, e.g. `_build_worklist(expert_counts, block_m)`.
+
+#### Required steps
+1. Compute:
+   - `tiles_per_expert = (expert_counts + block_m - 1) // block_m`
+2. Compute total active row tiles:
+   - `total_tiles = tiles_per_expert.sum()`
+3. Build `work_experts` with:
+   - `torch.repeat_interleave(torch.arange(E_local, device=device, dtype=torch.int32), tiles_per_expert)`
+4. Build `work_tile_ids` so that for each expert `e`, the repeated values are `0,1,...,tiles_e-1`.
+
+#### Preferred implementation
+Use pure tensor construction if practical.
+
+#### Acceptable bounded fallback
+Because `E_local = 32` is fixed and tiny, a bounded Python loop over exactly 32 experts is acceptable **only if** it does not repeatedly read single GPU scalars in a sync-heavy way. The safe pattern is:
+- perform one bulk transfer of `tiles_per_expert` to CPU if needed,
+- construct a Python list of `torch.arange(cnt, device=device, dtype=torch.int32)` or CPU ranges,
+- concatenate once.
+
+This is still deterministic and cheap because expert count dimension is constant.
+
+### 2.4 New kernel: worklist_gemm2_kernel
+Implement a new Triton kernel for GEMM2 with launch grid:
+- `pid_n = tl.program_id(0)` for output hidden tile,
+- `pid_u = tl.program_id(1)` for compact work item.
+
+Kernel inputs should include:
+- `G1_ptr`
+- `W2_ptr`
+- `W2_scale_ptr`
+- `Routing_weights_ptr`
+- `Out_ptr`
+- `expert_offsets_ptr`
+- `work_experts_ptr`
+- `work_tile_ids_ptr`
+- dimensions and strides
+
+#### Per-program logic
+1. Load `e = work_experts[pid_u]`.
+2. Load `tile_id = work_tile_ids[pid_u]`.
+3. Load expert CSR bounds:
+   - `start_idx = expert_offsets[e]`
+   - `end_idx = expert_offsets[e + 1]`
+   - `Tk_e = end_idx - start_idx`
+4. Compute row start:
+   - `row_start = tile_id * BLOCK_M`
+5. If `row_start >= Tk_e`, return.
+6. Compute routed row indices:
+   - `row_indices = start_idx + row_start + arange(0, BLOCK_M)`
+7. Compute the exact same GEMM2 numerical body as the parent:
+   - load `x1` and `x2` from `G1`,
+   - compute `c = x1 * x2 * sigmoid(x2)`,
+   - compute `c_scale = max(max(abs(c))/448, 1e-12)`,
+   - quantize `c_fp8 = (c / c_scale).to(tl.float8e4nv)`,
+   - load `W2_fp8`,
+   - compute `dot(c_fp8, w2_fp8, out_dtype=tl.float32)`,
+   - multiply by `c_scale * w2_scale`,
+   - multiply by routing weights,
+   - store into `O`.
+
+The change is dispatch only, not math.
+
+### 2.5 Keep GEMM1 unchanged
+Do not modify the body of `grouped_gemm1_kernel` in this iteration.
+
+Reason:
+- parent GEMM1 is already part of a strong-performing lineage,
+- the largest unimplemented gain from the parent summary is GEMM2 dispatch compaction,
+- changing both GEMMs simultaneously raises regression risk.
+
+At most, keep the current autotune config set exactly as inherited.
+
+### 2.6 Deterministic dispatch selection rule
+In `run()`, choose between compact worklist GEMM2 and parent grouped GEMM2 using a quantitative inequality.
+
+For chosen `BM_work`:
+- `active_tiles = sum((expert_counts + BM_work - 1) // BM_work)`
+- `dense_tiles = E_local * ceil(max_count / BM_work)`
+
+Use:
+- **worklist GEMM2** if
+  \[
+  active\_tiles \le 0.75 \cdot dense\_tiles
+  \]
+- otherwise use the **parent grouped GEMM2**.
+
+This is a deterministic solver over a small finite decision set.
+
+### 2.7 T-adaptive but simple policy
+Use a small piecewise policy for `BM_work`:
+1. If `max_count <= 64`, set `BM_work = 32` or 64.
+2. Else if `max_count <= 256`, set `BM_work = 64`.
+3. Else set `BM_work = 128`.
+
+Keep this simple and deterministic. The purpose is not heuristic guessing but reducing obvious under-occupancy while preserving tile alignment simplicity.
+
+### 2.8 End-to-end run() algorithm
+The executor should implement `run()` with these exact steps:
+
+1. Set constants:
+   - `H = 7168`
+   - `I = 2048`
+2. Call `_route_tokens(...)`.
+3. If routed result is `None`, return zeros `[T,H]` bf16.
+4. Unpack:
+   - `sorted_tokens`
+   - `sorted_experts`
+   - `sorted_weights`
+   - `expert_counts`
+   - `expert_offsets`
+5. If `Tk_total == 0` or `max_count == 0`, return zeros.
+6. Allocate `G1 = torch.zeros((Tk_total, 2*I), dtype=torch.float32, device=device)`.
+7. Launch `grouped_gemm1_kernel` exactly as in parent.
+8. Allocate `O = torch.zeros((Tk_total, H), dtype=torch.float32, device=device)`.
+9. Build worklist tensors.
+10. Evaluate dispatch criterion (`active_tiles` vs `dense_tiles`).
+11. If criterion favors worklist and validity checks pass, launch `worklist_gemm2_kernel`.
+12. Otherwise launch parent `grouped_gemm2_kernel`.
+13. Allocate `output = torch.zeros((T, H), dtype=torch.float32, device=device)`.
+14. Execute `output.index_add_(0, sorted_tokens.long(), O)`.
+15. Return `output.to(torch.bfloat16)`.
+
+---
+
+## Phase 3: The "Safety Valve" (CRITICAL)
+
+This phase is mandatory. It is the deterministic correction layer that guarantees valid execution even if the new dispatch path is flawed or unsupported for a particular shape.
+
+### 3.1 Empty-routing safety
+If `_route_tokens(...)` returns no local assignments, return:
+```python
+torch.zeros((T, H), dtype=torch.bfloat16, device=device)
+```
+This avoids crashes and trivially satisfies output constraints.
+
+### 3.2 CSR validity checks
+Before using any worklist path, verify all of the following:
+1. `expert_offsets.shape[0] == E_local + 1`
+2. `expert_offsets[0] == 0`
+3. `expert_offsets[-1] == Tk_total`
+4. `expert_offsets` is nondecreasing
+5. `expert_counts.sum() == Tk_total`
+
+If any check fails, **do not** use worklist GEMM2. Fall back immediately to parent grouped GEMM2.
+
+### 3.3 Worklist validity checks
+After constructing worklist tensors, verify:
+1. `tiles_per_expert >= 0`
+2. `total_tiles == tiles_per_expert.sum()`
+3. `work_experts.numel() == total_tiles`
+4. `work_tile_ids.numel() == total_tiles`
+5. `work_experts` contains only values in `[0, E_local)`
+6. For each expert `e`, tile ids range from `0` to `tiles_e - 1`
+
+Full per-element validation need not be expensive; simple consistency checks are enough. If any fail, revert to parent grouped GEMM2.
+
+### 3.4 Numerical safety inside GEMM2
+Inside both GEMM2 kernels, enforce:
+- `c_abs_max = tl.max(tl.abs(c))`
+- `c_scale = tl.maximum(c_abs_max / 448.0, 1e-12)`
+
+This prevents division-by-zero and invalid FP8 casts.
+
+### 3.5 Pointer safety
+All pointer arithmetic involving large strides and expert offsets must use int64 in Triton. Explicitly cast:
+- `e_idx.to(tl.int64)` or loaded expert ids to int64,
+- row indices to int64,
+- `n_offs`, `k_offs` to int64 before large multiplications.
+
+This prevents silent overflow on expert tensor addressing.
+
+### 3.6 Final correctness-preserving fallback hierarchy
+The executor must implement this strict fallback order:
+1. Preferred path: `worklist_gemm2_kernel`
+2. If worklist preconditions fail: parent `grouped_gemm2_kernel`
+3. If no routed tokens: zero output
+
+Because each fallback branch is mathematically valid, score >= 1.0 remains likely even if the optimized path does not activate.
+
+### 3.7 Final validity guarantee
+Regardless of dispatch path:
+- Accumulate final output in FP32,
+- cast to bf16 only once at the end,
+- never change routing semantics,
+- never change scatter-add semantics.
+
+This keeps the child close to the proven parent and minimizes numerical drift.
+
+---
+
+## Phase 4: Implementation Details
+
+### 4.1 Allowed Python libraries
+Use only:
+- `torch`
+- `triton`
+- `triton.language as tl`
+
+Do not introduce obscure or unavailable packages.
+
+### 4.2 Required file structure
+The final single `.py` file should contain, in order:
+1. imports
+2. existing `grouped_gemm1_kernel`
+3. existing fallback `grouped_gemm2_kernel`
+4. new `worklist_gemm2_kernel`
+5. `_route_tokens(...)`
+6. helper `_build_worklist(...)`
+7. `@torch.no_grad() def run(...):`
+
+### 4.3 Helper function specification
+Implement `_build_worklist(expert_counts, block_m)`.
+
+Suggested behavior:
+```python
+def _build_worklist(expert_counts, block_m):
+    tiles_per_expert = (expert_counts + block_m - 1) // block_m
+    total_tiles = int(tiles_per_expert.sum().item())
+    if total_tiles == 0:
+        return None
+    work_experts = torch.repeat_interleave(
+        torch.arange(expert_counts.numel(), device=expert_counts.device, dtype=torch.int32),
+        tiles_per_expert,
+    )
+    # Build tile ids either tensorized or via bounded 32-expert loop
+    ...
+    return work_experts, work_tile_ids, tiles_per_expert, total_tiles
+```
+
+### 4.4 Kernel configuration guidance
+For `worklist_gemm2_kernel`:
+- keep `BLOCK_K = 128`
+- prefer `BLOCK_N = 128`
+- candidate `BLOCK_M` in `{32, 64, 128, 256}`
+- candidate `num_warps` in `{4, 8, 16}`
+- candidate `num_stages` in `{3, 4, 5}`
+- autotune key can include `MAX_TK` or a related workload-size proxy
+
+Do not remove the parent kernel configs that are already known to work.
+
+### 4.5 Exact coding checklist for executor
+The executor should verify all of the following before finishing the child solution:
+- [ ] `run()` signature matches exactly the task requirement
+- [ ] `_route_tokens` semantics are unchanged
+- [ ] `hidden_states_scale` lookup uses original token ids from `sorted_tokens`
+- [ ] FP32 accumulation is preserved in both GEMMs
+- [ ] `BLOCK_K == 128`
+- [ ] GEMM2 worklist changes only dispatch, not algebra
+- [ ] int64 pointer arithmetic is used where offsets can overflow int32
+- [ ] worklist path has deterministic validity checks
+- [ ] fallback grouped GEMM2 path remains intact and callable
+- [ ] final output is `[T,7168]` bf16
+
+### 4.6 Why this plan is math-based rather than luck-based
+1. The computation is explicitly modeled by equations for routing, GEMM1, SwiGLU, GEMM2, and scatter-add.
+2. Dispatch compaction is defined as an exact set-enumeration problem over active expert tiles.
+3. The mode switch is determined by a quantitative inequality comparing active tiles to dense tiles.
+4. The safety valve is deterministic: invalid compact dispatch automatically projects execution back onto the proven parent path.
+5. No randomness or heuristic search is required.
+
+### 4.7 Expected outcome
+- **Primary expectation:** preserve correctness and maintain score >= 1.0 safely.
+- **Likely improvement:** reduce GEMM2 launch waste on skewed expert distributions and improve latency beyond the parent.
+- **Risk profile:** moderate but controlled, because the new path is dispatch-only and a strict deterministic fallback keeps the child valid.
+
+This is the best next-step plan: preserve the strong parent’s algebra, introduce exact active-tile compaction for GEMM2, and use a hard fallback barrier so the optimized child cannot easily regress below the required correctness threshold.

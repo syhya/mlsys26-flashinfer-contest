@@ -1,0 +1,18 @@
+### Outline 1: Split-K Dynamic Dispatch (Sequence-Level Parallelism)
+**Mathematical Formulation:**
+* **Variables ($S$):** Split factor, representing the number of thread blocks assigned to a single token. Let $S = 32$.
+* **Constraints:** Each block $s \in [0, S-1]$ processes a subset of `sparse_indices` of size $2048/S = 64$.
+* **Objective:** Maximize SM occupancy when `num_tokens` is small (e.g., $T=1$), aiming for at least 32 blocks to utilize multiple SMs.
+
+**Solver Strategy:**
+* **Algorithm:** Two-pass FlashAttention Split-K.
+* Pass 1 (Compute Kernel): Launch `num_tokens * S` blocks. Each block computes the local unnormalized output $O_s$ and local maximum $m_s$ and sum of exponentials $l_s$ for its assigned keys. It writes these to a temporary global memory workspace.
+* Pass 2 (Reduction Kernel): Launch `num_tokens` blocks. Each block reads the $S$ intermediate states, computes the global $m = \max(m_s)$, normalizes $O = \sum O_s \exp(m_s - m) / \sum l_s \exp(m_s - m)$, and writes the final output and LSE.
+
+**Validity Mechanism:**
+* **Mathematical Repair:** The two-pass reduction mathematically guarantees the exact same FP32 online softmax output as the single-pass version. 
+* **Fallback:** If `num_tokens` is large (e.g., > 128), bypass Split-K and use the original single-pass kernel to avoid memory overhead.
+
+**Why this solution?:**
+* **Advantages:** Directly solves the SM underutilization issue identified in the profile (where only 1 SM is used for 1 token). Can boost performance by 10x-30x on small batch sizes.
+* **Disadvantages:** Requires an intermediate workspace and a second kernel launch.

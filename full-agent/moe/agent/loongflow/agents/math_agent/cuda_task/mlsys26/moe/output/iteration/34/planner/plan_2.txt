@@ -1,0 +1,15 @@
+PLAN 2: Reduce PyTorch routing overhead via consolidation (lower-risk than full Triton fusion) + add num_stages=2 large-BLOCK_M configs
+
+Math model: Identical routing math; objective is reducing kernel launch count.
+
+Strategy:
+- Keep correctness-proven _route_tokens but rewrite to minimize ops:
+  * Combine sigmoid + bias add into one fused call
+  * Replace torch.nonzero + argsort with: flatten topk_idx into (T*8) ints, mask local, then sort once. Use torch.sort instead of nonzero+argsort which is faster
+  * Use scatter_add_ on a precomputed inverted permutation rather than nonzero
+  * Build CSR via single bincount + cumsum (already done)
+- Expand autotune: add num_stages=2 (often best for small T decode) and num_warps=4 BLOCK_M=128 variants
+
+Validity: Mathematically identical routing - only refactor of PyTorch ops.
+
+Why: Lower risk than Plan 1 but smaller upside (~3-7%).

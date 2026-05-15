@@ -1,0 +1,29 @@
+Outline 2: Asynchronous double-buffered tiled kernel with cp.async-style staging and vectorized stores
+
+Mathematical Formulation
+- Variables X:
+  1. Tile size B over sparse keys, with double buffers for K_nope and K_pe in shared memory.
+  2. Shared-memory stage layouts S0,S1 and copy/compute schedule.
+  3. Per-head online softmax states (m,l,O) in FP32.
+  4. Dispatch threshold tau deciding whether async tiled kernel or simpler kernel is used.
+- Constraints C:
+  1. Functional equivalence to reference attention over 2048 sparse positions with mask on -1.
+  2. Exact output shape [T,16,512] BF16 and lse [T,16] FP32 base-2.
+  3. Cooperative global loads must respect alignment; vectorized accesses only where addresses are 16-byte aligned.
+  4. No intermediate global workspace in the main path.
+- Objective f(X): maximize overlap of memory movement and math, minimize HBM transactions and synchronization overhead.
+
+Solver Strategy
+- Deterministic pipeline schedule, not random optimization.
+- Implement a finite-state pipeline: preload tile t+1 while computing tile t using shared-memory double buffering.
+- Use 128-bit vector loads/stores for cache movement and final output writes; possibly direct cp.async on architectures that support it, otherwise compile-time fallback to normal vectorized loads.
+
+Validity Mechanism
+- For invalid indices, zero-fill staged shared-memory rows and/or skip update in the online recurrence.
+- The safety valve is architecture-gated compilation: only use async copy path under __CUDA_ARCH__ >= 800; otherwise use identical semantics fallback path.
+- Post-normalization divides O by l only when l>0; otherwise emits zeros and -INFINITY.
+
+Why this solution?
+- Expected performance improvement: lower latency in memory-bound portions by overlapping shared-memory fills with compute.
+- Advantages: directly targets memory pipeline inefficiency and preserves single-pass exactness.
+- Disadvantages: highest implementation complexity; cp.async details may be fragile across build settings and CC 10.0 specifics.

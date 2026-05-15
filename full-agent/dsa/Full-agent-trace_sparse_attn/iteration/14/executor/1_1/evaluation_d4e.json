@@ -1,0 +1,19 @@
+{
+  "status": "validation_failed",
+  "summary": "Validation failed: INCORRECT_NUMERICAL: [1/2] /usr/local/cuda/bin/nvcc -MD -MF kernel.cuda.o.d -DTORCH_EXTENSION_NAME=torch_agent_a5d69563_f74a76 -DTORCH_API_INCLUDE_EXTENSION_H -I/root/.cache/flashinfer_bench/cache/torch/torch_agent_a5d69563_f74a76 -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -isystem /opt/conda/envs/py312/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_100,code=compute_100 -gencode=arch=compute_100,code=sm_100 --compiler-options '-fPIC' -std=c++20 -c /root/.cache/flashinfer_bench/cache/torch/torch_agent_a5d69563_f74a76/kernel.cu -o kernel.cuda.o \n[2/2] c++ kernel.cuda.o -shared -L/opt/conda/envs/py312/lib/python3.12/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda/lib64 -lcudart -o torch_agent_a5d69563_f74a76.so\n",
+  "score": 0.0,
+  "metrics": {
+    "correctness": 0.0,
+    "speedup": 0.0,
+    "exec_time_ms": 0.0,
+    "baseline_time_ms": 0.0,
+    "compile_time": 0.0,
+    "eval_time": 342.7969300746918
+  },
+  "artifacts": {
+    "eval_backend": "modal+flashinfer-bench",
+    "task_id": "dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64",
+    "execution_time": "342.80s",
+    "error": "INCORRECT_NUMERICAL: [1/2] /usr/local/cuda/bin/nvcc -MD -MF kernel.cuda.o.d -DTORCH_EXTENSION_NAME=torch_agent_a5d69563_f74a76 -DTORCH_API_INCLUDE_EXTENSION_H -I/root/.cache/flashinfer_bench/cache/torch/torch_agent_a5d69563_f74a76 -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -isystem /opt/conda/envs/py312/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_100,code=compute_100 -gencode=arch=compute_100,code=sm_100 --compiler-options '-fPIC' -std=c++20 -c /root/.cache/flashinfer_bench/cache/torch/torch_agent_a5d69563_f74a76/kernel.cu -o kernel.cuda.o \n[2/2] c++ kernel.cuda.o -shared -L/opt/conda/envs/py312/lib/python3.12/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda/lib64 -lcudart -o torch_agent_a5d69563_f74a76.so\n"
+  }
+}

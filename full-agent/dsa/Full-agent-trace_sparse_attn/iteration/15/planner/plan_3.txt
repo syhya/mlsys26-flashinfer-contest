@@ -1,0 +1,31 @@
+Outline 3: Hybrid robust redesign with small-workload persistent split-head kernel and corrected vectorized workspace path
+
+Mathematical Formulation
+- Variables X:
+  1. Runtime dispatch variable p in {persistent_small, fused_large} determined by num_tokens and estimated grid saturation.
+  2. Block mapping parameters: for small path, each block computes one (token, head_group, chunk_group); for large path, each block computes one token with 16 warps across heads.
+  3. Online softmax states per (token, head): m in R, l in R+, O in R^512, all FP32.
+  4. Workspace layout W for small path partials: O_tmp in float4-packed contiguous layout, m_tmp, l_tmp.
+- Constraints C:
+  1. For every valid sparse position j, weight w_j = exp(logit_j - m_final) / l_final with logit_j = sm_scale * (q_nope·k_nope + q_pe·k_pe).
+  2. Invalid j where sparse_indices=-1 are excluded from m/l/O updates.
+  3. lse = m_final * log2(e) + log2(l_final) because m is maintained in natural-log exponent space after scaling; must be emitted in base 2.
+  4. O_tmp partials must be stored and loaded with exactly matching vectorization/layout to avoid extra transactions and correctness drift.
+  5. All accumulations FP32; only final output cast to BF16.
+- Objective f(X): minimize end-to-end runtime by maximizing occupancy for num_tokens small and removing unnecessary memory inefficiency in the split-K path while preserving the high-throughput fused path for large workloads.
+
+Solver Strategy
+- Deterministic hybrid dispatch, effectively a finite mixed-integer choice solved by a simple runtime rule based on token count and grid saturation estimate.
+- Small path: persistent or overdecomposed split-head kernel increases total block count by splitting heads/chunks so even num_tokens=1 launches many blocks. Reduce kernel then merges partial online-softmax states exactly.
+- Large path: keep current one-pass kernel, but only minor cleanup if needed.
+
+Validity Mechanism
+- Exact associative merge formula for partial softmax states:
+  m = max(m_a,m_b), l = l_a*exp(m_a-m)+l_b*exp(m_b-m), O = O_a*exp(m_a-m)+O_b*exp(m_b-m)+... then normalize once.
+- Deterministic repair/safety step: if small path metadata for a partial chunk has m=-INF, its scale is forced to 0 in reduction; if all chunks invalid, emit zero output and -INF lse.
+- Enforce contiguous float4 packing for O_tmp and matching float4 loads in reduce kernel to strictly satisfy alignment and reduce store inefficiency.
+
+Why this solution?
+- Expected performance improvement: best chance of real gain because it attacks the measured small-workload under-occupancy and the explicitly identified O_tmp store/load mismatch without rewriting the stable large path from scratch.
+- Advantages: robust, incremental, addresses concrete profiler evidence, low correctness risk due to preserving known online-softmax math.
+- Disadvantages: still not a full tensor-core design; gains may concentrate on small-token workloads.

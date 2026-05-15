@@ -1,0 +1,44 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Maximize GPU SM Occupancy and eliminate High Bandwidth Memory (HBM) round-trip latency for small batch sizes ($N < 128$) while strictly preserving the correct FP32 numerical accumulation and Base-2 LSE semantics.
+
+**Selected Outline:** Outline 3 (Grid-Reshaped Fused Split-K with Atomic Synchronization)
+
+**Rationale for Selection:**
+1.  **Mathematically Guarantees High Occupancy:** By reshaping the block dimensions to process 4 heads per block instead of 16, the grid size increases from $64N$ to $256N$. This ensures over 100% theoretical occupancy on the 148 SMs of an H100 even for $N=1$, completely resolving the "0.22 Waves Per SM" bottleneck flagged by Nsight Compute.
+2.  **Eliminates Kernel Launch Overhead:** Fuses the two Split-K passes into a single kernel using an atomic "last-block" synchronization. This prevents the ~3us kernel launch overhead of the second pass, allowing intermediate tensors to remain entirely within the L2 Cache.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Model & Workspace Definition**
+    *   **Variables**: Split Factor $S = 64$.
+    *   **Grid Topology**: Launch a single `fused_split_k_kernel` with Grid `dim3(64, num_tokens, 4)` and Block `dim3(32, 4, 1)`.
+        *   `s = blockIdx.x` (chunk 0..63)
+        *   `t = blockIdx.y` (token)
+        *   `h_group = blockIdx.z` (head group 0..3)
+        *   `h_local = threadIdx.y` (local head 0..3). Total head `h = h_group * 4 + h_local`.
+        *   `lane = threadIdx.x` (0..31).
+    *   **Workspace Constraints**: Allocate intermediate tensors in PyTorch:
+        *   `O_tmp`: `[num_tokens, 64, 16, 512]` (Float32)
+        *   `m_tmp`: `[num_tokens, 16, 64]` (Float32)
+        *   `l_tmp`: `[num_tokens, 16, 64]` (Float32)
+        *   **Crucial New Tensor**: `sync_counters`: `[num_tokens, 4]` (Int32), initialized to zeros.
+
+2.  **Phase 2: The Optimization Loop (Compute & Sync)**
+    *   **Step 1 (Linear Shared Memory Load)**: Because the block size is now 128 threads (instead of 512), re-map the cooperative shared memory loads mathematically to ensure correct vectorization.
+        *   To load `smem_Kc` ($32 \times 512$ BF16 = 2048 `float4`s), use a loop of 16 steps: `for (int step=0; step<16; ++step) { int logical_tid = step * 128 + tid; ... }`.
+        *   To load `smem_Kp` ($32 \times 64$ BF16 = 256 `float4`s), use a loop of 2 steps: `for (int step=0; step<2; ++step) { int logical_tid = step * 128 + tid; ... }`.
+    *   **Step 2 (Local Compute)**: Perform the exact same `fmaf` dot-product and online softmax reduction as the parent solution. Write the unnormalized $O$, $m$, and $l$ to the global workspace.
+    *   **Step 3 (Atomic Sync)**: Enforce memory visibility with `__threadfence()`. Thread 0 of the block executes `atomicAdd(&sync_counters[t * 4 + h_group], 1)`. If the return value is exactly 63, it sets a shared boolean `is_last_block = true`. All threads `__syncthreads()`. If `!is_last_block`, the block exits `return;`.
+
+3.  **Phase 3: The "Safety Valve" (In-Kernel Reduction)**
+    *   **Step 1 (Warp-Level Reduction)**: ONLY the last block proceeds. It has 4 warps (128 threads). We map 1 warp to exactly 1 head (`h_local`), ensuring perfectly isolated cross-thread math.
+    *   **Step 2 (Global M and L)**: Each thread loads 2 chunks of `m` and `l`. Perform a warp-level reduction using `__shfl_down_sync` to find the mathematically exact global `m_max` and `l_sum`.
+    *   **Step 3 (Fast Math Scaling)**: Compute `scale_smem[h_local][s_idx] = __expf(m_s_local - m_max) / l_sum` and store it in shared memory. Use `__expf` to maximize ALU throughput.
+    *   **Step 4 (Base-2 LSE Safety)**: Thread 0 of each warp writes the LSE to `lse_ptr` using `log2f`. If `m_max == -INFINITY`, write `-INFINITY` to guarantee NaN-guard safety for padded sequences.
+    *   **Step 5 (Final Projection)**: The 32 threads in the warp loop over the 512 dimensions (8 loops of 64 dimensions, each thread handles `float2`). Scale the `O_tmp` chunks, accumulate in FP32, convert to BF16, and write directly to `output_ptr`.
+
+4.  **Phase 4: Implementation Details**
+    *   Only apply this fused kernel for $N < 128$. For $N \ge 128$, retain the parent's highly optimized `dsa_forward_kernel` exactly as is.
+    *   Use `<cuda_bf16.h>`, `<cuda_fp16.h>`. No obscure libraries.
+    *   The multi-start/randomness constraint is not applicable to deterministic CUDA kernels, but the deterministic linear index mapping mathematically guarantees out-of-bounds safety regardless of the data scale.

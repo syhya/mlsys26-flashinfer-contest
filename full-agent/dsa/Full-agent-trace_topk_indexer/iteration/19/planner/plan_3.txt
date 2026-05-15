@@ -1,0 +1,7 @@
+Plan 3: Host-side dispatch with single-batch count kernel to avoid empty kernel launches
+- Variables: per-tier batch counts; conditional launches.
+- Objective: avoid launching TIER-M kernel with batch_size blocks when no batch falls in it.
+- Solver: tiny count kernel writes {n_S, n_M, n_L} to a pinned host buffer; host then dispatches only non-empty tiers. But this requires a sync which costs more than saves.
+- Alternative: use CUDA graphs or capture to amortize launches.
+- Advantage: minimal code change, low risk.
+- Disadvantage: per-call host-device sync negates savings; gains small (<5%).

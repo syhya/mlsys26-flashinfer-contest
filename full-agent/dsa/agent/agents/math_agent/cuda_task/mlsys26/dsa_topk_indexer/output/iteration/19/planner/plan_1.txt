@@ -1,0 +1,9 @@
+Plan 1: Fused Score+BlockTopK kernel for TIER-M (eliminate HBM round-trip)
+- Variables: per-batch scoring results held in shared memory, then sorted in-place via cub::BlockRadixSort.
+- Constraints: L <= 6144 for TIER-M; exact top-K; correctness preserved.
+- Objective: minimize kernel launch count + HBM traffic. Expected kernel latency reduction 10-25% on medium batches.
+- Solver strategy: single persistent kernel per batch, one block that (1) loads Q,W to smem, (2) iterates over pages p=0..ceil(L/64)-1, computes scores, writes to per-block smem scores[6144], (3) calls BlockRadixSort descending, (4) strided write to topk_indices.
+- Validity: Same BlockedToStriped + strided load/write pairing as parent. Padding -1e30f. NaN -> -1e20f. Tier partition invariant preserved by L-based guards. Falls back to parent TIER-L for L > 6144.
+- Risk: smem budget tight (scores 24KB + indices 24KB + BlockRadixSort temp ~25KB + Q 33KB + K staging). May need to recompute scores from HBM into registers rather than storing full 6144 tile in smem.
+- Advantage: eliminates scores_buf/indices_buf HBM write+read for TIER-M, addresses the launch-count floor.
+- Disadvantage: complex smem budgeting; if smem overflows, fallback needed.

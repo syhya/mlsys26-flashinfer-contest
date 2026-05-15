@@ -1,0 +1,59 @@
+## Plan 3: Fused Single-Pass GEMM1→SwiGLU→GEMM2 Mega-Kernel
+
+### Mathematical Formulation
+
+**Variables (X):**
+- Fused kernel computes GEMM1 then immediately feeds into GEMM2 without writing G1 to HBM
+- G1 tile remains in SRAM registers between GEMM1 and GEMM2 stages
+- For each M-tile of tokens: compute G1[m_tile, :] then use it for GEMM2[m_tile, :]
+- Problem: GEMM1 output shape is [Tk, 2*I] = [Tk, 4096], GEMM2 input uses [Tk, I] pairs
+
+**Constraints (C):**
+- SRAM budget: 192KB per SM on B200
+  - GEMM1 tile: BLOCK_M × 2*BLOCK_K × 4 bytes (fp32 acc) 
+  - GEMM2 weight tile: BLOCK_K × BLOCK_N × 1 byte (fp8)
+  - Both kernel stages must fit simultaneously
+- Cannot tile over N_dim(GEMM1)=4096 while holding GEMM2 weight tile
+- The fusion only works if GEMM1 output can be accumulated into registers for GEMM2
+
+**Objective f(X):**
+- Eliminate HBM write+read of G1 buffer: saves [Tk_total × 4096 × 4] bytes
+- Target: 15-20% bandwidth reduction → ~14-15x speedup
+
+### Solver Strategy
+
+1. Implement a mega-kernel that processes one M-tile of tokens
+2. Inner loop structure:
+   a. For each K1 block (k1 in range(0, H, 128)): accumulate GEMM1 partial sums
+   b. Compute SwiGLU on the full accumulated G1 row
+   c. For each K2 block (k2 in range(0, I, 128)): accumulate GEMM2 partial sums
+3. Tiling constraint: N(GEMM1)=4096 must be fully computed before SwiGLU and GEMM2 can start
+   → This forces sequential GEMM1 then GEMM2 within the same thread block
+   → Register pressure: BLOCK_M × 4096 fp32 values is too large for registers (BLOCK_M=32 → 32×4096×4 = 512KB >> register file)
+4. Alternative: Two-pass tile approach with shared memory:
+   - Outer loop over N1 tiles of GEMM1 (each tile: BLOCK_M × BLOCK_N1)
+   - For each N1 tile: compute full K1 loop, store to shared memory
+   - Problem: 4096 × BLOCK_M values exceed SM shared memory for large BLOCK_M
+
+### Validity Mechanism
+
+- Due to register/SRAM constraints, full fusion is likely infeasible for B200 without tiling the N1 dimension
+- Fallback: Only fuse SwiGLU with GEMM2 (already done in b550fc5e)
+- Must maintain FP32 accumulation for both GEMMs
+
+### Why This Solution?
+
+**Expected Performance:**
+- Theoretical: 15-20% reduction in HBM bandwidth → ~14x speedup
+- Practical: HIGH RISK due to register pressure constraints
+
+**Advantages:**
+1. Maximum HBM bandwidth reduction
+2. Eliminates G1 buffer allocation and memory traffic
+
+**Disadvantages:**
+1. Very high implementation risk -- register pressure likely prohibitive
+2. Shared memory capacity limits M-tile size severely
+3. The G1 buffer is 4096 × float32 per row, far too large for register-resident fusion
+4. High probability of failure due to resource constraints
+5. Would require careful SRAM partitioning that is architecture-specific and fragile

@@ -1,0 +1,20 @@
+## 1. Executive Summary
+This iteration was a pivotal recovery because it corrected the prior child’s missing frontier autotune variants while preserving the proven FP8 GEMM2 execution path, performing 1 out of 1 among siblings and nearly matching the cross-lineage frontier.
+
+## 2. Data-Driven Findings (Facts ONLY)
+- **Sibling Rank:** 1 out of 1 children. Top sibling score: 152.94%.
+- **Score Delta:** From parent (143.33%) to child (152.94%).
+- **Key Change:** Restored the omitted high-performing autotune variants—most notably the `BLOCK_M=128, BLOCK_N=128, num_warps=16, num_stages=4` configuration in both grouped GEMM kernels, while retaining the FP8 GEMM2 path with tilewise `c_scale` quantization.
+- **Core Metrics:** Correctness 1.0; speedup 15.294x; kernel latency 1.539 ms; baseline latency 17.066 ms; max absolute error 32768.0; max relative error 2.33600008192e11; total workloads 19; eval time 109.56 s.
+
+## 3. Strategic Analysis (The "So What?")
+- **Root Cause:** The improvement was driven by both plan quality and execution quality. The original strategic direction—rebasing on the frontier configuration set—was sound, and this time execution aligned with that strategy by actually restoring the missing load-bearing autotune entries.
+- **Key Insight:** The strongest lesson is that, in this lineage, autotune-set completeness is itself a first-order optimization variable. No kernel-body rewrite was needed to recover most of the lost performance; simply reinstating the frontier config set lifted the score from 1.4333 to 1.5294 and restored the better numerical profile.
+- **Identified Risk:** The solution is still effectively a frontier rebase rather than a new structural advance. Its own generation plan proposed a worklist GEMM2 compaction strategy, but the delivered code does not implement that new dispatch mechanism, which suggests a risk of evolutionary stagnation through repeated autotune-only refinements.
+
+## 4. Actionable Guidance (The "What's Next?")
+- **Recommend Fusion:** Use this child as the new default local parent for future exploration, but fuse it explicitly with the exact best cross-lineage frontier kernel/config inventory to ensure no hidden config drift remains.
+- **Recommend Exploration:** Now that the autotune-regression has been repaired, shift effort to true structural gains: implement the planned worklist-based GEMM2 dispatch to eliminate empty expert-grid CTAs, using this child as the correctness-preserving fallback baseline.
+- **Recommend Exploration:** Target routing/dispatch overhead next. The current kernels are near the known frontier, so the next likely gain is compact GPU-side routing-to-CSR/worklist construction rather than more tile-list tweaking.
+- **Recommend Stripping:** Avoid spending additional iterations on minor autotune-list permutations alone unless they are paired with a measurable structural change. The current result shows diminishing returns from config-only evolution.
+- **Warn:** The child’s score (1.5294) remains slightly below the known cross-lineage best (~1.5395), so do not mistake this recovery for a new frontier breakthrough; use it as a stable launchpad, not an endpoint.

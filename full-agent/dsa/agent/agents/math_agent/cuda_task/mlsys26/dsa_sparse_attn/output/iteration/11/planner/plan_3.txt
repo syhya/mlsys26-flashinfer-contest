@@ -1,0 +1,32 @@
+Outline 3: Hybrid architecture-specific dispatch with tensor-core friendly page gather prepack for large workloads and lightweight warp kernel for small workloads
+
+Mathematical Formulation
+- Variables X:
+  1) Architecture gate a in {generic_fp32, sm80_async, sm90plus_tensorcore-like path}.
+  2) Dispatch threshold tau for num_tokens.
+  3) Packed local tile buffers P_nope in R^(Bk x 512) and P_pe in R^(Bk x 64) formed by gathering valid sparse rows.
+  4) Online softmax states (m, l, O) per (token, head).
+- Constraints C:
+  1) Gather map must preserve the exact sparse_indices order among valid entries.
+  2) Invalid entries remain masked and do not contribute.
+  3) Online recurrence and final base-2 lse must match reference semantics.
+  4) Tensor-core path is optional and must fall back to generic path if unsupported.
+  5) All BF16 conversions explicit; all accumulations FP32.
+- Objective f(X): maximize throughput by selecting the fastest valid kernel topology for the runtime regime and device capabilities.
+
+Solver Strategy
+- Deterministic dispatch solver:
+  1) Query device capability at runtime.
+  2) If architecture/path constraints are met, use a more aggressive staged kernel with vectorized global loads and optional cp.async guarded by __CUDA_ARCH__.
+  3) Otherwise, fall back to a generic fused kernel.
+- Use exact online softmax as the invariant mathematical solver across all paths.
+
+Validity Mechanism
+- Single source of truth for recurrence logic shared across paths.
+- Architecture guards ensure unsupported intrinsics are never compiled into invalid code paths for the target compilation branch.
+- Final deterministic repair: if valid_count == 0, zero output and -INF lse.
+
+Why this solution?
+- Expected improvement: best chance to leverage modern hardware while retaining a safe generic implementation.
+- Advantages: diversity, potential upside from async copy/vectorized staging, preserves correctness with fallback.
+- Disadvantages: highest implementation complexity and highest risk of compile/runtime issues under the benchmark environment.

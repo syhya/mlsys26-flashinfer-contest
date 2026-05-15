@@ -1,0 +1,28 @@
+{
+  "status": "success",
+  "summary": "Optimization successful! Speedup: 63.51x (ref: 2.773ms, kernel: 0.294ms)",
+  "score": 6.351051002088912,
+  "metrics": {
+    "correctness": 1.0,
+    "speedup": 63.510510020889114,
+    "exec_time_ms": 0.2940226111111111,
+    "baseline_time_ms": 2.7733988750000003,
+    "compile_time": 0.0,
+    "eval_time": 207.3775281906128
+  },
+  "artifacts": {
+    "eval_backend": "modal+flashinfer-bench",
+    "task_id": "dsa_topk_indexer_fp8_h64_d128_topk2048_ps64",
+    "execution_time": "207.38s",
+    "kernel_latency_ms": "0.294ms",
+    "reference_latency_ms": "2.773ms",
+    "speedup": "63.51x",
+    "bench_stats": {
+      "reference_latency_ms": 2.7733988750000003,
+      "max_relative_error": 0.0,
+      "max_absolute_error": 0.0,
+      "total_workloads": 12
+    },
+    "correctness_check": "Passed"
+  }
+}

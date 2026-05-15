@@ -1,0 +1,49 @@
+## Strategic Summary Report — Solution `89e86011` (Iteration 35, Generation 9)
+
+---
+
+### 1. Executive Summary
+
+This iteration was a **hard regression (correctness failure)** because the fused `tl.atomic_add` epilogue introduced a subtle double-accumulation/race against a pre-zeroed global output that broke numerical validation, performing **worst-possible (score 0.0) versus its parent's 1.5395 and with no successful siblings to compare against**.
+
+---
+
+### 2. Data-Driven Findings (Facts ONLY)
+
+- **Sibling Rank:** 1 out of 1 children of parent `8e3c776e` (only child). No sibling context. Cross-lineage peer referenced in plan: `302d2eb3` (15.52x, 1.5517).
+- **Score Delta:** Parent `8e3c776e` (1.5395, 15.40x, 1.523ms) → child `89e86011` (**0.0 — INCORRECT_NUMERICAL**). Absolute regression: **-1.5395 (-100%)**.
+- **Key Change:** GEMM2 epilogue replaced: instead of writing to scratch `O[Tk_total, H]` followed by `output.index_add_(0, sorted_tokens, O)`, GEMM2 now takes `sorted_tokens_ptr` and performs `tl.atomic_add` directly into the global `output[T, H]` buffer. Also added 1 duplicate-looking autotune config (`BLOCK_M=16, num_warps=4, num_stages=5`) to GEMM2 list.
+- **Core Metrics:**
+  - Correctness: **0.0 (FAILED — INCORRECT_NUMERICAL)**
+  - Speedup: **0.0x**
+  - Eval time: 31.83s (kernel never measured)
+  - Status: `validation_failed`
+  - GEMM1 kernel & routing: unchanged from parent.
+
+---
+
+### 3. Strategic Analysis (The "So What?")
+
+- **Root Cause:** **Plan-level design flaw**, not execution error. The executor faithfully implemented what the plan specified. The plan's correctness argument had a critical hole: it claimed "no data race because each (token, expert) pair appears at most once." While true across the full launch, `tl.atomic_add` into `output[T,H]` from many CTAs produces non-deterministic floating-point summation order — but that alone should stay within 1e-2 tolerance. The more likely culprit is a **duplicate-accumulation bug**: the plan claims `GEMM2 already multiplies routing_w before the final store` but in the parent code, the stored `O` was then consumed by `index_add_` (single accumulation). With the new fused path, the routing_w multiplication remains but the atomic target may be receiving contributions from multiple `pid_n` tiles for the same token (correct), OR the plan may have missed that the `pid_e`-grid launches CTAs for experts with `num_tokens==0` that still load garbage via masked=0, which normally no-ops but with atomic_add into a shared global buffer can interact badly. Alternatively, the plan's assertion that `output = torch.zeros` is sufficient for atomic_add may have failed if `torch.zeros` allocation was not complete before kernel launch on this stream (unlikely, but plausible under async conditions). The plan also ignored the possibility that previous correctness margins were already thin (max_abs_err=32,768 for parent), and FP summation reordering from atomics pushed error past the 1e-2 bound.
+- **Key Insight:** The single most important lesson: **mathematical "floor guarantees" provided by an autotune superset DO NOT apply when the kernel body is also modified**. The plan repeatedly invoked "worst case = parent score" as a safety argument — but by changing the store semantics (atomic_add), the floor collapsed to zero the moment validation failed. The `USE_FUSED_ATOMIC_EPILOGUE = True` default with no automated fallback trigger (runtime correctness check) meant the claimed safety valve was inert. **Runtime-defaulted safety toggles without automated fallback are theater, not safety.**
+- **Identified Risk:** Two serious systemic risks exposed:
+  1. **Planner overconfidence in hand-waved correctness proofs.** The atomic_add commutativity argument was asserted, not tested. Any plan that reorders floating-point summation must be validated against the existing 32,768 max_abs_err ceiling — which was already close to the tolerance edge.
+  2. **Lineage-frontier precision debt**: The numerical headroom has been shrinking across generations (8,192 → 32,768 max_abs_err). Any change touching accumulation order (atomic, split-K, reduction refactor) is now high-risk until precision is reclaimed.
+
+---
+
+### 4. Actionable Guidance (The "What's Next?")
+
+- **Recommend Stripping:** Abandon the `tl.atomic_add` fused epilogue direction **for now**. The mathematical arguments do not hold with the current precision margin. Revert to parent `8e3c776e` (1.5395) or cousin `302d2eb3` (1.5517) as the production base for all further children.
+
+- **Recommend Exploration [highest remaining upside]:** Pursue the **fused Triton routing kernel** originally flagged in the parent's summary. This was the dominant untapped lever per prior analysis and does NOT touch accumulation order, so it preserves the precision budget. Target: replace the 8-op PyTorch routing chain (sigmoid → topk×3 → scatter → nonzero → argsort → bincount → cumsum) with 1-2 Triton kernels. Expected: +5-15% for small-T decode.
+
+- **Recommend Exploration:** Investigate **`tl.make_block_ptr` / TMA loads** for W1/W2 tile reads in both GEMMs. TMA affects bandwidth, not summation order, so precision is preserved. Expected: +3-5% on GEMM1 which remains the compute bottleneck (K=7168).
+
+- **Recommend Fusion [precision recovery]:** Before attempting ANY further store-reordering optimization (atomic_add, split-K, K-parallel reduction), first implement **per-row (BLOCK_M×1) FP8 quantization** for GEMM2's c_fp8 as flagged in the parent summary. This reduces max_abs_err by an expected 2-4x, restoring precision headroom and making future reordering optimizations viable.
+
+- **Warn — CRITICAL:** Future plans that change accumulation semantics (atomic, split-K, reorder) MUST include an **automated runtime correctness fallback**, not a hand-coded boolean flag defaulted to the risky path. Pattern: run both paths on a small probe tensor on first call, compare, fall back if delta exceeds tolerance. The `USE_FUSED_ATOMIC_EPILOGUE = True` toggle in this solution was false safety — it requires a human to notice failure and flip it, which defeats the purpose.
+
+- **Warn:** Do NOT re-attempt atomic_add GEMM2 epilogue until (a) per-row FP8 quant is deployed to reclaim precision headroom, AND (b) the plan includes an explicit proof that summation ordering cannot exceed the measured `max_abs_err` ceiling for the noisiest workload.
+
+- **Warn:** The plan explicitly claimed "mathematical floor guarantee ≥15.52x" — this was **false advertising** because it conflated autotune-superset floor (which is real for latency) with correctness floor (which is non-existent for kernel-body changes). Future planners should be penalized for applying superset arguments to non-superset changes.

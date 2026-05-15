@@ -1,0 +1,13 @@
+Outline 2 — Rebase onto global-best 6da80c61 and replace GEMM2 raw-pointer loads with a single-path TMA/block-pointer kernel
+
+Mathematical Formulation:
+Variables (X): X = {K2_load, C2}, where K2_load is the GEMM2 weight-load mechanism and C2 is the GEMM2 autotune set. Constraints (C): the GEMM2 algebra must remain O[j,h] = sum_i C[j,i] * W2[e,h,i] * sW2[e,h//128,i//128], SwiGLU and routing unchanged, FP32 accumulation preserved, output shape/dtype fixed, all expert-pointer arithmetic int64-safe. Objective f(X): minimize end-to-end latency.
+
+Solver Strategy:
+Use deterministic structural replacement with a finite autotune set. Copy 6da80c61 as base, delete the dual-path try/except GEMM2 experiment, and implement one active GEMM2 kernel that uses tl.make_block_ptr / tl.advance for W2 loads. Optimize tile parameters with Triton autotune over a compact config set.
+
+Validity Mechanism:
+Use algebraic equivalence as the repair/projection rule: the only permitted difference from the base GEMM2 is the W2 load path. Keep c = x1 * x2 * sigmoid(x2), c_scale = max(max(abs(c))/448,1e-12), c_fp8 cast, tl.dot(c_fp8,w2_fp8), and post-scale identical. If any implementation detail would alter math, reject it and revert to the exact 6da80c61 base before submission.
+
+Why this solution?
+Advantages: targets a meaningful structural bottleneck, clearer than prior try/except experiment because attribution is unambiguous, may beat the incumbent if TMA truly helps GEMM2. Disadvantages: compile/layout risk and prior evidence for GEMM2 TMA is weak to negative.

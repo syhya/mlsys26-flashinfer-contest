@@ -1,0 +1,72 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_677",
+        "solution_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/50/executor/0_0/solution_677.py",
+        "evaluation_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/50/executor/0_0/evaluation_677.json",
+        "score": 1.4485931898152384,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 14.49x (ref: 17.626ms, kernel: 1.639ms)\",\n  \"score\": 1.4485931898152384,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 14.485931898152383,\n    \"exec_time_ms\": 1.6393775789473686,\n    \"baseline_time_ms\": 17.625790710526314,\n    \"compile_time\": 0.0,\n    \"eval_time\": 108.08105540275574\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"108.08s\",\n    \"kernel_latency_ms\": \"1.639ms\",\n    \"reference_latency_ms\": \"17.626ms\",\n    \"speedup\": \"14.49x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 17.625790710526314,\n      \"max_relative_error\": 598399975424.0,\n      \"max_absolute_error\": 49152.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_977",
+        "solution_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/50/executor/0_0/solution_977.py",
+        "evaluation_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/50/executor/0_0/evaluation_977.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL:  | max_rel_err=7340021.5, max_abs_err=1465600.0 | workload={'seq_len': 14107}\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 341.17504930496216\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"341.18s\",\n    \"error\": \"INCORRECT_NUMERICAL: \",\n    \"error_detail\": {\n      \"status\": \"INCORRECT_NUMERICAL\",\n      \"log\": \"\",\n      \"axes\": {\n        \"seq_len\": 14107\n      },\n      \"correctness\": {\n        \"max_relative_error\": 7340021.5,\n        \"max_absolute_error\": 1465600.0,\n        \"extra\": {\n          \"matched_ratio\": 0.5701928983141602\n        }\n      }\n    }\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  },
+  {
+    "round": 1,
+    "candidates": [
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_0c9",
+        "solution_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/50/executor/1_0/solution_0c9.py",
+        "evaluation_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/50/executor/1_0/evaluation_0c9.json",
+        "score": 1.575764147890916,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 15.76x (ref: 16.522ms, kernel: 1.472ms)\",\n  \"score\": 1.575764147890916,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 15.757641478909159,\n    \"exec_time_ms\": 1.4722082017543858,\n    \"baseline_time_ms\": 16.521541771929822,\n    \"compile_time\": 0.0,\n    \"eval_time\": 125.7488329410553\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"125.75s\",\n    \"kernel_latency_ms\": \"1.472ms\",\n    \"reference_latency_ms\": \"16.522ms\",\n    \"speedup\": \"15.76x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 16.521541771929822,\n      \"max_relative_error\": 662400008192.0,\n      \"max_absolute_error\": 37888.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_5c2",
+        "solution_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/50/executor/1_0/solution_5c2.py",
+        "evaluation_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/50/executor/1_0/evaluation_5c2.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL:  | max_rel_err=209600004096.0, max_abs_err=1146880.0 | workload={'seq_len': 11948}\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 122.92344927787781\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"122.92s\",\n    \"error\": \"INCORRECT_NUMERICAL: \",\n    \"error_detail\": {\n      \"status\": \"INCORRECT_NUMERICAL\",\n      \"log\": \"\",\n      \"axes\": {\n        \"seq_len\": 11948\n      },\n      \"correctness\": {\n        \"max_relative_error\": 209600004096.0,\n        \"max_absolute_error\": 1146880.0,\n        \"extra\": {\n          \"matched_ratio\": 0.680631684004944\n        }\n      }\n    }\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_581",
+        "solution_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/50/executor/1_1/solution_581.py",
+        "evaluation_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/50/executor/1_1/evaluation_581.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL:  | max_rel_err=505600016384.0, max_abs_err=1163264.0 | workload={'seq_len': 11948}\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 113.03107285499573\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"113.03s\",\n    \"error\": \"INCORRECT_NUMERICAL: \",\n    \"error_detail\": {\n      \"status\": \"INCORRECT_NUMERICAL\",\n      \"log\": \"\",\n      \"axes\": {\n        \"seq_len\": 11948\n      },\n      \"correctness\": {\n        \"max_relative_error\": 505600016384.0,\n        \"max_absolute_error\": 1163264.0,\n        \"extra\": {\n          \"matched_ratio\": 0.6808198716013439\n        }\n      }\n    }\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_ddd",
+        "solution_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/50/executor/1_1/solution_ddd.py",
+        "evaluation_file_path": "output/f1cc92fd-4e55-4593-94a6-267ef4ced7ff/50/executor/1_1/evaluation_ddd.json",
+        "score": 1.5476817651186847,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 15.48x (ref: 16.584ms, kernel: 1.500ms)\",\n  \"score\": 1.5476817651186847,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 15.476817651186847,\n    \"exec_time_ms\": 1.5001573421052632,\n    \"baseline_time_ms\": 16.583905728070174,\n    \"compile_time\": 0.0,\n    \"eval_time\": 87.9837896823883\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"87.98s\",\n    \"kernel_latency_ms\": \"1.500ms\",\n    \"reference_latency_ms\": \"16.584ms\",\n    \"speedup\": \"15.48x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 16.583905728070174,\n      \"max_relative_error\": 560000008192.0,\n      \"max_absolute_error\": 33536.0,\n      \"total_workloads\": 19\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

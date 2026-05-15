@@ -1,0 +1,28 @@
+### Outline 2 — Worklist GEMM2 Dispatch + Active-Expert Compression
+
+**Mathematical Formulation**
+- **Variables (X):** active-expert set `E_active`, expert token counts `c_e`, CSR offsets `o_e`, compact worklist `W = {(e, tile_start)}`, GEMM2 tile sizes `(BM, BN, BK)`, and unchanged routing/GEMM1 kernels.
+- **Constraints (C):**
+  1. Worklist must cover every routed token exactly once per selected local expert.
+  2. No CTA may process tokens outside `[o_e, o_{e+1})`.
+  3. Output accumulation order can vary, but mathematical sum must match parent semantics within tolerance.
+  4. All pointer arithmetic for expert-weight tensors must use int64-safe indexing.
+- **Objective f(X):** minimize wasted CTAs and launch overhead by launching only active tiles, especially for skewed expert distributions and small/medium `T`.
+
+**Solver Strategy**
+- Deterministic combinatorial construction:
+  1. Use GPU vectorized ops (`torch.bincount`, `torch.cumsum`, boolean masks) to compute `c_e` and `o_e`.
+  2. Build compact worklist `W` from active experts only.
+  3. Launch Triton GEMM2 over `|W|` blocks instead of full `(E_local, ceil(max_count/BM))` grid.
+  4. Use Triton autotune as the inner solver for tile config selection.
+
+**Validity Mechanism**
+- Repair / projection step:
+  1. After constructing `W`, validate coverage by ensuring total covered rows equals `Tk_total` partitioned by expert counts.
+  2. If coverage check fails or worklist construction is unsupported, deterministically fall back to the parent rectangular grid launch.
+  3. Preserve routing weights, GEMM math, and final scatter exactly.
+
+**Why this solution?**
+- **Expected improvement:** can materially reduce empty-CTA overhead in skewed routing cases.
+- **Advantages:** targets a real inefficiency identified in the task description.
+- **Disadvantages:** higher implementation complexity and more chances for indexing bugs than a pure load-path optimization.

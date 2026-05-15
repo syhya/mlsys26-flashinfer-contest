@@ -1,0 +1,23 @@
+Objective: Hopper TMA + WGMMA Scoring with Multi-Launch Radix TopK.
+
+Mathematical Formulation:
+- Variables: Tensor layouts for TMA and WGMMA.
+- Objective: Maximize Tensor Core utilization for `Q @ K.T` and find Top-2048.
+
+Solver Strategy:
+1. TMA + WGMMA Kernel:
+   - Use `cute::make_tma_copy` to asynchronously load Q and K pages.
+   - Use `cute::gemm` with WGMMA instructions (`SM90_64x64x128_F32F8F8_SS`) to compute the 64x64 score blocks.
+   - Accumulate, apply ReLU and weights, and write to a global workspace.
+2. Radix Select Kernel (Custom):
+   - Instead of a full CUB sort, implement a multi-pass Radix Select (similar to FlashInfer's TopK) which finds the threshold score.
+   - Pass 1: Build histogram of scores.
+   - Pass 2: Find threshold.
+   - Pass 3: Extract indices >= threshold.
+
+Validity Mechanism:
+CuTe layouts guarantee correct memory mapping and math. Radix Select guarantees exact Top-K without sorting the entire array, which is mathematically exact.
+
+Why this solution?
+Advantages: Extreme performance using hardware-specific features (TMA, WGMMA).
+Disadvantages: High complexity, strict alignment requirements for TMA and WGMMA, very large codebase.

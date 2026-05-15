@@ -1,0 +1,6 @@
+Plan 1: Reducer simplification + tile-validity flag + small-path workspace coalescing.
+- Variables: tile_has_valid (shared int), reducer scale_smem direct compute, O_tmp store width (float4).
+- Constraints: exact online softmax; mask -1; FP32 accum; base-2 lse.
+- Solver: Replace shared-index mutation with separate __shared__ int tile_has_valid flag in fused path. In split_k_reduce_kernel, fuse scale computation directly during lane-0 m_max sweep (avoid separate scale_smem materialization phase or compute coeff inline using l_tmp lookup). Convert split_k_compute_kernel O_tmp store from float2 to float4 to halve store transactions.
+- Validity: Keep neutral state (m=-INF, l=0, O=0) for empty rows; explicit lse=-INF guard.
+- Why: The known best solution (12.64x) uses exactly this combination. Parent (4.47x) lacks all these. Strict superset of best-known optimization recipe.

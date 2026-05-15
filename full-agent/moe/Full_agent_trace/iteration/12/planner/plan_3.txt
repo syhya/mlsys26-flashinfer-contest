@@ -1,0 +1,37 @@
+Outline 3: Robust Triton grouped MoE with corrected grid, segmented reductions, and exact masked semantics
+
+Mathematical Formulation:
+- Variables (X):
+  - q = sigmoid(logits), b = bias, gmask, topk_idx, w_route.
+  - pair list P = {(t_j, e_j, w_j)}_{j=1..Tk_total} for all routed local token-expert assignments.
+  - csr_offsets in Z^{E_local+1}: segment boundaries for each local expert.
+  - G1_j in R^{4096}, C_j in R^{2048}, O_j in R^{7168}: per-pair intermediate vectors.
+  - Y_t in R^{7168}: segmented sum over pairs with same token.
+- Constraints (C):
+  - P is a stable permutation of local assignments sorted by expert.
+  - For each pair j belonging to token t and expert e:
+    G1_j[n] = sum_k A_fp8[t,k] * W1_fp8[e,n,k] * Ascale[t,k//128] * W1scale[e,n//128,k//128].
+    C_j[i] = silu(G1_j[I+i]) * G1_j[i].
+    O_j[h] = w_j * sum_i C_j[i] * W2_fp8[e,h,i] * W2scale[e,h//128,i//128].
+  - Y_t = sum_{j: t_j=t} O_j and final cast to bf16.
+- Objective f(X): maximize throughput while preserving exact tensor semantics and eliminating indexing bugs.
+
+Solver Strategy:
+- Deterministic segmented linear algebra with Triton kernels.
+- Separate structure finding from numeric kernels:
+  1) exact routing + CSR structure in PyTorch,
+  2) grouped GEMM1 kernel,
+  3) fused SwiGLU+grouped GEMM2 kernel,
+  4) segmented scatter-add in PyTorch or Triton.
+- Use autotuning over tile sizes as a bounded discrete search, not random search.
+
+Validity Mechanism:
+- Correct the launch grids to use Tk_total, not T, for the M dimension in grouped kernels.
+- Add explicit n-mask on all GEMM loads/stores so partial N-tiles do not read/write out of range.
+- Add exact scale indexing based on original token ids and block ids.
+- Add deterministic debug-safe fallback path for tiny Tk or Triton failures using per-expert PyTorch matmul.
+- Use int64 pointer arithmetic everywhere for expert weight offsets.
+
+Why this solution?
+- Advantages: directly targets the likely root cause of the persistent 8192 error (wrong grid / OOB tile handling); preserves high-performance grouped Triton approach, so best chance to exceed current 8.13x speedup.
+- Disadvantages: more implementation complexity than pure PyTorch; still requires careful masking and segmented accumulation.

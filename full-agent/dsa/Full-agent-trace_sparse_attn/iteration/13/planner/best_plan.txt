@@ -1,0 +1,394 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Improve the current 104x-speedup DSA sparse attention CUDA kernel while preserving strict correctness. The child should target the parent’s remaining bottleneck: memory-latency and occupancy inefficiency in the fused sparse gather/attention loop, especially for small-to-medium token counts. The new child should keep exact masked semantics, FP32 accumulation, BF16 output, and base-2 `lse`, while introducing a more advanced yet robust pipeline.
+
+**Selected Outline:** Outline 2 — Warp-per-head fused online attention with `cp.async` double-buffering.
+
+**Rationale for Selection:**
+1. It preserves the parent’s strongest property: a mathematically exact one-pass online softmax formulation.
+2. It directly attacks the likely remaining bottleneck: sparse key/value gather latency from HBM.
+3. It satisfies the task’s optimization direction with dynamic multi-path dispatch and kernel fusion.
+4. It is more robust than aggressive tensor-core rewrites because correctness does not depend on fragile WMMA layouts or cross-block synchronization.
+5. It includes a safe deterministic fallback when `cp.async` or the higher-throughput path is not appropriate.
+
+---
+
+## Phase 1: Mathematical Definition
+
+### 1.1 Core computation model
+For each token `t` and head `h`:
+- Query is split into:
+  - `q_nope[t,h,:] in R^512`
+  - `q_pe[t,h,:] in R^64`
+- Sparse positions are given by `sparse_indices[t, j]`, `j = 0..2047`
+- For valid `idx >= 0`:
+  - `page = idx >> 6`
+  - `offset = idx & 63`
+  - `row = page * 64 + offset`
+  - `k_nope = ckv_cache[page, offset, :] in R^512`
+  - `k_pe   = kpe_cache[page, offset, :] in R^64`
+  - `score_j = dot(q_nope, k_nope) + dot(q_pe, k_pe)`
+  - `logit_j = sm_scale * score_j`
+- Output is:
+  - `out[t,h,:] = sum_j softmax(logit)_j * k_nope_j`
+- Log-sum-exp in base 2 is:
+  - `lse[t,h] = log2(sum_j exp(logit_j))`
+
+Padding semantics:
+- If `sparse_indices[t,j] == -1`, it contributes nothing.
+- If all entries are invalid:
+  - `out[t,h,:] = 0`
+  - `lse[t,h] = -INF`
+
+### 1.2 Variables, constraints, objective
+
+#### Variables `X`
+1. Dispatch threshold `tau` for selecting low-latency vs throughput kernel.
+2. Tile size over sparse positions `Bk`, with fixed candidates:
+   - low-latency path: `Bk = 8` or `16`
+   - throughput path: `Bk = 16` or `32`
+3. Pipeline stage count `S` for staged shared-memory buffering:
+   - default `S = 2`.
+4. Online softmax state per `(t,h)`:
+   - running max `m`
+   - running sum `l`
+   - output accumulator `O in R^512`
+5. Shared-memory staging buffers:
+   - `idx_stage[S][Bk]`
+   - `Kc_stage[S][Bk][512]`
+   - `Kp_stage[S][Bk][64]`
+
+#### Constraints `C`
+1. **Mask correctness:** only indices `idx >= 0` contribute.
+2. **Explicit BF16 conversion only:**
+   - BF16 -> FP32 via `__bfloat162float()` / `__bfloat1622float2()`
+   - FP32 -> BF16 via `__float2bfloat16()` / `__floats2bfloat162_rn()`
+3. **FP32 intermediate math:** all dot products, online softmax states, and output accumulation must be float32.
+4. **Base-2 LSE:**
+   - if `l > 0`, `lse = m * log2(e) + log2f(l)`
+   - else `lse = -INF`
+5. **Deterministic behavior:** no atomics, no randomization, no cross-block dependence.
+6. **Resource safety:** kernel launch shape and shared-memory allocation must remain within hardware limits.
+
+#### Objective function `f(X)`
+Minimize total runtime:
+- `f(X) = gather_cost + dot_cost + softmax_update_cost + sync_cost + launch_cost`
+subject to exact correctness constraints above.
+
+### 1.3 Exact recurrence to preserve
+For each valid logit `x` with value vector `V`:
+- `m_new = max(m, x)`
+- `alpha = 0                     if m == -INF else expf(m - m_new)`
+- `beta  = expf(x - m_new)`
+- `l_new = l * alpha + beta`
+- `O_new = O * alpha + beta * V`
+- update `m = m_new`, `l = l_new`, `O = O_new`
+
+Finalization:
+- if `l > 0`: `out = O / l`
+- else: zero output
+- `lse = m * 1.4426950408889634f + log2f(l)` when valid
+
+This is the mathematical invariant the child must maintain exactly.
+
+---
+
+## Phase 2: The Optimization Loop
+
+This task is code generation, not runtime auto-tuning, so the “optimization loop” is a deterministic design/refinement loop over a small set of kernel topologies. No randomness is used.
+
+### 2.1 Candidate topology family
+The executor should implement two fused kernels sharing the same mathematical recurrence.
+
+#### Path A: Low-latency path
+Use when `num_tokens` is small and grid saturation is poor.
+
+**Structure**
+- One warp computes one `(token, head)`.
+- Grid suggestion:
+  - `grid.x = num_tokens`
+  - `grid.y = 16`
+- Block suggestion:
+  - `block.x = 32`
+  - optional packed version: `block = (32, W)` with `W=2 or 4`, where each warp handles one head.
+
+**Computation pattern**
+- No global workspace.
+- Directly gather sparse rows tile by tile.
+- Use a very small `Bk`, such as 8 or 16.
+- Query fragments are converted to FP32 once and held in registers.
+- Use warp-shuffle reduction for the 576-dim dot product.
+
+**Why**
+- Small-token cases are latency-bound.
+- Simpler kernel shape lowers launch overhead and avoids underutilized giant blocks.
+
+#### Path B: Throughput path
+Use when `num_tokens` is large enough to benefit from deeper pipelining.
+
+**Structure**
+- One block handles one token and multiple heads, or one `(token, head-group)` tile.
+- Keep head-level independence.
+- Use staged shared-memory buffering.
+
+**Computation pattern**
+- Double-buffer sparse key tiles into shared memory.
+- While stage `s` is being consumed, prefetch stage `s+1`.
+- Process each tile using the same online recurrence.
+
+**Why**
+- This path is intended to overlap sparse gather latency with compute.
+- It preserves the parent’s fused one-pass design while improving the memory pipeline.
+
+### 2.2 Deterministic dispatch rule
+Use a fixed host-side rule such as:
+- if `num_tokens <= 32`: low-latency warp-per-head kernel
+- else: throughput pipelined kernel
+
+If implementation constraints make 32 awkward, use a nearby constant such as 64. The threshold must remain fixed and deterministic.
+
+### 2.3 Structured search over implementation parameters
+The executor should not improvise arbitrarily. Search only over this tiny safe set:
+
+1. **Low-latency path**
+   - warp-per-head block shape:
+     - `(32,1)` or `(32,2)` or `(32,4)`
+   - sparse tile size `Bk in {8,16}`
+
+2. **Throughput path**
+   - block shape:
+     - `(32,4)` or `(32,8)` or `(32,16)` depending register pressure
+   - `Bk in {16,32}`
+   - pipeline stages `S = 2`
+
+3. **Accumulator layout**
+   - keep output accumulator in register fragments as float2 pairs
+   - if registers become too high, split 512 dims into two deterministic halves:
+     - accumulate dims `[0:256)` then `[256:512)` within the same key loop
+   - this is a deterministic register-pressure mitigation, not heuristic guessing
+
+### 2.4 Concrete kernel-level optimization steps
+
+#### Step 1: Hoist and register-cache query fragments
+- Convert `q_nope` and `q_pe` from BF16 to FP32 exactly once per `(token, head)`.
+- Store in register fragments as `float2` values.
+- Never reconvert query inside the sparse-loop body.
+
+#### Step 2: Introduce staged sparse-tile loading
+For throughput path:
+- Load a tile of indices `idx_stage[curr][:]`.
+- For valid rows, copy the corresponding `ckv_cache` and `kpe_cache` slices into shared memory.
+- While consuming tile `curr`, prefetch tile `next` using `cp.async` when available.
+
+Use architecture guard:
+- `#if __CUDA_ARCH__ >= 800`
+  - use `cp.async`-style asynchronous global-to-shared copy
+- `#else`
+  - use regular vectorized copy
+
+This must be implemented as a performance optimization only; correctness must not depend on async copy.
+
+#### Step 3: Keep vectorized access safe
+- Use 128-bit vectorized loads (`int4`/`float4`) only where alignment is guaranteed.
+- Since last dimension is contiguous and sizes are multiples of vector width, cache-row loads are good candidates.
+- If a pointer may be misaligned, fall back to paired BF16 loads with `__nv_bfloat162`.
+
+#### Step 4: Use warp-level reduction for dot products
+- Each lane computes partial dot contributions over its assigned elements.
+- Reduce with `__shfl_down_sync`.
+- Broadcast lane-0 result within the warp.
+- Do not use block-wide reduction for the scalar logit.
+
+#### Step 5: Maintain exact online softmax in the fused kernel
+For every valid sparse entry:
+- compute `logit`
+- update `m,l,O` using the recurrence above
+- do not materialize attention scores or probabilities to global memory
+
+This is the central kernel fusion property.
+
+#### Step 6: Optimize synchronization pattern
+- One synchronization after tile staging is acceptable.
+- For double buffering, use a disciplined sequence:
+  1. prefetch next tile
+  2. commit/wait for current stage
+  3. synchronize before using shared memory
+- Minimize redundant `__syncthreads()` inside the inner sparse-entry loop.
+
+#### Step 7: Keep masked and invalid rows cheap
+- Load indices first.
+- Track `valid_count`.
+- Skip all dot-product/value work for `idx == -1`.
+- Avoid touching stale shared-memory data for invalid rows by either zero-filling or guarding usage with the valid-index condition.
+
+### 2.5 What not to do this iteration
+To keep robustness high, the executor should explicitly avoid:
+1. Cooperative groups grid-wide synchronization.
+2. Floating-point atomics for normalization or output merge.
+3. Full WMMA/Tensor Core rewrite over the 576-dim dot product unless already trivial and proven safe.
+4. Data-dependent preprocessing like sort/dedup unless required for correctness.
+
+The parent is already excellent; this iteration should be a disciplined vertical optimization, not a risky redesign.
+
+---
+
+## Phase 3: The "Safety Valve" (CRITICAL)
+
+This section guarantees score >= 1.0 by enforcing correctness even if some optimization detail is imperfect.
+
+### 3.1 Host-side hard validation
+Before any kernel launch, enforce:
+1. all inputs are CUDA tensors
+2. all tensors are contiguous
+3. dtypes are exactly:
+   - `q_nope`, `q_pe`, `ckv_cache`, `kpe_cache`: BF16
+   - `sparse_indices`: int32
+4. shapes are exactly:
+   - `q_nope = [T,16,512]`
+   - `q_pe = [T,16,64]`
+   - `ckv_cache = [P,64,512]`
+   - `kpe_cache = [P,64,64]`
+   - `sparse_indices = [T,2048]`
+5. token dimension consistency across inputs
+6. cache page dimension consistency across both caches
+
+Use `TORCH_CHECK` only. No silent correction.
+
+### 3.2 Deterministic all-invalid repair
+Inside every kernel:
+- maintain `valid_count` for each `(token, head)`.
+- increment only on `idx >= 0`.
+- after the loop:
+  - if `valid_count == 0` or `l <= 0`, write all-zero output and `lse = -INFINITY`.
+
+This strictly enforces the masked-padding rule.
+
+### 3.3 Architecture fallback for async copy
+The `cp.async` path must be optional.
+
+Deterministic rule:
+- if compiling/running on SM80+ and implementation is valid, use staged async copy path
+- otherwise use ordinary vectorized global-to-shared loads
+
+Both paths must share the same math and indexing.
+
+### 3.4 Conservative fallback dispatch
+If the new throughput kernel becomes too resource-heavy or difficult to validate, the executor must keep a conservative fallback:
+- low token counts: new warp-per-head fused kernel
+- otherwise: parent-style fused kernel without split-K workspace
+
+Do **not** fall back to the old split-K temporary-buffer route unless absolutely necessary for correctness. The fallback should still be one-pass and fused when possible.
+
+### 3.5 Explicit BF16 correctness enforcement
+Because implicit BF16 casts are disabled, the code must be reviewed mechanically for:
+- no `(float)bf16`
+- no `(__nv_bfloat16)float`
+- no hidden implicit conversions through templated helpers
+
+All BF16 conversions must be explicit intrinsics.
+
+### 3.6 Final LSE enforcement
+Always compute:
+- `lse = m * 1.4426950408889634f + log2f(l)` when valid
+- `lse = -INFINITY` otherwise
+
+Do not compute natural-log LSE and then convert later unless the equivalence is explicit and exact.
+
+---
+
+## Phase 4: Implementation Details
+
+### 4.1 Required headers
+Use only standard available headers:
+- `<torch/extension.h>`
+- `<cuda_bf16.h>`
+- `<tuple>`
+- optionally `<cuda_fp16.h>` and `<math.h>` if needed
+
+No obscure packages or unsupported third-party dependencies.
+
+### 4.2 Exact code structure to implement
+
+#### A. Preserve the required interface exactly
+Keep:
+- exact function name `dsa_forward`
+- exact signature
+- exact return type `std::tuple<torch::Tensor, torch::Tensor>`
+- final `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)` block
+
+#### B. Add helper functions
+Implement small inline device helpers such as:
+- `warp_reduce_sum(float)`
+- `decode_index(int idx, int &page, int &offset, int &row)`
+- `load_q_fragments(...)`
+- `online_update(float logit, float &m, float &l, float2 *accum, ...)`
+
+These helpers reduce duplication and lower bug risk.
+
+#### C. Implement a low-latency fused kernel
+Suggested name:
+- `dsa_forward_small_kernel`
+
+Properties:
+- one warp per head
+- no global temporary tensors
+- direct sparse gather
+- exact online softmax
+- optimized for low launch overhead
+
+#### D. Implement a throughput pipelined kernel
+Suggested name:
+- `dsa_forward_pipelined_kernel`
+
+Properties:
+- staged shared-memory buffering
+- `cp.async` path under `#if __CUDA_ARCH__ >= 800`
+- fallback normal copy otherwise
+- same recurrence and output semantics
+
+#### E. Keep a conservative fused fallback kernel if needed
+If the pipelined kernel is too risky, retain a simpler fused kernel derived from the parent.
+This should still avoid the two-pass split-K HBM workspace.
+
+### 4.3 Implementation order for executor
+1. Start from parent’s already-correct one-pass fused kernel logic.
+2. Refactor to isolate online recurrence and query loading.
+3. Implement low-latency warp-per-head path first.
+4. Add host-side dispatch and verify all shape/dtype checks remain intact.
+5. Add staged shared-memory path for large workloads.
+6. Add `cp.async` guarded optimization last.
+7. If `cp.async` introduces risk, keep the staged fallback copy path and still submit the child.
+
+### 4.4 Complexity target
+For each `(token, head)`:
+- arithmetic remains polynomial and bounded by `O(2048 * 576)`
+- no exponential or search-heavy runtime behavior
+- memory traffic should decrease versus any split-K temporary-buffer approach
+- latency overlap should improve effective throughput on large sparse batches
+
+### 4.5 Review checklist before finalizing child code
+The executor should verify all of the following:
+1. code compiles with BF16 conversions disabled implicitly
+2. all reductions and accumulations are FP32
+3. masked `-1` indices contribute nothing
+4. all-invalid rows produce zero output and `-INF` `lse`
+5. `lse` is base-2 exactly
+6. no extra outputs are returned
+7. dispatch is deterministic
+8. no dependence on unsupported libraries
+9. no global workspace is introduced unless absolutely necessary
+10. if `cp.async` path is present, a safe fallback path exists for non-SM80 targets
+
+---
+
+## Final Recommendation to Executor
+
+Build the child as a **robust vertical optimization** of the current best solution:
+- preserve the parent’s exact fused online softmax algorithm
+- introduce **dynamic multi-path dispatch**
+- implement a **warp-per-head low-latency kernel** for small workloads
+- implement a **staged shared-memory throughput kernel** for larger workloads
+- use **`cp.async` double-buffering** only as an architecture-guarded optimization, never as a correctness dependency
+- keep all masked semantics, FP32 accumulation, BF16 explicit conversions, and base-2 `lse` exact
+
+This is the most algorithmically robust plan with the best chance to beat the current parent without sacrificing correctness or compilation stability.

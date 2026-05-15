@@ -1,0 +1,225 @@
+# Solo mode configuration (single-model, claude-sonnet-4-6)
+workspace_path: "./output"
+
+# Global LLM configuration
+llm_config:
+  url: "${LLM_BASE_URL}"
+  api_key: "${LLM_API_KEY}"
+  model: "openai/gpt-5.4" 
+  temperature: 0.9
+  context_length: 128000
+  max_tokens: 32768
+  timeout: 1200
+
+# ------------------------------------------------------------------------------
+# Define all available components
+# ------------------------------------------------------------------------------
+
+planners:
+  evolve_planner:
+    react_max_steps: 5
+
+executors:
+  evolve_executor_react:
+    parallel_candidates: 1
+    max_rounds: 3
+    react_max_steps: 10
+
+  evolve_executor_chat:
+    max_rounds: 3
+
+  evolve_executor_fuse:
+    max_rounds: 3
+    react_max_steps: 10
+    score_threshold: 0.99
+
+summarizers:
+  evolve_summary:
+    react_max_steps: 5
+
+# ------------------------------------------------------------------------------
+# Define main evolution process configuration
+# ------------------------------------------------------------------------------
+evolve:
+  task: |
+    # Role
+    You are a world-class expert in high-performance computing, specializing in PyTorch and CUDA C++ programming. Your expertise includes writing custom CUDA kernels, optimizing memory access patterns, and leveraging low-level hardware features for maximum performance.
+
+    # Task
+    You will be given with a JSON task definition describing a GPU kernel operation. Your goal is to implement a **highly optimized CUDA kernel** that significantly outperforms the provided PyTorch reference implementation while maintaining strict numerical correctness.
+
+    The definition includes:
+    1. **Tensor specifications**: shapes, dtypes, and descriptions for all inputs and outputs
+    2. **Axes**: dimension parameters (some constant, some variable like batch_size)
+    3. **Constraints**: relationships between dimensions
+    4. **Reference implementation**: a correct but unoptimized Python/PyTorch `run()` function
+
+    # Input Format
+    The initial file is a JSON object with the following structure:
+    ```json
+    {
+      "name": "task_identifier",
+      "description": "What this kernel does",
+      "axes": { ... },       // Dimension parameters
+      "inputs": { ... },     // Input tensor specs (shape, dtype)
+      "outputs": { ... },    // Expected output specs
+      "constraints": [...],  // Dimension constraints
+      "reference": "..."     // Reference Python implementation
+    }
+    ```
+    The `reference` field contains a Python function `run(*inputs) -> outputs` that serves as the correctness baseline.
+
+    # Output Format
+    Provide **only a single CUDA/C++ code block** -- the content of `kernel.cu`.
+
+    Your `kernel.cu` MUST:
+    1. Include `<torch/extension.h>` and necessary CUDA headers
+    2. Expose exactly the C++ entry point below
+    3. End with the `PYBIND11_MODULE(...)` binding -- this is **mandatory** or the module will fail to load
+
+    ```cpp
+    #include <torch/extension.h>
+    #include <cuda_fp8.h>
+    #include <tuple>
+
+    // ... your CUDA kernels and helpers ...
+
+    // Entry point -- must have this exact name and signature
+    torch::Tensor topk_indexer_forward(
+        torch::Tensor q_index_fp8,        // [batch_size, 64, 128]  float8_e4m3fn
+        torch::Tensor k_index_cache_fp8,  // [num_pages, 64, 1, 132] int8 (uint8 interpreted, deep_gemm FP8 format)
+        torch::Tensor weights,            // [batch_size, 64]        float32
+        torch::Tensor seq_lens,           // [batch_size]            int32
+        torch::Tensor block_table         // [batch_size, max_num_pages] int32
+    );
+    // Returns: topk_indices [batch_size, 2048] int32
+
+    // MANDATORY -- without this the module will not load
+    PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+        m.def("topk_indexer_forward", &topk_indexer_forward, "DSA TopK Indexer Forward");
+    }
+    ```
+
+    # Build Environment Constraints (CRITICAL)
+    - The build targets **SM90+ (Hopper/Blackwell)** architecture with CUDA 12+.
+    - `float8_e4m3fn` tensors are passed as `torch::Tensor` with dtype `torch::kFloat8_e4m3fn`. In CUDA device code, access the raw bytes as `uint8_t` or `__nv_fp8_e4m3` and convert to float explicitly.
+    - Always `#include <cuda_fp8.h>` for FP8 intrinsics if needed.
+
+    # FP8 KV Cache Format (deep_gemm layout -- CRITICAL)
+    The `k_index_cache_fp8` tensor uses the **deep_gemm packing format**:
+    - Tensor shape: `[num_pages, page_size=64, 1, 132]` stored as `int8` (interpret as `uint8`)
+    - **Per-page flat layout** (viewing as `[num_pages, page_size * 132]`):
+      - First `page_size * 128` bytes: FP8 (e4m3fn) key data, shape `[page_size, 128]`
+      - Last `page_size * 4` bytes: float32 per-token scales, shape `[page_size, 1]`
+    - To dequantize token `t` in page `p`: `K_float[t, d] = fp8_to_float(fp8_data[t, d]) * scale[t]`
+
+    # Correctness Requirements
+    1. Output shape: `[batch_size, 2048]` with dtype `int32`.
+    2. The kernel computes per-batch: `scores = sum_heads(relu(q @ K.T) * weights)` then selects top-2048 indices.
+    3. Output values are **global token indices** encoded as `page_idx * 64 + offset_in_page`, where `page_idx` comes from `block_table`.
+    4. Positions beyond `seq_lens[b]` must NOT contribute to scores. Indices beyond the valid top-K count must be `-1`.
+    5. Top-K index **ordering does not need to match** the reference exactly, but the **set of selected indices** must be correct (i.e., correspond to the same top-2048 scores). Ties may be broken arbitrarily.
+    6. All variable axes (like `batch_size`, `num_pages`, `max_num_pages`) must work for any valid value.
+    7. Constraint: `topk (2048) <= max_num_pages * page_size (64)`.
+
+    # Core Optimization Strategy
+    Your solution must demonstrate a **substantial architectural or performance improvement** over a naive implementation. Superficial changes (e.g., renaming variables, simple loop reordering) are forbidden. You must innovate in at least **one** of the following dimensions:
+
+    ## 1. Scoring Stage Optimization
+    The scoring computation `q @ K.T` is the dominant cost. This is essentially a batched matrix multiplication between FP8 queries `[64, 128]` and paged KV cache `[seq_len, 128]` with per-token dequantization.
+    - **FP8 Tensor Core utilization**: Leverage Hopper/Blackwell FP8 MMA instructions for the matmul.
+    - **Paged KV cache tiling**: Design tile strategies that respect page boundaries (64 tokens per page) to avoid scattered memory access.
+    - **Multi-path dispatch**: Different workload sizes (few pages vs. many pages) may benefit from different kernel strategies.
+
+    ## 2. TopK Selection Strategy
+    Selecting top-2048 from potentially large score arrays requires an efficient selection algorithm.
+    - Consider: **radix-based selection**, **histogram/counting**, **bitonic sort**, **partial sort**, or **warp-cooperative approaches**.
+    - The choice may depend on the score array length relative to K=2048.
+
+    ## 3. Memory & Pipeline Optimization
+    - **Asynchronous Data Movement (`cp.async` / TMA):** On SM90+ architectures, utilize asynchronous memory operations to overlap data movement and computation.
+    - **Vectorized Access:** Use 128-bit vectorized loads for FP8 data to maximize memory bandwidth.
+    - **Shared Memory Tiling:** Tile KV pages into shared memory for efficient reuse across heads.
+
+    ## 4. Kernel Fusion
+    - Fusing the score computation, ReLU activation, weighted head reduction, and top-K selection into fewer kernel launches reduces HBM round-trips and launch overhead.
+
+    ## 5. Library Usage
+    You are encouraged to call third-party CUDA libraries directly from `kernel.cu` when they provide a performance advantage. Available libraries in the build environment include:
+    - **CUB** (`<cub/cub.cuh>`): block-level and warp-level primitives (e.g., `cub::BlockRadixSort`, `cub::WarpReduce`, `cub::BlockReduce`).
+    - **CUTLASS / CuTe** (`<cute/tensor.hpp>` etc.): tile-level abstractions, FP8 MMA wrappers, and layout utilities for tensor-core matmul.
+    - **Standard CUDA math** (`<cuda_fp8.h>`, `<cuda_bf16.h>`): FP8/BF16 arithmetic helpers.
+
+    Below is an example. You can refer to the format in this example. Your question code is in the initial file.
+
+    ===== Example Start =====
+
+    Given model:
+
+    ```json
+    {
+      "name": "task_identifier",
+      "description": "What this kernel does",
+      "axes": { ... },       // Dimension parameters
+      "inputs": { ... },     // Input tensor specs (shape, dtype)
+      "outputs": { ... },    // Expected output specs
+      "constraints": [...],  // Dimension constraints
+      "reference": "..."     // Reference Python implementation
+    }
+    ```
+
+    You should respond with your final answer
+
+    ```cpp
+    #include <torch/extension.h>
+    #include <cuda_fp8.h>
+    #include <tuple>
+
+    // ... your CUDA kernels and helpers ...
+
+    torch::Tensor topk_indexer_forward(
+        torch::Tensor q_index_fp8, torch::Tensor k_index_cache_fp8,
+        torch::Tensor weights, torch::Tensor seq_lens,
+        torch::Tensor block_table
+    ) {
+        // ... implementation ...
+    }
+
+    // MANDATORY -- without this the module will not load
+    PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+        m.def("topk_indexer_forward", &topk_indexer_forward, "DSA TopK Indexer Forward");
+    }
+    ```
+
+    ===== Example End =====
+
+    Now, provide your answer below:
+
+
+  # Component selection
+  planner_name: "evolve_planner"
+  executor_name: "evolve_executor_fuse"
+  summary_name: "evolve_summary"
+
+  # Core parameters
+  max_iterations: 10
+  target_score: 100.0
+  concurrency: 1
+
+  # No multi_llm_configs — single-model solo mode
+
+  # Skip evaluation of the JSON initial file (it's a task definition, not code)
+  initial_score: 0.0
+  initial_evaluation: "Initial file is a JSON task definition. No kernel to evaluate yet."
+
+  # Evaluator configuration
+  evaluator:
+    timeout: 3600
+
+  # Database configurations
+  database:
+    storage_type: "in_memory"
+    num_islands: 1
+    population_size: 100
+    checkpoint_interval: 1
+    sampling_weight_power: 2

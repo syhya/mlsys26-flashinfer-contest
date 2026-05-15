@@ -1,0 +1,61 @@
+## Plan 3: Adopt ff4217c7 + torch._scaled_mm Hybrid for Expert-Parallel GEMM
+
+**Objective:** Replace custom Triton grouped GEMM with torch._scaled_mm (cuBLAS-backed FP8 GEMM) 
+combined with expert-parallel dispatch. cuBLAS has highly optimized matrix kernels that may outperform 
+hand-written Triton for larger expert token batches.
+
+### Mathematical Formulation
+
+**Variables (X):**
+- Per-expert GEMM strategy: Triton vs torch._scaled_mm
+- Token dispatch structure: sorted CSR vs padded tensor
+- FP8 scaling convention: per-tensor vs per-column
+
+**Constraints (C):**
+- torch._scaled_mm requires: float8_e4m3fn dtype, per-tensor scale (scalar), output in float32/bfloat16
+- Hidden state scale is per-block [H//128, T] — NOT per-tensor → requires conversion
+- Expert weight scale is per-block [E, N//128, K//128] — NOT per-tensor
+- Must handle variable T (any batch size)
+
+**Problem with torch._scaled_mm:**
+torch._scaled_mm requires scalar per-tensor scales, but our data uses block scales (per 128 elements).
+To use _scaled_mm, we would need to:
+1. Find max scale across all blocks → use as per-tensor scale → LOSES block-level precision
+2. Dequantize to float32 first → defeats FP8 purpose
+3. Re-quantize per-tensor → adds extra kernels
+
+This defeats the block-scale convention and would introduce large numerical errors.
+
+### Alternative Approach: Batched torch.mm with Pre-dequantized Weights
+
+For GEMM2, since I=2048 is moderate size, pre-dequantize W2 weights per expert to float32, 
+then use batched GEMM. But this materializes [32, 7168, 2048] float32 ≈ 1.8GB → too large.
+
+### Solver Strategy: Persistent Kernel for Small Batches
+
+When T is small (decode regime, T≤32), expert token counts are tiny (Tk≤5 per expert).
+A persistent kernel that keeps all expert weights resident and processes all tokens in one wave
+could outperform the current approach.
+
+For large T (prefill regime, T≥512), the current grouped GEMM approach in ff4217c7 is already optimal.
+
+**Implementation:**
+1. Detect T at runtime: if T ≤ 32, use a decode-optimized path
+2. For decode: use split-K GEMM where K=7168 is split across SMs
+3. For prefill: use ff4217c7's existing grouped GEMM (already optimal)
+
+### Validity Mechanism
+- Dual-path dispatching based on T ensures correctness for all input sizes
+- Decode path: dequantize weights on-the-fly to float32, use torch.mm per expert (at most 32 small GEMMs)
+- Prefill path: use proven ff4217c7 Triton kernels unchanged
+
+### Why This Solution?
+**Expected improvement:** 5-15% for decode workloads; 0% for prefill (same code)
+**Advantages:** Handles the long tail of small-T workloads efficiently
+**Disadvantages:** Complex dual-path code; decode path with torch.mm per expert re-introduces serial loop
+**Risk:** If evaluation benchmarks only large T, no improvement from decode path
+**Verdict: LOW VALUE IMPROVEMENT - the benchmarks likely test multiple T values but the serial loop for decode is not clearly better**
+
+**CONCLUSION: Plan 2 is the strongest. It directly builds on the proven best solution (ff4217c7) 
+with targeted GEMM1 optimization via expanded autotune configs and more aggressive software pipelining. 
+This is the safest path to pushing score from 1.0253 to 1.1+.**

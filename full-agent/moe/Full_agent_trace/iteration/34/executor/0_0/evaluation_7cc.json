@@ -1,0 +1,28 @@
+{
+  "status": "success",
+  "summary": "Optimization successful! Speedup: 15.04x (ref: 16.789ms, kernel: 1.552ms)",
+  "score": 1.504338074800371,
+  "metrics": {
+    "correctness": 1.0,
+    "speedup": 15.043380748003708,
+    "exec_time_ms": 1.552263254385965,
+    "baseline_time_ms": 16.78933605263158,
+    "compile_time": 0.0,
+    "eval_time": 69.89367699623108
+  },
+  "artifacts": {
+    "eval_backend": "modal+flashinfer-bench",
+    "task_id": "moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048",
+    "execution_time": "69.89s",
+    "kernel_latency_ms": "1.552ms",
+    "reference_latency_ms": "16.789ms",
+    "speedup": "15.04x",
+    "bench_stats": {
+      "reference_latency_ms": 16.78933605263158,
+      "max_relative_error": 457600008192.0,
+      "max_absolute_error": 38912.0,
+      "total_workloads": 19
+    },
+    "correctness_check": "Passed"
+  }
+}

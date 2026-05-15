@@ -1,0 +1,33 @@
+Outline 3: Exact Dequant Active-Slice Baseline with Adaptive Fast Paths
+
+Mathematical Formulation
+- Variables (X):
+  1. Routing indices/topology arrays.
+  2. Active local expert batches {A_e, B1_e, B2_e}.
+  3. Dequantized active matrices D1_e and D2_e in FP32 or BF16.
+- Constraints (C):
+  1. Dequantization exactly matches block scales.
+  2. Only active experts and active rows are materialized.
+  3. Final scatter-add is deterministic and complete.
+- Objective f(X): guarantee correctness with polynomial-time exact computation, then optimize constants using vectorized dequant and batched loops over at most 32 experts.
+
+Solver Strategy
+- Exact tensor algebra only; no search.
+- Use PyTorch vectorization for routing and dispatch.
+- For each active expert, dequantize just the needed tensors and call torch.mm.
+
+Validity Mechanism
+- Hard guarantee by construction: every arithmetic step mirrors reference math.
+- Repair/fallback:
+  1. If any tensor stride/layout is noncontiguous in an unsafe way, call contiguous() once.
+  2. If no local experts are selected, return zeros.
+  3. All reductions in FP32.
+
+Why this solution?
+- Expected improvement: score very likely reaches >=1.0 because it is closest to mathematical reference while still avoiding full 14GB dense dequant.
+- Advantages:
+  1. Lowest crash risk.
+  2. Simple to implement and debug.
+- Disadvantages:
+  1. Likely slower than aggressive Triton.
+  2. May not beat the baseline latency enough even if correct.

@@ -1,0 +1,23 @@
+Plan 1: Fuse Fast-Path Short-Sequence Bypass (from sibling 2fb50fd2) with Parent's uint4 K-Load
+
+Mathematical Formulation:
+- X: batch b with L=seq_lens[b], K=2048, page_size=64.
+- For L<=K: output set = {block_table[b,p]*64+t : p*64+t<L}, ordering arbitrary per task spec.
+- For L>K: full scoring + segmented sort pipeline.
+
+Constraints:
+- Each batch written by exactly one path (partition by L<=K).
+- NaN->-1e20 for long path.
+- 16B alignment for uint4 K loads satisfied (k_page stride=132 bytes per token? No, per-page base is aligned, t*128 is 128B aligned, +lane*16 stays aligned).
+
+Solver Strategy: Deterministic dispatch, no optimization search.
+
+Validity Mechanism:
+- Short path enumerates valid tokens, pads -1.
+- Long path: CUB segmented radix sort guarantees exact top-K.
+- generate_offsets sets begin=end for short batches (empty segments).
+
+Why: Combines the 2x win from sibling 2fb50fd2 (fast-path, 8.97) with parent's uint4 K-load micro-opt (parent 4.02, 0.085ms kernel). Expected: fast-path wins for short seqs (the common case), uint4 accelerates the long path further. Target: score ~9.5-10x.
+
+Advantages: Provably correct, orthogonal optimizations additive.
+Disadvantages: Marginal gain beyond sibling since fast-path already dominates.

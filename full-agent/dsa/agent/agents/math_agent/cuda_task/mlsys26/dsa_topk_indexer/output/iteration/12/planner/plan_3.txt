@@ -1,0 +1,6 @@
+Plan 3: Eliminate full segmented sort entirely using observation that topk=2048, page_size=64 → if seq_len <= 2048, all valid tokens go to output (no sort needed!), else run smaller sort.
+- Add fast-path: if seq_len[b] <= 2048, just write indices directly (no scoring of unused, but we still need scores for ordering—actually since we just need the SET, no sort needed for short seqs).
+- For longer sequences use the existing CUB sort.
+- Combine with parent's already-best dot product.
+- Big speedup expected since most sort work avoided when sequences short.
+- Risk: requires per-batch dispatch logic; need batch_size CPU knowledge of seq_lens or two-pass.

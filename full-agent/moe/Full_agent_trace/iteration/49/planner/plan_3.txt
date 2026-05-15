@@ -1,0 +1,29 @@
+### Outline 3 — GEMM1-Centric Optimization via TMA/Block-Pointer Loads, Routing Stability, and Conservative GEMM2
+
+**Mathematical Formulation**
+- **Variables ($X$):**
+  - GEMM1 load schedule: block pointers for hidden-state and weight tiles, software pipeline depth, tile sizes `(BLOCK_M, BLOCK_N, BLOCK_K)`.
+  - Fixed routing graph from DeepSeek top-k routing.
+  - GEMM2 kept structurally conservative (parent-style local output + `index_add_`).
+  - Optional activation staging buffer for SwiGLU output.
+- **Constraints ($C$):**
+  1. GEMM1 must compute `G1 = (A_fp8 * A_scale) @ (W1_fp8 * W1_scale)^T` with FP32 accumulation and correct 128-block scale usage.
+  2. Must use int64-safe addressing for expert weights.
+  3. Routing semantics remain unchanged.
+  4. GEMM2 path remains correctness-safe and deterministic.
+- **Objective ($f(X)$):** maximize throughput of GEMM1, the dominant kernel, by improving global-memory efficiency and Tensor Memory Accelerator friendliness while keeping the rest of the pipeline stable.
+
+**Solver Strategy**
+- Deterministic kernel-configuration search using Triton autotune over a small safe set of block-pointer/TMA-compatible layouts.
+- Keep algorithm structure nearly unchanged; optimize only the highest-cost stage.
+- If block-pointer path cannot satisfy layout assumptions, fall back to the parent pointer-arithmetic kernel.
+
+**Validity Mechanism**
+- Safety-by-isolation: modify only GEMM1 memory-loading mechanics while preserving math.
+- Keep a compile-time fallback kernel equal to the parent GEMM1.
+- Preserve parent routing and GEMM2, so even if the optimized GEMM1 variant is disabled, the child remains valid and performant.
+
+**Why this solution?**
+- **Expected improvement:** if GEMM1 is the dominant cost, improving its memory path can yield the best upside without touching risky scatter or routing logic.
+- **Advantages:** narrow modification surface; robust correctness; directly aligned with Blackwell/Triton guidance.
+- **Disadvantages:** `tl.make_block_ptr` with FP8/expert-strided weights is tricky; benefits may depend heavily on Triton codegen and hardware support.

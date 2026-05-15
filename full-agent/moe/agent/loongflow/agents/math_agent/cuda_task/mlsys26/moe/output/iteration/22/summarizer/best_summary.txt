@@ -1,0 +1,19 @@
+**1. Executive Summary:**
+This iteration was a marginal refinement because it applied minor code-quality improvements (stable sort, NaN guards, helper function extraction) to the parent's already-correct FP32 dequant path, performing 1st out of 2 siblings with negligible fitness gain.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* **Sibling Rank:** 1 out of 2 children. Top sibling score: 15.79%.
+* **Score Delta:** From parent (15.22%) to child (15.79%).
+* **Key Change:** Added `stable=True` to argsort, introduced `torch.nan_to_num` safety guard before final BF16 conversion, extracted helper functions `_expand_block_scales` and `_dequant_activation_rows`, and removed `sorted=True` from routing topk calls.
+* **Core Metrics:** Correctness: 1.0; speedup: 1.58x; kernel execution time: 14.303ms; reference time: 18.269ms; parent kernel time: 14.543ms; eval time: 75.19s; benchmark max absolute error: 2048.0; benchmark max relative error: 1562500.0; total workloads: 19.
+
+**3. Strategic Analysis (The "So What?"):**
+* **Root Cause:** The outcome was driven by execution quality, not plan innovation. The plan proposed a native FP8 backend with torch._scaled_mm, but the executor implemented only the deterministic fallback path with minor refactoring of the parent's structure. The 0.57% score improvement comes from reduced dispatch overhead (stable sort) and slightly faster routing (unsorted topk), not from any fundamental algorithmic change.
+* **Key Insight:** The most important lesson is that micro-optimizations to an already-slow eager FP32 path yield diminishing returns. This child confirms the parent's correctness pattern is stable and can serve as a validation oracle, but it also proves that incremental refactoring within the same architectural paradigm cannot recover the 5-8x performance gap to the fast lineage.
+* **Identified Risk:** The biggest trap is continuing to iterate on code-quality refinements within the full-dequant eager execution model. The max relative error exploded to 1562500.0 despite correctness pass, indicating the evaluator's tolerance band is masking severe numerical discrepancies that will block convergence to a production-quality solution.
+
+**4. Actionable Guidance (The "What's Next?"):**
+* `Recommend Fusion:` Extract the child's stable dispatch logic (stable argsort, NaN guards, helper function structure) and transplant it into a fast lineage that already has grouped Triton or native FP8 GEMMs. This preserves the correctness improvements while escaping the slow eager execution trap.
+* `Recommend Exploration:` Implement a hybrid architecture where routing/dispatch uses this child's exact logic, but GEMM1 and GEMM2 are swapped to torch._scaled_mm or a minimal Triton kernel with explicit per-tile scale application. This isolates whether the performance bottleneck is in dispatch or in compute.
+* `Recommend Stripping:` Strip the full per-expert weight dequantization strategy as a core optimization direction. Future variants must dequantize per-tile inside the GEMM kernel or use native FP8 tensor cores, not materialize full FP32 weight matrices in eager PyTorch.
+* `Warn:` Do not treat this child as a performance-competitive solution. It is a correctness baseline and debugging oracle only. The 1.58x speedup is still 5-6x slower than the island's historical best, and the exploding relative error suggests the evaluator's correctness check is insufficient for validating numerical quality.

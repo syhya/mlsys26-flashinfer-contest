@@ -1,0 +1,18 @@
+**1. Executive Summary:**
+This iteration was a successful performance optimization because dynamic FP8 quantization unlocked Tensor Cores for GEMM2, outperforming its parent, though it incurred severe precision degradation.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   `**Sibling Rank:**` 1 out of 1 children. Top sibling score: 86.26%.
+*   `**Score Delta:**` From parent (83.48%) to child (86.26%).
+*   `**Key Change:**` Fused dynamic block-wise FP8 quantization of SwiGLU activations into `grouped_gemm2_kernel` to enable FP8 Tensor Core dot products.
+*   `**Core Metrics:**` Kernel latency improved from 3.024ms to 2.810ms (8.63x speedup vs ref); max absolute error spiked massively from 8192.0 to 33280.0.
+
+**3. Strategic Analysis (The "So What?"):**
+*   `**Root Cause:**` The execution plan's strategy to quantize intermediate activations (`c`) back to FP8 successfully utilized the GPU's FP8 Tensor Cores, leading to the latency reduction. However, the naive block-wise max scaling (`c_max / 448.0`) introduced massive quantization noise, driving up the absolute error.
+*   `**Key Insight:**` While dynamic in-kernel FP8 quantization is mechanically effective for unlocking Tensor Cores, SwiGLU activations may have outlier values that make naive per-block maximum scaling highly destructive to numerical precision.
+*   `**Identified Risk:**` The extreme max absolute error (33280.0) and max relative error (3.69e11) mean this kernel is effectively outputting mathematically compromised values, even if it loosely passed the benchmark's correctness check. Relying on this dynamic quantization technique risks catastrophic failures in actual model inference.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   `Recommend Stripping:` Remove the dynamic FP8 quantization in `grouped_gemm2_kernel` and revert to computing the `tl.dot` in FP32 by explicitly casting the FP8 weights to `tl.float32` prior to the multiply. Numerical correctness must be prioritized over the 0.2ms latency gain.
+*   `Recommend Exploration:` To recover the lost Tensor Core performance safely, investigate whether the SwiGLU activation can be pre-computed and stored as a strict FP8 tensor using PyTorch's native `torch.aminmax` for scaling, which can then be fed into a more stable `torch._scaled_mm` for GEMM2.
+*   `Warn:` The presence of massive errors in both parent (8192.0) and child (33280.0) suggests an underlying structural bug beyond just quantization—potentially an out-of-bounds memory read in the expert offsets, or unhandled masked tokens during the scatter-add phase. Ensure all index boundaries are strictly enforced.

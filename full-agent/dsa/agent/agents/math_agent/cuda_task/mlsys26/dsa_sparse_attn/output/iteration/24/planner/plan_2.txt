@@ -1,0 +1,5 @@
+Plan 2: Restore best ancestor + reducer-native workspace layout.
+- Variables: O_tmp layout (producer-consumer contiguous).
+- Change: reorder O_tmp from [T,S,H,D] to [T,H,S,D] so reducer reads contiguous S dimension per (t,h).
+- Risk: indexing bug in both compute and reduce kernel must match exactly.
+- Why: addresses identified bottleneck. Moderate risk of regression if indexing mismatched.

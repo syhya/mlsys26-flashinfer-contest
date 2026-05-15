@@ -1,0 +1,202 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Beat parent score 9.564 (kernel 0.036 ms) by extending the tiering ladder with a new TIER-L2 block-level radix sort for medium-long sequences (6144 < L ≤ 12288), further reducing the fraction of batches that pay the device-wide `cub::DeviceSegmentedRadixSort` cost. Preserve correctness=1.0.
+
+**Selected Outline:** Tiered Dispatch Extension — Add TIER-L2 (`cub::BlockRadixSort<float, 512, 24, int32_t>`) between TIER-M and TIER-L.
+
+**Rationale for Selection:**
+1. The summary of the parent explicitly recommends this as HIGH PRIORITY: *"Extend the tiering ladder with a TIER-L2 large-block radix sort using cub::BlockRadixSort<float, 512, 32, int32_t>..."*.
+2. Each prior tier extension (adding TIER-S → +2.1×, adding TIER-M → +6.6%) yielded measurable gains by replacing device-wide CUB with workload-specialized block sort.
+3. Mathematically **exact** (radix sort is deterministic & complete). Zero correctness risk.
+4. Downside-protected: if no batches fall in (6144, 12288], TIER-L2 kernel is a no-op → behavior identical to parent (9.564).
+5. Chose `<512, 24>` (= 12288 items) over `<512, 32>` (= 16384) because smem budget: 12288 × (4 B key + 4 B val) = 96 KB raw + CUB temp; with dynamic smem attribute set to 227 KB on H100 (max), this fits. `<512, 32>` would push 128 KB raw and risk compile-time smem overflow. Hedged choice.
+
+---
+
+### Phase 1: Mathematical Definition
+
+For batch `b`, `L = seq_lens[b]`, `K = 2048`, `P = 64`, `N = max_num_pages * 64`.
+
+`score[b, p·64 + t] = Σ_h ReLU( scale[t] · Σ_d Q[b,h,d] · fp8(K[t,d]) ) · weights[b,h]`, `t < L`.
+
+Output: any permutation of top-`min(K, L)` indices (global `block_table[b,p]·64 + t`); rest = -1.
+
+**Four-tier partition (mutually exclusive, exhaustive):**
+| Tier | Condition | Mechanism |
+|------|-----------|-----------|
+| S    | `L ≤ 2048`                   | Direct enumeration (parent's `emit_short_topk_kernel`) |
+| M    | `2048 < L ≤ 6144`            | `block_topk_kernel<256, 24>` (parent's) |
+| **L2 (NEW)** | **`6144 < L ≤ 12288`** | **`block_topk_kernel_large<512, 24>`** |
+| L    | `L > 12288`                  | Device-wide `cub::DeviceSegmentedRadixSort` (parent's path) |
+
+Constants:
+```cpp
+constexpr int TOPK      = 2048;
+constexpr int L_MED_MAX = 6144;
+constexpr int L_L2_MAX  = 12288;   // 512 threads × 24 items
+constexpr int L2_THREADS = 512;
+constexpr int L2_ITEMS   = 24;
+```
+
+---
+
+### Phase 2: The Optimization Loop (Kernel Architecture)
+
+**A. `emit_short_topk_kernel`** — verbatim from parent. Handles TIER-S.
+
+**B. `compute_scores_kernel`** — verbatim from parent. Guard `if (seq_len <= 2048) return;` already present. Writes scores/indices into `scores_buf`/`indices_buf` at `[b*N + p*64 + t]`. Used by all of TIER-M, L2, L.
+
+**C. `block_topk_kernel<256, 24>`** — verbatim from parent. Guard `if (L <= 2048 || L > L_MED_MAX) return;`. Handles TIER-M.
+
+**D. NEW `block_topk_kernel_large<512, 24>`** — handles TIER-L2. Structure copied from `block_topk_kernel`, only parameters change:
+```cpp
+template <int BLOCK_THREADS, int ITEMS_PER_THREAD>
+__global__ void block_topk_kernel_large(
+    const float* __restrict__ scores_buf,
+    const int32_t* __restrict__ indices_buf,
+    const int32_t* __restrict__ seq_lens,
+    int32_t* __restrict__ topk_indices,
+    int N, int topk, int l_med_max, int l_l2_max)
+{
+    int b = blockIdx.x;
+    int L = seq_lens[b];
+    if (L <= l_med_max || L > l_l2_max) return;     // only TIER-L2
+
+    using BlockRadixSort = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int32_t>;
+    __shared__ typename BlockRadixSort::TempStorage temp_storage;
+
+    float   keys[ITEMS_PER_THREAD];
+    int32_t vals[ITEMS_PER_THREAD];
+
+    int base = b * N;
+    #pragma unroll
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) {
+        int idx = i * BLOCK_THREADS + threadIdx.x;   // strided load
+        if (idx < L) {
+            keys[i] = scores_buf[base + idx];
+            vals[i] = indices_buf[base + idx];
+        } else {
+            keys[i] = -1e30f;
+            vals[i] = -1;
+        }
+    }
+
+    BlockRadixSort(temp_storage).SortDescendingBlockedToStriped(keys, vals);
+
+    // Strided write (matches BlockedToStriped output layout)
+    #pragma unroll
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) {
+        int out_pos = i * BLOCK_THREADS + threadIdx.x;
+        if (out_pos < topk) {
+            topk_indices[b * topk + out_pos] = vals[i];
+        }
+    }
+}
+```
+Launch: `<<<batch_size, 512>>>`. **CRITICAL:** load pattern is strided (`i*BLOCK_THREADS + threadIdx.x`) and `SortDescendingBlockedToStriped` with strided output write — identical pairing to parent's TIER-M kernel (this is a correctness-sensitive detail flagged by the parent summary).
+
+**E. `generate_offsets_begin_end`** — MODIFY: empty segment for all batches with `L ≤ L_L2_MAX`. CUB only processes TIER-L:
+```cpp
+int L = seq_lens[b];
+begin_offsets[b] = b * segment_size;
+end_offsets[b]   = (L > L_L2_MAX) ? (b * segment_size + L) : (b * segment_size);
+```
+
+**F. `extract_topk_kernel`** — MODIFY: early-return if `seq_lens[b] <= L_L2_MAX` (handled by S/M/L2).
+```cpp
+if (seq_lens[b] <= L_L2_MAX) return;
+```
+
+**G. Host pipeline `topk_indexer_forward`:**
+1. Allocate `scores_buf`, `indices_buf`, `topk_indices`, `scores_sorted`, `indices_sorted`, `begin_offsets`, `end_offsets`.
+2. Launch `emit_short_topk_kernel<<<batch_size, 256>>>`.
+3. Launch `compute_scores_kernel<<<dim3(max_num_pages, batch_size), 256>>>`.
+4. **One-time dynamic smem set-up** for both block-sort kernels (BlockRadixSort<512,24>::TempStorage ≈ 512·24·8 + radix histogram ≈ 98 KB — MUST use dynamic smem):
+   ```cpp
+   static bool smem_set = false;
+   if (!smem_set) {
+       cudaFuncSetAttribute((const void*)block_topk_kernel<BT_THREADS, BT_ITEMS>,
+           cudaFuncAttributeMaxDynamicSharedMemorySize, 98304);
+       cudaFuncSetAttribute((const void*)block_topk_kernel_large<L2_THREADS, L2_ITEMS>,
+           cudaFuncAttributeMaxDynamicSharedMemorySize, 102400);   // 100 KB, safe H100
+       smem_set = true;
+   }
+   ```
+5. Launch `block_topk_kernel<256, 24><<<batch_size, 256>>>`.
+6. **Launch `block_topk_kernel_large<512, 24><<<batch_size, 512>>>` (NEW).**
+7. Launch `generate_offsets_begin_end` (modified).
+8. Two CUB `DeviceSegmentedRadixSort::SortPairsDescending` calls (size query + actual).
+9. Launch `extract_topk_kernel<<<batch_size, 1024>>>` (modified).
+10. Return `topk_indices`.
+
+---
+
+### Phase 3: The "Safety Valve" (CRITICAL)
+
+1. **Strict partition invariant:** Each batch `b` falls into exactly one of {S, M, L2, L} via `L = seq_lens[b]`. Each kernel writes `topk_indices[b,:]` only for its tier and early-returns otherwise. No race possible.
+2. **Exact top-K in every tier:**
+   - S: enumeration (set-correct when `L ≤ K`).
+   - M: `cub::BlockRadixSort` — deterministic exact sort of 6144 items.
+   - **L2: `cub::BlockRadixSort<float, 512, 24>` — deterministic exact sort of 12288 items.**
+   - L: device-wide segmented radix sort (parent's proven path).
+3. **Padding sentinel:** `-1e30f` for out-of-range lanes in TIER-L2 loads (more negative than NaN sentinel `-1e20f`, so NaN-corrected scores still outrank padding). Positions `≥ min(K,L)` after sort receive `-1`.
+4. **NaN guard:** preserved in `compute_scores_kernel` (`if (isnan(s)) s = -1e20f`).
+5. **Smem budget verification:** `BlockRadixSort<float, 512, 24, int32_t>::TempStorage` ≈ `24·512·(4+4) + radix_digits·512·4` ≈ 98 KB + 16 KB ≈ 114 KB — MIGHT be too large. **Mitigation:** if compile / runtime error, drop to `<512, 16>` (8192 items, covers 6144 < L ≤ 8192, ~64 KB temp) — still strictly better than parent. Use `cudaFuncSetAttribute(..., 102400)` or up to H100 max 227KB (`cudaDevAttrMaxSharedMemoryPerBlockOptin`).
+6. **Fallback ladder (if any TIER-L2 failure):** set `L_L2_MAX = L_MED_MAX` in one line → TIER-L2 becomes empty, behavior reverts exactly to parent (9.564). Zero regression risk.
+7. **Variable-axis support:** no hardcoded batch/page assumptions.
+8. **Static assertion:** `static_assert(L2_THREADS * L2_ITEMS >= L_L2_MAX);` enforces buffer sufficiency at compile time.
+9. **Ordering in host pipeline:** TIER-M kernel and TIER-L2 kernel both write `topk_indices[b,:]` — but because they have **mutually exclusive entry conditions on `L`**, they cannot write the same row. Order between steps 5 and 6 is irrelevant for correctness.
+
+---
+
+### Phase 4: Implementation Details
+
+**Single file:** `kernel.cu`.
+**Headers:** `<torch/extension.h>`, `<cuda_fp8.h>`, `<cub/cub.cuh>`, `<cub/block/block_radix_sort.cuh>`, `<tuple>`.
+
+**Constants block (top of file):**
+```cpp
+constexpr int TOPK_CONST = 2048;
+constexpr int L_MED_MAX  = 6144;
+constexpr int L_L2_MAX   = 12288;
+constexpr int BT_THREADS = 256;
+constexpr int BT_ITEMS   = 24;
+constexpr int L2_THREADS = 512;
+constexpr int L2_ITEMS   = 24;
+static_assert(BT_THREADS * BT_ITEMS >= L_MED_MAX, "TIER-M buffer too small");
+static_assert(L2_THREADS * L2_ITEMS >= L_L2_MAX, "TIER-L2 buffer too small");
+```
+
+**Functions in order:**
+1. `cvt_fp8x4_to_float4(uint32_t)` — verbatim from parent.
+2. `emit_short_topk_kernel(...)` — verbatim from parent.
+3. `compute_scores_kernel(...)` — verbatim from parent.
+4. `block_topk_kernel<BT_THREADS, BT_ITEMS>(...)` — verbatim from parent. Entry condition: `L <= 2048 || L > L_MED_MAX -> return`.
+5. **NEW `block_topk_kernel_large<L2_THREADS, L2_ITEMS>(...)`** — see Phase 2 step D. Entry: `L <= L_MED_MAX || L > L_L2_MAX -> return`.
+6. `generate_offsets_begin_end(...)` — MODIFIED: uses `L_L2_MAX` threshold instead of `L_MED_MAX`.
+7. `extract_topk_kernel(...)` — MODIFIED: early-return if `L <= L_L2_MAX`.
+8. `topk_indexer_forward(...)` — host pipeline per Phase 2 step G.
+9. `PYBIND11_MODULE`: export `topk_indexer_forward` and alias `dsa_forward`.
+
+**Randomness:** None. Fully deterministic. No multi-start needed.
+**Library check:** `<cuda_fp8.h>` + `<cub/cub.cuh>` only — both standard CUDA 12+, already used by parent.
+**Compile target:** SM90+ (Hopper).
+
+**Expected Performance:**
+- Parent: 0.036 ms, score 9.564.
+- TIER-L2 replaces a device-wide CUB segmented sort launch (dominated by launch overhead ~0.010-0.015 ms for few-batches case and O(N) work) with a single fused per-batch block sort.
+- If 1-2 of the 12 workloads have batches in (6144, 12288], gain ≈ 5-15% → target score **≈ 10.0 – 11.0**.
+- Worst case (no batches in tier L2): identical to parent 9.564.
+
+**Critical correctness guards (NON-NEGOTIABLE):**
+- Exact pairing of strided load + `SortDescendingBlockedToStriped` + strided write in TIER-L2 kernel (parent summary explicitly flagged this as correctness-sensitive).
+- Empty-segment in `generate_offsets_begin_end` for ALL tiers S/M/L2 (not just S/M as in parent).
+- Early-return in `extract_topk_kernel` for ALL tiers S/M/L2.
+- Dynamic-smem attribute set BEFORE first launch (one-time).
+- Padding sentinel `-1e30f` in TIER-L2 load matches TIER-M.
+
+**Fallback if TIER-L2 fails (compile / smem / correctness):**
+- Single-line revert: `constexpr int L_L2_MAX = L_MED_MAX;` (makes TIER-L2 an empty range).
+- Or drop `<512, 24>` to `<512, 16>` (smaller smem, covers L ≤ 8192 — still gains on some workloads).
+- Or remove `block_topk_kernel_large` launch and revert `generate_offsets_begin_end` / `extract_topk_kernel` thresholds to `L_MED_MAX`.
+- All fallbacks guarantee parent's 9.564 score.

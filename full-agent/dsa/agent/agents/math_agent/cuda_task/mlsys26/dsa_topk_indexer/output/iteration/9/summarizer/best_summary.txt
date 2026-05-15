@@ -1,0 +1,19 @@
+### Strategic Analysis Report
+
+**1. Executive Summary:**
+This iteration was a highly effective architectural refinement because it pivoted from channel-wise parallelization to head-wise parallelization by transposing the query tensor in shared memory, achieving a notable performance gain.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   `**Sibling Rank:**` 1 out of 1 children. Top sibling score: 4.24.
+*   `**Score Delta:**` From parent (4.11) to child (4.24).
+*   `**Key Change:**` Restructured `compute_scores_kernel` to parallelize over heads instead of channels. Implemented a padded, transposed shared memory layout (`q_smem_f[128][65]`) to allow each thread to compute the full 128-channel dot product for 2 heads locally, replacing per-head warp reductions with a single final warp reduction.
+*   `**Core Metrics:**` Execution latency decreased from ~0.108ms to ~0.097ms, pushing the speedup from 41.06x to 42.36x while maintaining perfect correctness.
+
+**3. Strategic Analysis (The "So What?"):**
+*   `**Root Cause:**` The outcome was driven by an exceptional execution that fundamentally improved the memory access pattern and arithmetic mapping of the `q @ K.T` batched dot product.
+*   `**Key Insight:**` Transposing the query tensor in shared memory (using +1 padding to eliminate bank conflicts) unlocks a vastly superior thread mapping. By shifting the dot product accumulation into local thread registers rather than collaborating across the warp, the kernel practically eliminates expensive intra-warp communication overhead during the scoring phase.
+*   `**Identified Risk:**` Despite the highly optimized dot product computation, the global memory Top-K bottleneck remains untouched. The kernel continues to write the full `O(batch_size * max_num_pages * 64)` score matrix to global memory for a subsequent CUB radix sort, which will cap further performance scaling.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   `Recommend Fusion:` The scoring kernel's efficiency highlights the external CUB sort as the primary remaining bottleneck. Recommend fusing a warp-level or block-level Top-K filtering mechanism (e.g., maintaining thread-local top-K registers or using a shared memory priority queue) directly into the `compute_scores_kernel`. Emitting only the top candidates per block to global memory will drastically reduce memory traffic and bypass the full-scale sort.
+*   `Recommend Exploration:` The K-cache is currently loaded into `k_smem` using 32-bit `uint32_t` loads per thread. Recommend upgrading this to 128-bit `uint4` vectorized memory instructions (similar to how the Q tensor was optimized in previous iterations) to maximize memory bandwidth utilization during the critical K-cache fetch.

@@ -1,0 +1,19 @@
+{
+  "status": "validation_failed",
+  "summary": "Validation failed: INCORRECT_NUMERICAL: [1/2] /usr/local/cuda/bin/nvcc -MD -MF kernel.cuda.o.d -DTORCH_EXTENSION_NAME=torch_agent_caf7671d_dd65c8 -DTORCH_API_INCLUDE_EXTENSION_H -I/root/.cache/flashinfer_bench/cache/torch/torch_agent_caf7671d_dd65c8 -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -isystem /opt/conda/envs/py312/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_100,code=compute_100 -gencode=arch=compute_100,code=sm_100 --compiler-options '-fPIC' -std=c++20 -c /root/.cache/flashinfer_bench/cache/torch/torch_agent_caf7671d_dd65c8/kernel.cu -o kernel.cuda.o \n[2/2] c++ kernel.cuda.o -shared -L/opt/conda/envs/py312/lib/python3.12/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda/lib64 -lcudart -o torch_agent_caf7671d_dd65c8.so\ntrial 0: max_abs=inf max_rel=inf matched_ratio=0.9995\nERROR: score mismatch: max_abs=inf max_rel=inf matched_ratio=0.9995\ntrial 1: max_abs=inf max_rel=inf matched_ratio=0.9990\nERROR: score mismatch: max_abs=inf max_rel=inf matched_ratio=0.9990\ntrial 2: max_abs=inf max_rel=inf matched_ratio=0.9990\nERROR: score mismatch: max_abs=inf max_rel=inf matched_ratio=0.9990\n",
+  "score": 0.0,
+  "metrics": {
+    "correctness": 0.0,
+    "speedup": 0.0,
+    "exec_time_ms": 0.0,
+    "baseline_time_ms": 0.0,
+    "compile_time": 0.0,
+    "eval_time": 1449.2468845844269
+  },
+  "artifacts": {
+    "eval_backend": "modal+flashinfer-bench",
+    "task_id": "dsa_topk_indexer_fp8_h64_d128_topk2048_ps64",
+    "execution_time": "1449.25s",
+    "error": "INCORRECT_NUMERICAL: [1/2] /usr/local/cuda/bin/nvcc -MD -MF kernel.cuda.o.d -DTORCH_EXTENSION_NAME=torch_agent_caf7671d_dd65c8 -DTORCH_API_INCLUDE_EXTENSION_H -I/root/.cache/flashinfer_bench/cache/torch/torch_agent_caf7671d_dd65c8 -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -isystem /opt/conda/envs/py312/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_100,code=compute_100 -gencode=arch=compute_100,code=sm_100 --compiler-options '-fPIC' -std=c++20 -c /root/.cache/flashinfer_bench/cache/torch/torch_agent_caf7671d_dd65c8/kernel.cu -o kernel.cuda.o \n[2/2] c++ kernel.cuda.o -shared -L/opt/conda/envs/py312/lib/python3.12/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda/lib64 -lcudart -o torch_agent_caf7671d_dd65c8.so\ntrial 0: max_abs=inf max_rel=inf matched_ratio=0.9995\nERROR: score mismatch: max_abs=inf max_rel=inf matched_ratio=0.9995\ntrial 1: max_abs=inf max_rel=inf matched_ratio=0.9990\nERROR: score mismatch: max_abs=inf max_rel=inf matched_ratio=0.9990\ntrial 2: max_abs=inf max_rel=inf matched_ratio=0.9990\nERROR: score mismatch: max_abs=inf max_rel=inf matched_ratio=0.9990\n"
+  }
+}

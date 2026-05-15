@@ -1,0 +1,13 @@
+Outline 1 — Rebase onto global-best 6da80c61 and add GEMM2 autotune-only refinement
+
+Mathematical Formulation:
+Variables (X): X = {C1, C2, Epi}, where C1/C2 are finite autotune config sets for GEMM1/GEMM2 and Epi is the output epilogue choice. Constraints (C): preserve exact routing semantics, preserve GEMM1/GEMM2 algebra, preserve FP32 accumulation, preserve output shape [T,7168] and dtype bf16, preserve int64 pointer arithmetic. Objective f(X): minimize measured kernel latency over the fixed kernel family while maintaining correctness=1.0.
+
+Solver Strategy:
+Use deterministic finite-set model selection via Triton autotune. Keep the exact 6da80c61 kernels and only append 1-2 carefully chosen GEMM2 configs (e.g. BLOCK_M=32/64 with num_warps=8) while preserving the bf16 epilogue already proven in 6da80c61.
+
+Validity Mechanism:
+Guarantee validity by construction: copy 6da80c61 byte-for-byte except additive autotune configs. Since the original configs remain, Triton autotune chooses from a superset. If a new config is bad or fails compile, the old configs remain feasible. Edge-case zero returns remain unchanged.
+
+Why this solution?
+Expected improvement is small but robust. Advantages: least crash risk, exact preservation of current global-best semantics, no new kernel logic. Disadvantages: likely low upside because the frontier is saturated and prior gains from config-only edits have been tiny.

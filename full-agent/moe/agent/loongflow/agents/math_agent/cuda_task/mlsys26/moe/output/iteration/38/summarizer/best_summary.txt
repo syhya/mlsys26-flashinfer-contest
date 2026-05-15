@@ -1,0 +1,33 @@
+## Strategic Summary Report — Solution `aa349f6c` (Iteration 38, Generation 5)
+
+---
+
+### 1. Executive Summary
+This iteration was a **major lineage-leap improvement** because faithfully fusing `302d2eb3`'s sentinel-sort routing with `ba626bb8`'s bf16-fused epilogue (and FP8 SwiGLU GEMM2) on top of parent `a8623435` jumped the score from 1.0596 → **1.4412 (+36% relative)**, dramatically outperforming the parent and all prior siblings — though it still falls short of the cross-lineage frontier (`302d2eb3` = 1.5517, `ba626bb8` = 1.5482).
+
+---
+
+### 2. Data-Driven Findings (Facts ONLY)
+- **Sibling Rank:** 1 out of 1 child of parent `a8623435` (sole child).
+- **Cross-lineage Position:** Ranks **#3** vs database best `302d2eb3` (1.5517) and `ba626bb8` (1.5482). Gap to frontier: **−0.1105 score, +0.112ms latency**.
+- **Score Delta:** Parent `a8623435` (1.0596, 10.60x, 2.419ms) → child `aa349f6c` (**1.4412, 14.41x, 1.612ms**). Absolute gain: **+0.3815 (+36.0%)**. Latency reduction: **−0.807ms (−33.4%)**.
+- **Key Change:** Three simultaneous structural fusions vs the parent: (a) GEMM2 switched from BF16 dequant to **FP8-TC path** (per-tile scalar quant via `tl.max(tl.abs(c))`, `(c/c_scale).to(tl.float8e4nv)`, `tl.dot(c_fp8, w2_fp8)`); (b) routing replaced `nonzero+argsort` with **sentinel-sort + `argsort(stable=True)` + `gather(1, topk_idx).reshape(-1)`**; (c) epilogue replaced fp32 `index_add_` + cast with **bf16 `index_add_` directly** into a bf16 `[T,H]` buffer. Autotune lists also expanded (12 GEMM1 configs, 12 GEMM2 configs).
+- **Core Metrics:** Correctness 1.0; max abs error 38,912 (vs parent 8,192 — much higher but within tolerance); max rel error 3.33e11; eval time **71.97s** (parent 261.22s — 3.6× faster eval); 19 workloads.
+
+---
+
+### 3. Strategic Analysis (The "So What?")
+- **Root Cause:** **Plan quality dominated.** The planner correctly diagnosed that the given parent (`a8623435`) was an off-frontier branch and explicitly directed an "ignore-the-parent, copy-database-best-verbatim" strategy. Executor compliance was strong this time: all three fusions (FP8 SwiGLU, sentinel-sort, bf16 epilogue) landed simultaneously, demonstrating that the floor-guarantee + verbatim-copy methodology works when followed precisely. The +0.38 score jump is dramatic precisely because the parent was leaving 3 independent proven optimizations on the table.
+- **Key Insight:** The single most important lesson is that **lineage-aware sampling matters more than parent-local optimization**. When the immediate parent is off-frontier, the highest-EV move is "rebase to the global best + apply one orthogonal new idea" rather than incremental tweaks to the inferior base. This iteration validates the strategy explicitly recommended in `ba626bb8`'s summary ("Future planners MUST sample from the global database best, not just the immediate parent's score").
+- **Identified Risk:** (1) Despite intent to **surpass** `302d2eb3` (1.5517), this child landed at 1.4412 — a 0.11 gap. Likely cause: subtle deviation from the database best's tuned configuration (the GEMM2 autotune list here differs slightly from `302d2eb3`'s — uses 12 configs with one re-arrangement vs `302d2eb3`'s 11+1 set). The "floor guarantee" assumed superset-equivalence; if any parent config was dropped, the floor is broken. (2) Max abs error climbed sharply (8,192 → 38,912) due to bf16 epilogue + FP8 GEMM2 stacking — still passes tolerance but margin is shrinking. (3) The diversity feature is lost (`MAP_Elite_feature` is missing from metadata vs parent's `complexity:2, diversity:1, score:3`), suggesting this is a "rediscovery" branch rather than novel exploration.
+
+---
+
+### 4. Actionable Guidance (The "What's Next?")
+- **Recommend Fusion [highest priority]:** **Diff this child's autotune lists against `302d2eb3` line-by-line and restore exact superset.** The 0.11 gap to the frontier is almost certainly a missing/reordered config or a slight kernel-body deviation. A literal byte-diff audit followed by a corrective resubmit should immediately recover ≥1.55.
+- **Recommend Exploration [high priority]:** **Fused Triton routing kernel.** With three orthogonal optimizations now landed, PyTorch routing remains the largest unexplored lever. Consolidate sigmoid → group-top2 → masked top-8 → renorm → CSR-build into 1-2 Triton kernels. Expected: +3–8% on small-T workloads.
+- **Recommend Exploration:** **TMA via `tl.make_block_ptr` for GEMM1 weight loads.** GEMM1 (K=7168) remains the dominant cost (~55% of 1.6ms). Blackwell TMA could deliver 5-10% overall — highest-value untapped Triton 3.6.0 feature.
+- **Recommend Stripping:** Audit which autotune configs are ever selected by the autotuner across all 19 workloads; prune dead ones. The eval-time variance across siblings (72s vs 591s for `302d2eb3`) shows config-list size has direct iteration-budget cost.
+- **Warn — Precision drift:** Stacking bf16 epilogue + FP8 GEMM2 raised abs error 4.7×. Future bf16/FP8 fusions (e.g., bf16 atomic-add accumulation, per-row FP8 quant) must be precision-audited before adoption. If max_abs_error > ~50k on any workload, mandate fp32 fallback path.
+- **Warn — Lineage hygiene:** This child's `metadata.MAP_Elite_feature` is missing, breaking the diversity tracking. Planners should ensure feature tags are emitted for every child to preserve MAP-Elites navigation.
+- **Warn — Do not regress proven traps:** `tl.atomic_add` and `reset_to_zero` autotune side-effects remain documented regressions (from `c9929ab3`). Continue forbidding them in all future plans on this lineage.

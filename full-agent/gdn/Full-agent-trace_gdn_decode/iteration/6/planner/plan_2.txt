@@ -1,0 +1,17 @@
+**Mathematical Formulation**:
+- **Variables ($X$)**: Thread mapping equations. Let thread ID be $(t_x, t_y)$ and block ID be $(b_x, b_y, b_z)$. We solve for the mapping $M(t_x, t_y, b_x, b_y, b_z) \rightarrow (v_{idx}, k_{idx})$.
+- **Constraints ($C$)**: 
+  1. Out-of-bounds memory access is strictly prohibited: $v_{idx} < V$ and $k_{idx} < K$.
+  2. Warp convergence must be maintained for reductions (e.g., `__shfl_down_sync`).
+- **Objective ($f(X)$)**: Maximize L1 cache hit rate by linearizing the 2D $(V, K)$ memory accesses into 1D continuous thread block accesses.
+
+**Solver Strategy**: 
+- **Algebraic Index Flattening**: Use integer division and modulo operations to mathematically decouple the grid configuration from the tensor dimensions. We implement a flexible grid stride loop approach: `for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < N; i += gridDim.x * blockDim.x)`.
+
+**Validity Mechanism**: 
+- **Bounds Checking Projection**: Instead of hardcoding bounds like `if (v_idx < 128)`, the kernel dynamically checks `if (v_idx < V && k_idx < K)` and masks out inactive threads during warp reductions using conditional assignments (e.g., `val = (in_bounds) ? read() : 0.0f`). This projects any invalid thread indices to a neutral state, mathematically guaranteeing memory safety.
+
+**Why this solution?**:
+- **Expected Performance**: High performance across arbitrary sizes, avoiding the need for multiple template instantiations.
+- **Advantages**: Highly flexible; a single kernel handles all cases.
+- **Disadvantages**: Introduces branch divergence and loop overhead compared to perfectly unrolled fixed-size kernels.

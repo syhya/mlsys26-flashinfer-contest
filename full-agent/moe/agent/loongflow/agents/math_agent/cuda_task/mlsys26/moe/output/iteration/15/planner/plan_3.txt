@@ -1,0 +1,29 @@
+Outline 3: Dense reformulation via routing matrix and batched local solves
+
+Mathematical Formulation
+Variables (X):
+- Binary/indicator sparse routing matrix M in {0,1}^{T x 32 x 8-slot view reduced to local expert memberships}.
+- Weight matrix A in R^{T x 32} with at most 8 nonzeros per row.
+- Per-expert token subsets induced by M.
+- Output Y in R^{T x 7168}.
+Constraints (C):
+- M derived exactly from DeepSeek routing topology.
+- A derived from sigmoid weights normalized over selected experts.
+- Each expert subproblem solves Y_e = diag(a_e) * GEMM2(SwiGLU(GEMM1(H_e, W1_e)), W2_e).
+Objective f(X):
+- Maximize correctness-preserving throughput by converting the sparse dispatch problem into a sequence of batched linear algebra subproblems.
+
+Solver Strategy
+- Deterministic sparse-to-dense reformulation using PyTorch batching primitives.
+- Use unique token caching, per-expert chunking, and possibly vmap-style batching where shapes align.
+- No randomness.
+
+Validity Mechanism
+- Routing matrix derived exactly by tensor ops.
+- Every expert block uses exact dequant formulas.
+- Final scatter-add enforces conservation of all local expert contributions.
+
+Why this solution?
+- Expected improvement: moderate; simpler than Triton, more structured than naive per-expert loops.
+- Advantages: robust and easier to debug than custom kernels.
+- Disadvantages: likely cannot reach top speed because expert batch sizes are ragged and batching efficiency is limited.

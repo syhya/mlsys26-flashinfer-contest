@@ -1,0 +1,22 @@
+### Strategic Analysis Report
+
+**1. Executive Summary:**
+This iteration was a meaningful incremental improvement because a three-tier dispatch (Short/Medium/Long) introduced a per-batch `cub::BlockRadixSort` for medium sequences that bypasses the device-wide CUB launch overhead, lifting the score from 8.97 → 9.56 as the sole (and best) child of its parent.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   **Sibling Rank:** 1 out of 1 child of parent `2fb50fd2` (no competing siblings yet).
+*   **Score Delta:** Parent 8.970 → Child **9.564** (+0.59, ≈ +6.6%).
+*   **Key Change:** Added a new TIER-M kernel `block_topk_kernel<256,24>` using `cub::BlockRadixSort` with `SortDescendingBlockedToStriped` for batches with `2048 < L ≤ 6144`; modified `generate_offsets_begin_end` and `extract_topk_kernel` to mark non-TIER-L batches as empty CUB segments and skip them; preserved the parent's TIER-S enumeration and TIER-L device-wide CUB sort unchanged.
+*   **Core Metrics:** Kernel latency 0.045 ms → **0.036 ms** (−20%); reference baseline 2.79 ms → 3.26 ms; speedup 89.70× → **95.64×**; correctness 1.0; max abs/rel error 0; 12/12 workloads passed; eval time 230 s → 544 s.
+
+**3. Strategic Analysis (The "So What?"):**
+*   **Root Cause:** Both plan and execution were strong. The Planner correctly diagnosed (from the prior summary's hint) that the device-wide CUB segmented sort was the dominant remaining cost, and proposed a mathematically exact mid-tier that fully fuses score-loading + radix sort + output writing into a single per-batch block. The Executor handled the subtle output-layout detail correctly by switching from `SortDescending` to `SortDescendingBlockedToStriped`, which matches the strided write pattern `i*BLOCK_THREADS + threadIdx.x` and avoids a correctness pitfall.
+*   **Key Insight:** **Tiered dispatch by workload size is the dominant evolutionary axis for this task.** Each new tier (S in the previous gen, M in this one) has yielded a >0.5 score gain by replacing a generic device-wide primitive with a workload-specialized fused kernel. The same recipe — partition by `L`, route each partition to its mathematically optimal primitive — is clearly the right meta-strategy.
+*   **Identified Risk:** Diminishing returns are emerging — TIER-M only fires for batches with `2048 < L ≤ 6144`, so the gain is bounded by the fraction of workloads in that band (here ~6.6%). The TIER-L device-wide CUB sort remains unchanged and likely now dominates again. Additionally, `L_MED_MAX=6144` is hard-coded; if benchmark distributions shift, the win evaporates. The growing eval time (230s → 544s) suggests increasing kernel-launch and compilation overhead from the multi-kernel pipeline.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   **Recommend Exploration (HIGH PRIORITY):** Extend the tiering ladder with a **TIER-L2 large-block radix sort** using `cub::BlockRadixSort<float, 512, 32, int32_t>` (= 16384 items) or a **two-stage warp-cooperative selection** for `6144 < L ≤ 16384`, eliminating the device-wide CUB call for an even larger fraction of workloads.
+*   **Recommend Exploration:** For the truly long tail (`L > 16384`), replace device-wide CUB with a **per-batch radix-select** (only the K-th threshold needed, then a filter pass) — O(N) instead of O(N log N), and avoids the segmented-sort launch overhead entirely.
+*   **Recommend Fusion:** Fuse `compute_scores_kernel` directly with `block_topk_kernel` for TIER-M — write scores to shared memory and sort in-place, eliminating one HBM round-trip per medium batch.
+*   **Recommend Exploration:** Auto-tune `L_MED_MAX` at the host by reading `seq_lens` distribution (or expose multiple template instantiations `<256,16>`, `<256,24>`, `<512,32>` and pick at launch time per batch).
+*   **Warn:** Do NOT regress the partition invariant (each batch handled by exactly one tier kernel). The `SortDescendingBlockedToStriped` + strided-write pairing is a correctness-critical detail — any future change to `block_topk_kernel`'s output loop must preserve this pairing or switch both sides together.

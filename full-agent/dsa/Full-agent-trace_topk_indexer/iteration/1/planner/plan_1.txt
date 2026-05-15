@@ -1,0 +1,16 @@
+Outline 1: Decoupled Scoring and CUB Segmented Sort
+
+Mathematical Formulation:
+- Variables (X): Token scores S_{b, p, t} and global indices I_{b, p, t}.
+- Objective (f(X)): Compute S_{b, p, t} = \sum_h W_h \max(0, \sum_d Q_{b,h,d} K_{p,t,d} V_{p,t})
+- Constraints (C): Select top K indices per batch b where seq_len is valid.
+
+Solver Strategy:
+- Map-Reduce for scoring (Phase 1 kernel) -> writes to dense arrays.
+- `cub::DeviceSegmentedRadixSort` (Phase 2) -> exact segmented sorting.
+
+Validity Mechanism:
+- Pad out-of-bounds tokens with `-inf` score and `-1` index. Radix sort guarantees these fall to the end. A final truncation kernel ensures exact shape [batch_size, 2048] and valid global token indices.
+
+Why this solution?:
+- Algorithmically robust, relies on standard exact algorithms (CUB) rather than manual heuristics. Decouples structure (scoring) from tuning (sorting).

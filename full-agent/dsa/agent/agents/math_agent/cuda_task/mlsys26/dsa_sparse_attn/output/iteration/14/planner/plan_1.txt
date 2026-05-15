@@ -1,0 +1,46 @@
+Outline 1: Robust Page-Aware Fused Online Softmax with Resource Rebalancing
+
+Mathematical Formulation
+- Variables X:
+  - Dispatch threshold tau separating low-token and high-token kernels.
+  - Tile size B in sparse-key dimension, with candidate B in {16, 32}.
+  - Register-resident query fragments Qn in R^512 and Qp in R^64 for each (token, head).
+  - Running online softmax state per output row: m in R, l in R+, O in R^512.
+- Constraints C:
+  - Output shape must be [num_tokens, 16, 512] with dtype bfloat16.
+  - LSE shape must be [num_tokens, 16] with dtype float32.
+  - For each sparse index s, decode page = s >> 6 and offset = s & 63; s = -1 must be ignored.
+  - All dot products, reductions, softmax recurrences, and output accumulations must be FP32.
+  - Final lse must be base-2: lse = m * log2(e) + log2(l), or -INF if no valid key exists.
+  - If all sparse entries are invalid, output must be exactly zero and lse = -INF.
+  - Must use explicit bf16 conversion intrinsics only.
+- Objective f(X):
+  - Maximize throughput = valid_outputs / runtime while preserving correctness tolerance.
+  - Secondary objective: minimize register pressure and synchronization count.
+
+Solver Strategy
+- Deterministic finite search over a tiny discrete parameter set, not heuristic luck:
+  - Compare B=16 vs B=32 staging layouts.
+  - Compare tau in a small fixed set such as {32, 64, 96, 128}.
+- Within each candidate, preserve the same exact online softmax algebra and page-aware indexing.
+- This is equivalent to a constrained discrete optimization over launch/layout parameters.
+
+Validity Mechanism
+- Keep the exact parent mathematical recurrence and index decoding.
+- Add deterministic guards:
+  - mask -1 before any cache access,
+  - decode page/offset before reading caches,
+  - zero output if l == 0,
+  - compute lse only when valid keys exist.
+- If any optimized path would require unsafe assumptions, fall back to the already-correct fused kernel structure.
+
+Why this solution?
+- Expected improvement:
+  - Preserve the winning >100x architecture while seeking extra speed from lower resource pressure and better occupancy.
+- Advantages:
+  - Lowest correctness risk.
+  - Avoids unproven shared-memory transpose tricks.
+  - Directly aligned with the current best solution family.
+- Disadvantages:
+  - Gains may be incremental rather than dramatic.
+  - Requires careful code tuning to actually reduce register count.

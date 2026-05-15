@@ -1,0 +1,203 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Recover the island's best-known performance (score ~12.6, 126x speedup) after the parent regression (score 0.846, 8.46x). The parent catastrophically regressed by deleting the specialized small-workload split-K path and dispatching ALL workloads to a single fused kernel that is only optimal for T>=128. The child MUST restore the proven two-path architecture from solution `94736692` (best in database) verbatim, then apply ONE narrow low-risk refinement.
+
+**Selected Outline:** Plan 1 — Restore best-known two-path architecture as baseline, with disciplined micro-refinement.
+
+**Rationale for Selection:**
+1. The parent (0.846) is a severe regression from its own ancestor (10.4) and from the best sibling (12.64). The population evidence is unambiguous: the two-path dispatch (split-K for small T, fused for large T) is the winning architecture in this lineage.
+2. Restoring solution `94736692`'s code is the mathematically and empirically guaranteed path to score >= 10. Any creative deviation risks another regression.
+3. The previous planner-executor divergence (repeatedly proposing small-path redesigns that were never actually implemented) shows the executor's realistic capacity is conservative refinement, not structural rewrite. Plan accordingly.
+4. Global perspective: 1 island, best=12.63, avg=5.72, better_ratio=0.36. The lineage is still improving vertically via exploitation; no diversity reset is needed.
+
+---
+
+## Phase 1: Mathematical Definition
+
+### 1.1 Operator (exact)
+For each `(t, h)` with `t ∈ [0, T)`, `h ∈ [0, 16)`:
+- Query: `q_nope[t,h] ∈ R^512`, `q_pe[t,h] ∈ R^64`
+- For each sparse slot `j ∈ [0, 2048)`:
+  - `raw = sparse_indices[t,j]`
+  - If `raw == -1`: slot is invalid, contributes nothing.
+  - Else: `page = raw / 64`, `offset = raw % 64`, `k_nope_j = ckv_cache[page,offset,:]`, `k_pe_j = kpe_cache[page,offset,:]`.
+- Unscaled score: `s_j = dot(q_nope[t,h], k_nope_j) + dot(q_pe[t,h], k_pe_j)`
+- Scaled logit: `z_j = sm_scale * s_j`
+- Output: `out[t,h,:] = Σ_valid softmax(z)_j * k_nope_j`
+- LSE (base 2): `lse[t,h] = log2(Σ_valid exp(z_j))`; if no valid entry, `out=0` and `lse=-INF`.
+
+### 1.2 Online softmax state (FP32)
+Per `(t,h)` or per partition: `m ∈ R∪{-INF}`, `l ∈ R_+`, `O ∈ R^512`. Neutral: `m=-INF, l=0, O=0`.
+Update with logit `z`, value `v`:
+- `m_new = max(m, z)`
+- `alpha = 0 if m==-INF else exp(m-m_new)`
+- `beta = exp(z-m_new)`
+- `l_new = l*alpha + beta`
+- `O_new = O*alpha + beta*v`
+
+Final: if `l>0`: `out=O/l`, `lse = m*log2(e) + log2(l)`; else `out=0, lse=-INF`.
+
+### 1.3 Exact merge (for split-K)
+For partial states A, B:
+- `m = max(m_a, m_b)`
+- `scale_x = 0 if m_x==-INF else exp(m_x-m)`
+- `l = l_a*scale_a + l_b*scale_b`
+- `O = O_a*scale_a + O_b*scale_b`
+
+### 1.4 Variables / Constraints / Objective
+- **X**: dispatch threshold `tau=128`, split-K partitions `S=64`, reducer block `Br=128`.
+- **C**: (1) exact masking for -1; (2) FP32 accumulation; (3) BF16 only at final store; (4) base-2 LSE; (5) explicit BF16 intrinsics; (6) exact ABI with PYBIND11_MODULE.
+- **f(X)**: minimize latency subject to correctness.
+
+---
+
+## Phase 2: The Optimization Loop (Deterministic Restoration)
+
+### Step 1: Copy the best-known architecture verbatim
+The executor MUST start from solution `94736692` (score 12.635, 126x speedup) and reproduce it as the new child. This solution has three kernels:
+1. **`dsa_forward_kernel`** — fused single-pass online-softmax kernel for large workloads (`T >= 128`).
+   - Grid: `(T)`; Block: `(32, 16)` = 512 threads.
+   - Each block handles one token; each warp (threadIdx.y=h) handles one head.
+   - 64 tiles of 32 sparse slots each; shared staging of `smem_Kc[32*512]` and `smem_Kp[32*64]`.
+   - Uses separate shared flag `tile_has_valid` (set via `if (tid==0) { int any_valid=0; for i in 32: any_valid |= (idx_shared[i]!=-1); tile_has_valid=any_valid; }`) to skip all-invalid tiles.
+   - FP32 register O_reg[8] as float2; warp_reduce_sum for dot; __expf/__log2f; __fdividef for 1/l.
+   - Final store via `__floats2bfloat162_rn`; base-2 LSE.
+
+2. **`split_k_compute_kernel`** — partial-state kernel for small workloads.
+   - Grid: `(S=64, T, 1)`; Block: `(32, 16, 1)`.
+   - Each block computes one partition (32 sparse slots) for one token, all 16 heads.
+   - Writes FP32 partial state: `O_tmp[T,S,H,512]`, `m_tmp[T,H,S]`, `l_tmp[T,H,S]`.
+
+3. **`split_k_reduce_kernel`** — exact merge kernel.
+   - Grid: `(T, 16, 1)`; Block: `(128, 1, 1)`.
+   - Lane 0 computes `m_global = max(m_s)`, then `l_global = Σ l_s * exp(m_s - m_global)` in one loop (inlined, no separate `l_s_smem`/`scale_smem` storage).
+   - Other lanes each handle 4 output dims via `float4`. Each lane computes `coeff = exp(m_s - m_global) / l_global` inline per-s and accumulates `out += val.x*coeff, ...`. Writes BF16 pairs via `uint2`.
+
+### Step 2: Dispatch logic (exact)
+```
+if (num_tokens == 0) return;
+if (num_tokens < 128) {
+    // Allocate O_tmp[T,64,16,512], m_tmp[T,16,64], l_tmp[T,16,64] as FP32
+    split_k_compute_kernel<<<(64, T, 1), (32, 16, 1)>>>(...);
+    split_k_reduce_kernel<<<(T, 16, 1), (128, 1, 1)>>>(...);
+} else {
+    dsa_forward_kernel<<<(T), (32, 16)>>>(...);
+}
+```
+
+### Step 3: Single allowed refinement
+Keep the reduce kernel in its leaner form (no `l_s_smem`, no `scale_smem`): lane 0 computes both `m_global` and `l_global` in one combined loop from `m_tmp` and `l_tmp`; other lanes compute `coeff` inline per partition during the output loop. This is exactly the form used in the 126x-speedup solution. Do NOT add `scale_smem` or `l_s_smem`.
+
+### Step 4: What NOT to change
+- Do NOT delete the split-K path (parent's fatal mistake).
+- Do NOT change `tau=128`.
+- Do NOT introduce cp.async, WMMA, inline PTX, atomics for merging, cooperative grid sync.
+- Do NOT change the fused kernel's tile_has_valid pattern.
+- Do NOT change block/grid shapes.
+- Do NOT change workspace layout.
+
+---
+
+## Phase 3: Safety Valve (CRITICAL)
+
+### 3.1 Invalid-entry masking
+In every kernel: `if (idx == -1) continue;` before any cache load or dot-product contribution. Never index `ckv_cache` or `kpe_cache` with -1.
+
+### 3.2 Empty-row fallback
+- Fused kernel: `float inv_l = (l > 0.0f) ? __fdividef(1.0f, l) : 0.0f;` → outputs 0 when no valid key. `lse = (l > 0.0f) ? fmaf(m, 1.4426950408889634f, __log2f(l)) : -INFINITY;`.
+- Reduce kernel: `if (m_max == -INFINITY || l_sum <= 0.0f) lse=-INF; out=0;`.
+
+### 3.3 Base-2 LSE enforcement
+Always: `lse = m * 1.4426950408889634f + __log2f(l)` when valid. Never natural log.
+
+### 3.4 Explicit BF16 intrinsics only
+Use only: `__bfloat162float`, `__bfloat1622float2`, `__float2bfloat16`, `__floats2bfloat162_rn`. Never implicit casts.
+
+### 3.5 ABI compliance
+- `#include <torch/extension.h>` and `#include <cuda_bf16.h>` at top.
+- Exact signature: `std::tuple<torch::Tensor, torch::Tensor> dsa_forward(torch::Tensor q_nope, torch::Tensor q_pe, torch::Tensor ckv_cache, torch::Tensor kpe_cache, torch::Tensor sparse_indices, float sm_scale)`.
+- End with `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("dsa_forward", &dsa_forward, "DSA Forward"); }`.
+
+### 3.6 Deterministic fallback
+If executor has any doubt about a refinement, ship the pure copy of `94736692`. Score protection > novelty. A byte-for-byte copy would score ~12.6, vastly beating the parent's 0.846.
+
+---
+
+## Phase 4: Implementation Details
+
+### 4.1 Headers
+```cpp
+#include <torch/extension.h>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+#include <tuple>
+#include <math.h>
+```
+
+### 4.2 Device helpers
+- `template<typename T> __device__ __forceinline__ T warp_reduce_sum(T val)`: 5-step `__shfl_down_sync` loop (offsets 16→1).
+
+### 4.3 Fused kernel (`dsa_forward_kernel`) — exact structure
+1. `int t = blockIdx.x; int h = threadIdx.y; int lane = threadIdx.x; int tid = h*32+lane;`
+2. Shared: `__shared__ alignas(16) int idx_shared[32]; __shared__ int tile_has_valid; __shared__ alignas(16) __nv_bfloat16 smem_Kc[32*512]; __shared__ alignas(16) __nv_bfloat16 smem_Kp[32*64];`
+3. Load q_nope into `float2 q_n_f32[8]` via `__nv_bfloat162` loads at `q_nope_ptr[t*8192 + h*512 + j*64 + lane*2]`, then `__bfloat1622float2`.
+4. Load q_pe into `float2 q_p_f32` similarly.
+5. Init `float2 O_reg[8] = {0}; float m=-INF; float l=0;`.
+6. Loop `for (int tile=0; tile<64; ++tile)`:
+   - `if (tid<32) idx_shared[tid] = sparse_indices_ptr[t*2048 + tile*32 + tid];` then `__syncthreads();`
+   - Lane 0 computes `tile_has_valid = OR of (idx_shared[i]!=-1 for i in 32);` `__syncthreads();`
+   - If `!tile_has_valid`, `__syncthreads();` and `continue;`.
+   - Stage `smem_Kc`: 4 steps, `load_row=step*8+tid/64, load_col=tid%64`, load `float4` from `ckv_cache_ptr[idx*512]` if `idx!=-1`.
+   - Stage `smem_Kp`: `if (tid<256)`, `load_row=tid/8, load_col=tid%8`, load `float4` from `kpe_cache_ptr[idx*64]`.
+   - `__syncthreads();`
+   - Inner loop `for (int i=0; i<32; ++i)`: skip if `idx_shared[i]==-1`.
+     - Accumulate local_dot over 8 pairs from `smem_Kc` and 1 pair from `smem_Kp` via `__bfloat1622float2` and `fmaf`.
+     - `float logit = warp_reduce_sum(local_dot); logit = __shfl_sync(0xffffffff, logit, 0) * sm_scale;`
+     - Online softmax update: `m_new=fmaxf(m,logit); exp_diff=(m==-INF)?0:__expf(m-m_new); exp_logit=__expf(logit-m_new); l=fmaf(l,exp_diff,exp_logit); m=m_new;`
+     - Update `O_reg[j].x = fmaf(exp_logit, k_f_reg[j].x, O_reg[j].x*exp_diff);` similarly for y.
+   - `__syncthreads();`
+7. `float inv_l = (l>0) ? __fdividef(1.0f,l) : 0;` Normalize O_reg and store as `__nv_bfloat162` pairs.
+8. `if (lane==0) lse_ptr[t*16+h] = (l>0) ? fmaf(m, 1.4426950408889634f, __log2f(l)) : -INFINITY;`
+
+### 4.4 split_k_compute_kernel — exact structure
+Same as fused kernel but: `s=blockIdx.x, t=blockIdx.y`; processes only tile `s` (one partition); writes FP32 partial state to `O_tmp[t*64*16*512 + s*16*512 + h*512 + j*64 + lane*2]` as `float2`, and `m_tmp[t*16*64 + h*64 + s]`, `l_tmp[t*16*64 + h*64 + s]` by lane 0.
+
+### 4.5 split_k_reduce_kernel — exact structure
+1. `t=blockIdx.x, h=blockIdx.y, lane=threadIdx.x`.
+2. `__shared__ float m_global, l_global; __shared__ float m_s_smem[64];`
+3. `if (lane<64) m_s_smem[lane] = m_tmp[t*16*64 + h*64 + lane];` `__syncthreads();`
+4. Lane 0: compute `m_max = max over 64`; then `l_sum = Σ l_tmp[..] * __expf(m_s_smem[i]-m_max) for valid i`; store `m_global, l_global`; write `lse`.
+5. `__syncthreads();`
+6. `int d_idx = lane*4; if (d_idx<512)`: loop `for s in 0..64`: `coeff = (m_s_smem[s]!=-INF) ? __expf(m_s_smem[s]-m_global)*__fdividef(1.0f,l_global) : 0; if (coeff>0) { load float4 from O_tmp[t*64*16*512+s*16*512+h*512+d_idx]; fmaf into out0..out3; }` Or equivalently, precompute `inv_l=1/l_global` outside loop. Store via `__floats2bfloat162_rn` into two uint32 packed as uint2.
+7. Handle `m_global==-INF || l_global<=0` by writing zeros.
+
+### 4.6 Host dispatch
+- Validate `num_tokens = q_nope.size(0);` create `output`, `lse`. If 0, return.
+- `if (num_tokens < 128)`: allocate `O_tmp({T,64,16,512}, float32)`, `m_tmp({T,16,64}, float32)`, `l_tmp({T,16,64}, float32)`; launch split_k_compute then split_k_reduce.
+- `else`: launch `dsa_forward_kernel<<<(T), (32,16)>>>`.
+
+### 4.7 Polynomial complexity
+O(T * 16 * 2048 * 576) arithmetic. Fully polynomial, practical.
+
+### 4.8 No randomness
+No multi-start needed.
+
+---
+
+## Review Checklist
+- Math over luck: YES, exact online-softmax + exact merge.
+- Standard library: YES, only CUDA + torch extension.
+- Randomness: None.
+- Implementable: YES, it is a copy of a known-working solution with minimal changes.
+
+## Final Executor Instructions
+1. **Reproduce solution `94736692` verbatim** as the starting point. Its code is provided in the database and has correctness=1.0 with 126x speedup.
+2. Keep all three kernels: `dsa_forward_kernel`, `split_k_compute_kernel`, `split_k_reduce_kernel`.
+3. Keep dispatch threshold `num_tokens < 128` for split-K, else fused.
+4. Keep the lean reducer form (no `l_s_smem`, no `scale_smem`; compute `coeff` inline per partition).
+5. Keep `tile_has_valid` as a separate shared int flag in the fused kernel (not via mutating `idx_shared`).
+6. Use explicit BF16 intrinsics everywhere. FP32 accumulators. Base-2 LSE. Empty-row → zeros + -INF.
+7. End with `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("dsa_forward", &dsa_forward, "DSA Forward"); }`.
+8. Do NOT delete the split-K path. Do NOT unify into a single kernel. That was the parent's fatal mistake.
+
+This plan guarantees recovery to score ~12+ (vs. parent's 0.85) by restoring the proven best-in-class architecture.

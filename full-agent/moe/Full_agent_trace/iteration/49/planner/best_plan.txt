@@ -1,0 +1,351 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Produce a child solution for the FP8 block-scale MoE kernel that is **more robust than the current parent** and likely faster, while preserving correctness by construction. The plan should avoid the failed atomic-scatter direction, keep the high-performing parts of the parent, and make a targeted algorithmic change that has a low crash risk and a deterministic fallback.
+
+**Selected Outline:** Outline 1 — **Two-Path Deterministic Dispatch with Native `_scaled_mm` / `torch.mm` GEMM2 and Torch Scatter**
+
+**Rationale for Selection:**
+1. The current parent summary shows the recent change failed because it fused GEMM2 output into global memory with `tl.atomic_add`, introducing contention and autotune reset overhead. So the next child must **not** continue that branch.
+2. The database global best score is **1.5985**, while the current parent is **1.4395**. This is a meaningful gap (>10%), so the correct strategy is **fusion with robust ideas from stronger solutions**, not another narrow vertical tweak on the failed atomic path.
+3. GEMM1 in the parent is already a strong grouped Triton FP8 kernel. The safest optimization direction is to **preserve routing + GEMM1**, and change **only GEMM2 execution policy**.
+4. Using native PyTorch matmul kernels for GEMM2 gives a strong engineering advantage: they are mature, stable, and less likely to miscompile or underperform than a more aggressive custom Triton scatter kernel.
+5. The plan includes a deterministic fallback (`torch.mm` after explicit dequant) so the child remains valid even if `_scaled_mm` is unavailable or not advantageous on some shapes.
+
+---
+
+## Phase 1: Mathematical Definition
+
+We model the forward pass as a composition of exact subproblems.
+
+### 1. Inputs and known dimensions
+- `T`: number of tokens
+- `H = 7168`: hidden dimension
+- `I = 2048`: intermediate dimension
+- `E_local = 32`: number of local experts
+- `TOP_K = 8`
+- block size for scales = `128`
+
+### 2. Variables
+Let the optimization variables be the **execution-policy variables**, not the math itself:
+- `P_route`: routing implementation, fixed to exact DeepSeek no-aux routing
+- `P_gemm1`: GEMM1 implementation, fixed to parent grouped Triton FP8 kernel
+- `P_gemm2 ∈ {native_scaled_mm, native_mm_dequant}`: discrete GEMM2 solver choice
+- `P_dispatch ∈ {small_regime, large_regime}`: deterministic dispatch regime based on token/expert occupancy
+
+The numerical tensors are:
+- `R[t, e]`: routing logits and bias-derived ranking values
+- `W_route[t, k]`: normalized routing weights for top-8 selected experts
+- `Tok[j]`: global token id for routed item `j`
+- `Exp[j]`: local expert id for routed item `j`
+- `G1[j, :] ∈ R^{2I}`: GEMM1 output in FP32
+- `S[j, :] = silu(G1[j, I:]) * G1[j, :I] ∈ R^{I}`: SwiGLU activation in FP32
+- `Y[j, :] ∈ R^{H}`: GEMM2 output in FP32
+- `Out[t, :] ∈ R^{H}`: accumulated final output in FP32, cast to BF16 only at the end
+
+### 3. Constraints
+The child must satisfy the following hard constraints:
+
+#### C1. Exact routing semantics
+Routing must compute exactly:
+1. `q = sigmoid(routing_logits)`
+2. `rank_scores = q + routing_bias`
+3. Split experts into 8 groups of 32
+4. For each group, take top-2 scores and sum them
+5. Select top-4 groups
+6. Mask all other groups
+7. Select global top-8 experts from allowed experts
+8. Use `q` values for normalized routing weights
+9. Scale by `routed_scaling_factor`
+
+#### C2. FP8 block-scale semantics
+For any 128-wide block, dequantization must respect:
+- `a_real ≈ a_fp8 * a_scale`
+- `w_real ≈ w_fp8 * w_scale`
+with the provided block-scale layouts.
+
+#### C3. GEMM accumulation precision
+- GEMM1 accumulation must be FP32.
+- GEMM2 accumulation must be FP32.
+- Final output cast to BF16 only once.
+
+#### C4. Shape constraints
+- Output must be exactly `[T, 7168]` with dtype `bfloat16`.
+- Must handle any `T`.
+
+#### C5. Deterministic accumulation safety
+- No global atomic scatter in GEMM2.
+- Use deterministic expert-local outputs followed by `index_add_` / `scatter_add_` into a preallocated FP32 output.
+
+### 4. Objective function
+We are optimizing the discrete execution policy:
+
+\[
+\min_{P_{gemm2}, P_{dispatch}} \; \text{Latency}(P_{route}, P_{gemm1}, P_{gemm2}, P_{dispatch})
+\]
+
+subject to constraints C1–C5.
+
+This is a **small deterministic policy-selection problem**, not an unconstrained heuristic search.
+
+---
+
+## Phase 2: The Optimization Loop
+
+This phase describes exactly how the executor should build the child.
+
+### Step 2.1 — Preserve the strongest parent components unchanged
+Keep the following parts of the parent essentially verbatim:
+1. `_route_tokens(...)`
+2. `grouped_gemm1_kernel`
+3. GEMM1 autotune configuration set
+4. Parent edge-case handling:
+   - return zeros BF16 if no routed tokens
+   - return zeros BF16 if `Tk_total == 0`
+   - return zeros BF16 if `max_count == 0`
+
+This isolates risk and keeps the already-good part of the pipeline stable.
+
+### Step 2.2 — Reframe GEMM2 as a deterministic per-expert batched solve
+Instead of one custom grouped Triton GEMM2 kernel with scatter logic, compute GEMM2 in a **per-expert loop over compact contiguous expert batches**.
+
+For each local expert `e`:
+1. Read `start = expert_offsets[e]`, `end = expert_offsets[e+1]`
+2. Let `Te = end - start`
+3. If `Te == 0`, skip
+4. Slice contiguous routed rows:
+   - `rows = slice(start, end)`
+   - `tokens_e = sorted_tokens[rows]`
+   - `weights_e = sorted_weights[rows]`
+   - `g1_e = G1[rows]`
+5. Compute SwiGLU:
+   - `x1 = g1_e[:, :I]`
+   - `x2 = g1_e[:, I:]`
+   - `s_e = torch.nn.functional.silu(x2) * x1`
+6. Compute expert down projection using one of two deterministic solver paths below.
+
+### Step 2.3 — Use a two-path GEMM2 policy
+Use a deterministic dispatch rule based on `Te` and possibly `Tk_total`.
+
+#### Path A: Native scaled-matmul path
+Use this when supported and shape is favorable.
+
+Idea:
+- Quantize or cast `s_e` into a native matmul-friendly format.
+- Combine with expert `gemm2_weights[e]` and `gemm2_weights_scale[e]` using `torch._scaled_mm` if the runtime supports the exact dtype/shape combination.
+
+Policy:
+- Try `_scaled_mm` only when `Te` is at least a modest threshold such as 16 or 32, because tiny batches may not benefit.
+- Keep this threshold fixed and deterministic.
+
+The executor should not invent a speculative format. The intended robust implementation is:
+1. Feature-detect `hasattr(torch, '_scaled_mm')`
+2. Attempt only the exact supported invocation pattern for the environment
+3. If unsupported, immediately fall back to Path B
+
+#### Path B: Explicit dequant + `torch.mm`
+This is the **guaranteed-valid fallback** and should always exist.
+
+For expert `e`:
+1. Dequantize `gemm2_weights[e]` blockwise to FP32 or FP16-friendly representation.
+2. Compute:
+   \[
+   y_e = s_e \cdot W_{2,e}^T
+   \]
+   with FP32 accumulation using `torch.mm` or equivalent.
+3. Multiply by routing weights:
+   - `y_e *= weights_e[:, None]`
+4. Accumulate into global output:
+   - `output.index_add_(0, tokens_e.long(), y_e)`
+
+This path is slower than the ideal fused kernel but extremely robust.
+
+### Step 2.4 — Dequantization model for GEMM2 weights
+Use exact blockwise dequantization for the local expert only.
+
+For expert `e`, weight tensor has shape `[H, I] = [7168, 2048]` in FP8.
+Scale tensor has shape `[56, 16]`.
+
+Define block indices:
+- `hb = h // 128`, `h_local = h % 128`
+- `ib = i // 128`, `i_local = i % 128`
+
+Then:
+\[
+W_{2,e}^{real}[h, i] = W_{2,e}^{fp8}[h, i] \cdot Scale_{2,e}[hb, ib]
+\]
+
+Implementation should avoid full `[32,7168,2048]` materialization. Only dequantize the currently used expert `e`, and preferably cache only within the local loop body.
+
+### Step 2.5 — Make dispatch mathematically simple and deterministic
+Use a fixed piecewise policy. Example:
+- If `Te < 16`: use Path B (`torch.mm`) directly
+- Else if `_scaled_mm` is available and invocation succeeds: use Path A
+- Else: use Path B
+
+This is a finite-state deterministic solver. No randomness, no online tuning, no fragile heuristics.
+
+### Step 2.6 — Keep routing and GEMM1 fully GPU-resident
+The parent already builds routing structures mostly on GPU. Preserve that.
+Avoid adding CPU synchronizations except for the already-necessary `max_count.item()` if needed.
+
+### Step 2.7 — Optional micro-optimization inside the robust framework
+If the executor can do so safely, they may add one conservative enhancement:
+- cache dequantized `gemm2_weights[e]` inside the expert loop only for the current expert
+- optionally cast `s_e` and dequantized weights to FP16 inputs while forcing FP32 accumulation if the chosen native op supports that
+
+This is optional. Correctness and robustness come first.
+
+---
+
+## Phase 3: The “Safety Valve” (CRITICAL)
+
+This phase is the deterministic repair / fallback mechanism that guarantees validity.
+
+### Safety Valve A — Always maintain a known-valid fallback path
+The child must include a fully deterministic fallback:
+- routing = parent exact implementation
+- GEMM1 = parent exact implementation
+- GEMM2 = explicit blockwise dequant per expert + `torch.mm`
+- accumulation = `output.index_add_`
+- final cast = `output.to(torch.bfloat16)`
+
+If any optimized path fails feature checks, shape checks, dtype checks, or raises an exception during a guarded attempt, the code must execute this fallback path.
+
+### Safety Valve B — No atomics, no global fused scatter inside Triton
+The previous failed child proved that “fused” atomics can be slower and more fragile. Therefore:
+- Do **not** use `tl.atomic_add` for final output accumulation.
+- Do **not** use `reset_to_zero` on the final output in autotune.
+- Do **not** fuse the final scatter into the custom kernel.
+
+This is a hard guardrail.
+
+### Safety Valve C — Final validity projection
+Before returning:
+1. Ensure `output` is FP32
+2. Ensure shape is exactly `(T, H)`
+3. Convert once at the end:
+   - `return output.to(torch.bfloat16)`
+
+This projection step strictly enforces the output dtype constraint.
+
+### Safety Valve D — Edge-case proof obligations
+The child must explicitly preserve these cases:
+- No local routed experts → return zeros `[T, H]` BF16
+- `Tk_total == 0` → return zeros `[T, H]` BF16
+- `max_count == 0` → return zeros `[T, H]` BF16
+- Empty expert segment in per-expert loop → continue safely
+
+### Safety Valve E — Exception-safe optimized path
+If the executor implements Path A using `_scaled_mm`, it should be wrapped in a **single guarded block**:
+- try optimized path for the current expert
+- on any exception, revert to Path B for that expert only
+
+This ensures the whole forward pass never becomes invalid because of one unsupported native invocation.
+
+---
+
+## Phase 4: Implementation Details
+
+This section is code-ready and specific.
+
+### 4.1 Allowed Python libraries
+Use only:
+- `torch`
+- `triton`
+- `triton.language as tl`
+
+Do not depend on obscure packages.
+
+### 4.2 File structure
+The single Python file should contain:
+1. imports
+2. parent `grouped_gemm1_kernel`
+3. parent `_route_tokens`
+4. one helper for dequantizing `gemm2_weights` for a single expert
+5. one helper for expert-local GEMM2 execution with two-path dispatch
+6. `run(...)`
+
+### 4.3 Helper function design
+Implement helpers like:
+
+```python
+def _dequant_gemm2_expert_fp32(w_fp8_e, w_scale_e):
+    # w_fp8_e: [H, I] fp8
+    # w_scale_e: [H//128, I//128] fp32
+    # returns [H, I] fp32 or a matmul-friendly representation
+    ...
+```
+
+and
+
+```python
+def _gemm2_expert_dispatch(s_e, w2_e_fp8, w2_scale_e):
+    # returns y_e in fp32
+    # path A: torch._scaled_mm if available and safe
+    # path B: explicit dequant + torch.mm
+    ...
+```
+
+### 4.4 Recommended exact implementation policy
+In `run(...)`:
+1. Compute routed structures via `_route_tokens`
+2. Allocate `G1 = torch.zeros((Tk_total, 2 * I), dtype=torch.float32, device=device)`
+3. Launch parent GEMM1 kernel exactly as before
+4. Allocate `output = torch.zeros((T, H), dtype=torch.float32, device=device)`
+5. Loop `for e in range(E_local):`
+   - `start = int(expert_offsets[e].item())`
+   - `end = int(expert_offsets[e + 1].item())`
+   - skip if empty
+   - slice `g1_e`, `tokens_e`, `weights_e`
+   - compute `s_e`
+   - compute `y_e = _gemm2_expert_dispatch(...)`
+   - `y_e = y_e * weights_e[:, None]`
+   - `output.index_add_(0, tokens_e.long(), y_e)`
+6. `return output.to(torch.bfloat16)`
+
+### 4.5 Important implementation cautions
+- Use int64 where pointer arithmetic or large indexing might overflow in Triton.
+- Do not materialize all experts’ dequantized weights at once.
+- Dequantize **only the current expert** in the fallback path.
+- Keep final accumulation in FP32.
+- Do not introduce randomness.
+
+### 4.6 Why this is algorithmically robust
+This plan decouples:
+- **Structure finding**: routing + dispatch + expert partitioning, fixed exactly
+- **Parameter solve**: GEMM2 execution policy, solved by a tiny deterministic policy with fallback
+
+That is the safest possible move after the failed atomic experiment.
+
+---
+
+## Review Checklist
+
+### Math-over-luck check
+Yes. The plan is a deterministic constrained execution-policy optimization. No luck-based tuning is required.
+
+### Library check
+Uses only standard allowed libraries already present in the task context:
+- `torch`
+- `triton`
+- `triton.language`
+
+### Randomness check
+No randomness is used, so no multi-start loop is needed.
+
+### Implementability check
+Yes. The child is implementable as a single Python file by modifying only the GEMM2 stage and preserving the parent’s strongest components.
+
+---
+
+## Final Execution Instruction for Phase 2 Executor
+
+Build the child by **keeping the parent routing and grouped Triton GEMM1 unchanged**, then **replace the custom grouped Triton GEMM2 + risky fused-scatter ideas with a deterministic per-expert GEMM2 solver**:
+1. compact expert slices from `G1`
+2. compute SwiGLU in PyTorch
+3. run GEMM2 via `_scaled_mm` when safely supported
+4. otherwise use explicit blockwise dequant + `torch.mm`
+5. accumulate with `output.index_add_` in FP32
+6. return BF16 only at the end
+
+This plan is centered on solving the actual task, preserves correctness by construction, and is the most robust next-step evolution from the failed parent branch.

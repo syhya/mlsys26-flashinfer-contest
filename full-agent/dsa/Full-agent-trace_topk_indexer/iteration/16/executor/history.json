@@ -1,0 +1,77 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_54b",
+        "solution_file_path": "output/f6d853e9-d06b-4366-862d-cd1aaed5e7ff/16/executor/0_0/solution_54b.py",
+        "evaluation_file_path": "output/f6d853e9-d06b-4366-862d-cd1aaed5e7ff/16/executor/0_0/evaluation_54b.json",
+        "score": 8.601048800489503,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 86.01x (ref: 2.533ms, kernel: 0.033ms)\",\n  \"score\": 8.601048800489503,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 86.01048800489502,\n    \"exec_time_ms\": 0.032658569444444445,\n    \"baseline_time_ms\": 2.5329651527777775,\n    \"compile_time\": 0.0,\n    \"eval_time\": 162.77362394332886\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_topk_indexer_fp8_h64_d128_topk2048_ps64\",\n    \"execution_time\": \"162.77s\",\n    \"kernel_latency_ms\": \"0.033ms\",\n    \"reference_latency_ms\": \"2.533ms\",\n    \"speedup\": \"86.01x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 2.5329651527777775,\n      \"max_relative_error\": 0.0,\n      \"max_absolute_error\": 0.0,\n      \"total_workloads\": 12\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  },
+  {
+    "round": 1,
+    "candidates": [
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_50d",
+        "solution_file_path": "output/f6d853e9-d06b-4366-862d-cd1aaed5e7ff/16/executor/1_0/solution_50d.py",
+        "evaluation_file_path": "output/f6d853e9-d06b-4366-862d-cd1aaed5e7ff/16/executor/1_0/evaluation_50d.json",
+        "score": 7.775776023482631,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 77.76x (ref: 4.763ms, kernel: 0.062ms)\",\n  \"score\": 7.775776023482631,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 77.7577602348263,\n    \"exec_time_ms\": 0.062228652777777775,\n    \"baseline_time_ms\": 4.763394111111111,\n    \"compile_time\": 0.0,\n    \"eval_time\": 360.959618806839\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_topk_indexer_fp8_h64_d128_topk2048_ps64\",\n    \"execution_time\": \"360.96s\",\n    \"kernel_latency_ms\": \"0.062ms\",\n    \"reference_latency_ms\": \"4.763ms\",\n    \"speedup\": \"77.76x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 4.763394111111111,\n      \"max_relative_error\": 0.0,\n      \"max_absolute_error\": 0.0,\n      \"total_workloads\": 12\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_e61",
+        "solution_file_path": "output/f6d853e9-d06b-4366-862d-cd1aaed5e7ff/16/executor/1_1/solution_e61.py",
+        "evaluation_file_path": "output/f6d853e9-d06b-4366-862d-cd1aaed5e7ff/16/executor/1_1/evaluation_e61.json",
+        "score": 8.088104998815206,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 80.88x (ref: 2.492ms, kernel: 0.034ms)\",\n  \"score\": 8.088104998815206,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 80.88104998815206,\n    \"exec_time_ms\": 0.03380554166666667,\n    \"baseline_time_ms\": 2.4915185416666668,\n    \"compile_time\": 0.0,\n    \"eval_time\": 160.0640389919281\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_topk_indexer_fp8_h64_d128_topk2048_ps64\",\n    \"execution_time\": \"160.06s\",\n    \"kernel_latency_ms\": \"0.034ms\",\n    \"reference_latency_ms\": \"2.492ms\",\n    \"speedup\": \"80.88x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 2.4915185416666668,\n      \"max_relative_error\": 0.0,\n      \"max_absolute_error\": 0.0,\n      \"total_workloads\": 12\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  },
+  {
+    "round": 2,
+    "candidates": [
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_fc0",
+        "solution_file_path": "output/f6d853e9-d06b-4366-862d-cd1aaed5e7ff/16/executor/2_0/solution_fc0.py",
+        "evaluation_file_path": "output/f6d853e9-d06b-4366-862d-cd1aaed5e7ff/16/executor/2_0/evaluation_fc0.json",
+        "score": 8.52786777753846,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 85.28x (ref: 3.026ms, kernel: 0.038ms)\",\n  \"score\": 8.52786777753846,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 85.27867777538461,\n    \"exec_time_ms\": 0.03752479166666666,\n    \"baseline_time_ms\": 3.0262735000000003,\n    \"compile_time\": 0.0,\n    \"eval_time\": 406.10484981536865\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_topk_indexer_fp8_h64_d128_topk2048_ps64\",\n    \"execution_time\": \"406.10s\",\n    \"kernel_latency_ms\": \"0.038ms\",\n    \"reference_latency_ms\": \"3.026ms\",\n    \"speedup\": \"85.28x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 3.0262735000000003,\n      \"max_relative_error\": 0.0,\n      \"max_absolute_error\": 0.0,\n      \"total_workloads\": 12\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_863",
+        "solution_file_path": "output/f6d853e9-d06b-4366-862d-cd1aaed5e7ff/16/executor/2_1/solution_863.py",
+        "evaluation_file_path": "output/f6d853e9-d06b-4366-862d-cd1aaed5e7ff/16/executor/2_1/evaluation_863.json",
+        "score": 8.592336627380877,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 85.92x (ref: 2.515ms, kernel: 0.033ms)\",\n  \"score\": 8.592336627380877,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 85.92336627380877,\n    \"exec_time_ms\": 0.03254190277777778,\n    \"baseline_time_ms\": 2.5148354027777775,\n    \"compile_time\": 0.0,\n    \"eval_time\": 165.8461298942566\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_topk_indexer_fp8_h64_d128_topk2048_ps64\",\n    \"execution_time\": \"165.85s\",\n    \"kernel_latency_ms\": \"0.033ms\",\n    \"reference_latency_ms\": \"2.515ms\",\n    \"speedup\": \"85.92x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 2.5148354027777775,\n      \"max_relative_error\": 0.0,\n      \"max_absolute_error\": 0.0,\n      \"total_workloads\": 12\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_c2a",
+        "solution_file_path": "output/f6d853e9-d06b-4366-862d-cd1aaed5e7ff/16/executor/2_2/solution_c2a.py",
+        "evaluation_file_path": "output/f6d853e9-d06b-4366-862d-cd1aaed5e7ff/16/executor/2_2/evaluation_c2a.json",
+        "score": 8.540181593475188,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 85.40x (ref: 4.178ms, kernel: 0.051ms)\",\n  \"score\": 8.540181593475188,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 85.40181593475187,\n    \"exec_time_ms\": 0.050831388888888884,\n    \"baseline_time_ms\": 4.177969777777778,\n    \"compile_time\": 0.0,\n    \"eval_time\": 359.09992027282715\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_topk_indexer_fp8_h64_d128_topk2048_ps64\",\n    \"execution_time\": \"359.10s\",\n    \"kernel_latency_ms\": \"0.051ms\",\n    \"reference_latency_ms\": \"4.178ms\",\n    \"speedup\": \"85.40x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 4.177969777777778,\n      \"max_relative_error\": 0.0,\n      \"max_absolute_error\": 0.0,\n      \"total_workloads\": 12\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

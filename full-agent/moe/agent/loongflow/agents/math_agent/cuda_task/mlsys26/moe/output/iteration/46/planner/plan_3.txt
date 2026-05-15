@@ -1,0 +1,13 @@
+Outline 3 — Rebase onto global-best 6da80c61 and fuse the proven sentinel-sort routing from 302d2eb3 with the current best kernel stack
+
+Mathematical Formulation:
+Variables (X): X = {R, C1, C2}, where R is the routing implementation, C1/C2 are inherited kernel config sets. Constraints (C): DeepSeek no-aux routing semantics must be exactly preserved: q=sigmoid(logits), rank=q+bias, group-score=top2-sum per group, top4 groups, masked top8 experts, weights normalized from q over selected experts only. GEMM1/GEMM2 kernels remain exactly as in 6da80c61. Objective f(X): minimize total latency dominated by routing launches plus compute.
+
+Solver Strategy:
+Use deterministic refactor-based optimization. Start from 6da80c61 and replace only _route_tokens with the mathematically equivalent dense sentinel-sort formulation from 302d2eb3 / dce0e38f: flat_expert/topk reshape, flat_token repeat_interleave, flat_weight = weights.gather(1, topk_idx).reshape(-1), sentinel sort_key, argsort(stable=True), bincount+cumsum. Keep kernels and epilogue unchanged.
+
+Validity Mechanism:
+Hard guarantee comes from equivalence proof and stable ordering. The dense flattened order matches row-major enumeration of (token,k) pairs; sentinel=e_local pushes non-local experts to the tail; slicing the first num_valid entries reproduces nonzero(expert_mask) + argsort(local_expert_idx). Keep stable=True to preserve tie order exactly. If num_valid==0, return None as in the base path.
+
+Why this solution?
+Advantages: this direction already showed strong positive evidence historically (302d2eb3 1.5517) and is more robust than a new Triton routing kernel; it combines a proven routing-side gain with the current-best kernel stack. Disadvantages: the exact gain may already be partially absorbed in the frontier, so upside may be moderate rather than dramatic.

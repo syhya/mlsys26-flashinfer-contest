@@ -1,0 +1,12 @@
+Plan 3: Shared Memory Tile Caching
+
+Mathematical Formulation:
+Variables (X): Shared memory allocation size per block.
+Objective f(X): Minimize global memory reads by caching `h_state` in shared memory.
+Constraints: Shared memory per block must not exceed 48KB (or 96KB with opt-in).
+Solver Strategy: Load `[V, K]` tiles of `h_state` into shared memory. Compute `old_v`, `new_v`, and `dv` using shared memory. Update `h_state` in shared memory and write back to global memory.
+Validity Mechanism: Proper `__syncthreads()` placement ensures no race conditions.
+
+Why this solution?
+Advantages: Reduces global memory accesses for intermediate steps.
+Disadvantages: `[128, 128]` floats is 64KB, which is large. Also, since each element in `h_state` is only read once and written once in the algebraic simplified version, caching it in shared memory provides zero reuse benefit and only adds latency.

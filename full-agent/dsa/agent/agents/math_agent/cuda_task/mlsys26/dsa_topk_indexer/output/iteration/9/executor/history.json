@@ -1,0 +1,27 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_169",
+        "solution_file_path": "output/e8df8e8a-4678-4efd-8c20-4ea3828823f0/9/executor/0_0/solution_169.py",
+        "evaluation_file_path": "output/e8df8e8a-4678-4efd-8c20-4ea3828823f0/9/executor/0_0/evaluation_169.json",
+        "score": 2.9542782978349194,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 29.54x (ref: 3.713ms, kernel: 0.128ms)\",\n  \"score\": 2.9542782978349194,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 29.54278297834919,\n    \"exec_time_ms\": 0.12848722222222222,\n    \"baseline_time_ms\": 3.7133722500000004,\n    \"compile_time\": 0.0,\n    \"eval_time\": 194.65086317062378\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_topk_indexer_fp8_h64_d128_topk2048_ps64\",\n    \"execution_time\": \"194.65s\",\n    \"kernel_latency_ms\": \"0.128ms\",\n    \"reference_latency_ms\": \"3.713ms\",\n    \"speedup\": \"29.54x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 3.7133722500000004,\n      \"max_relative_error\": 0.0,\n      \"max_absolute_error\": 0.0,\n      \"total_workloads\": 12\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_292",
+        "solution_file_path": "output/e8df8e8a-4678-4efd-8c20-4ea3828823f0/9/executor/0_0/solution_292.py",
+        "evaluation_file_path": "output/e8df8e8a-4678-4efd-8c20-4ea3828823f0/9/executor/0_0/evaluation_292.json",
+        "score": 4.236462927860179,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 42.36x (ref: 3.972ms, kernel: 0.097ms)\",\n  \"score\": 4.236462927860179,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 42.36462927860179,\n    \"exec_time_ms\": 0.09699909722222222,\n    \"baseline_time_ms\": 3.972402361111111,\n    \"compile_time\": 0.0,\n    \"eval_time\": 575.4779002666473\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_topk_indexer_fp8_h64_d128_topk2048_ps64\",\n    \"execution_time\": \"575.48s\",\n    \"kernel_latency_ms\": \"0.097ms\",\n    \"reference_latency_ms\": \"3.972ms\",\n    \"speedup\": \"42.36x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 3.972402361111111,\n      \"max_relative_error\": 0.0,\n      \"max_absolute_error\": 0.0,\n      \"total_workloads\": 12\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

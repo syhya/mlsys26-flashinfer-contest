@@ -1,0 +1,20 @@
+**1. Executive Summary:**
+This iteration was a regression because it abandoned the intended hybrid acceleration plan and instead deepened the serial chunked FP32 fallback path, performing 3rd out of 4 siblings.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* **Sibling Rank:** 3 out of 4 children. Top sibling score: 15.79%.
+* **Score Delta:** From parent (15.22%) to child (11.62%).
+* **Key Change:** Replaced the parent’s full per-expert FP32 weight materialization with chunked GEMM1/GEMM2 dequantization and slice-wise `index_add_`, while keeping exact PyTorch routing/dispatch and unique-token activation dequant caching.
+* **Core Metrics:** Correctness: 1.0; speedup: 1.16x; kernel execution time: 59.249ms; reference time: 17.111ms; parent kernel time: 14.543ms; eval time: 101.81s; benchmark max absolute error: 2048.0; benchmark max relative error: 3710937.5; total workloads: 19.
+
+**3. Strategic Analysis (The "So What?"):**
+* **Root Cause:** The outcome was driven by both plan and execution failure, with the dominant cause being execution divergence from plan. The plan called for a fused hybrid with a scoped Triton GEMM1 fast path and T-adaptive backend selection, but the produced child implemented only the safe chunked eager-PyTorch route. Within that executed design, chunking further increased fragmentation, launch count, and Python-loop overhead without introducing any true high-throughput backend.
+* **Key Insight:** The important lesson is that chunking is useful only as a memory-bounding repair mechanism, not as a standalone optimization direction. Population evidence is now consistent: once the architecture remains “serial per-expert + eager FP32 dequant + `torch.mm`,” variations such as preexpanded scales, helper refactors, or chunk sizing merely shuffle overhead and do not recover competitive speed. The salvageable concept remains the parent family’s exact routing/dispatch plus unique-token activation cache, which is still a valuable correctness oracle for validating a faster compute backend.
+* **Identified Risk:** The biggest trap is plan-execution drift into a comfort zone of safe fallback variants. This lineage is repeatedly proposing hybrid/native-FP8 strategies but actually instantiating only the oracle path, causing systematic local-optimum stagnation. A second risk is false confidence from the evaluator’s `correctness: 1.0` flag despite persistently huge artifact-level max errors.
+
+**4. Actionable Guidance (The "What's Next?"):**
+* `Recommend Fusion:` Take the exact routing/dispatch structure and `unique_tokens` activation dequant cache from this lineage and fuse them into the best fast sibling framework, but replace only one compute stage at a time. Start with a branch where GEMM1 uses a tightly scoped FP8/Triton or native backend while GEMM2 stays oracle-safe.
+* `Recommend Exploration:` Run a true stage-isolation experiment across the family: Branch A accelerates GEMM1 only, Branch B accelerates GEMM2+scatter only, both against the same oracle routing/dispatch baseline. This will identify where the missing throughput can be recovered without reviving the old structural bug.
+* `Recommend Stripping:` Strip chunk-size tuning and per-chunk eager dequantization from the main optimization agenda. Keep chunking only as an OOM-avoidance fallback, not as the primary performance hypothesis.
+* `Recommend Fusion:` Use this child as a validation harness: compare intermediate tensors at expert granularity (post-GEMM1, post-SwiGLU, post-GEMM2) against a faster lineage to localize error sources while preserving population-proven exact dispatch behavior.
+* `Warn:` Do not continue accepting plans that promise hybrid/native acceleration unless the generated code actually contains that backend. Population history now shows repeated rhetorical hybrids collapsing into the same slow architecture, wasting iterations and obscuring the true bottleneck.

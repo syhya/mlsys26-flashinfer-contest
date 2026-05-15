@@ -1,0 +1,41 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement an extreme optimization of the Split-K Sequence-Level Parallelism kernel for Batched Native Sparse Attention by eliminating intermediate global memory traffic (`O_tmp`, `m_tmp`, `l_tmp`) using advanced Block-Level Reduction Primitives (CUB).
+
+**Selected Outline:** Outline 3: Asynchronous Multi-path Dispatch with In-Kernel Reduction (Warp/Block Primitives)
+
+**Rationale for Selection:**
+1.  **Addresses Root Bottleneck:** The parent solution achieved a 39.44x speedup by introducing Split-K, but its major flaw (identified as a risk) is writing massive intermediate FP32 tensors (`O_tmp`, `m_tmp`, `l_tmp`) to High Bandwidth Memory (HBM) and reading them back in a separate reduction kernel.
+2.  **Algorithmically Robust:** By using standard `<cub/cub.cuh>` block-reduction primitives, we mathematically guarantee exactly the same reduction result without the severe global memory overhead.
+3.  **Instruction Optimization:** The NCU profiler explicitly requested Fused Multiply-Add (FMA) instructions. Incorporating `fmaf` explicitly addresses a 29% instruction overhead.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Definition & Instruction Mapping**
+    *   **Inputs:** Same as parent.
+    *   **Variables:** Split Factor $S = 64$.
+    *   **Objective:** Compute the mathematically exact FP32 online softmax reduction across $S=64$ chunks *without* dumping intermediate matrices to HBM.
+    *   **FMA Constraint:** Force the use of Fused Multiply-Add for all inner loop dot products and exponential scalings.
+
+2.  **Phase 2: The Optimization Loop (FMA & Memory Refinement)**
+    *   **Algorithm:** Single-Kernel Split-K (if possible via grid-sync) OR Optimized Two-Kernel Split-K with FMA.
+    *   *Correction/Refinement:* Since cross-block synchronization inside a single kernel without Cooperative Groups is unsafe, we will maintain the two-kernel (Compute + Reduce) structure but strictly optimize the memory accesses and instructions.
+    *   **Step 1 (Instruction-Level FMA):** Inside `split_k_compute_kernel` and `dsa_forward_kernel`, explicitly replace standard addition/multiplication with `fmaf`.
+        *   Change `local_dot += q_f.x * k_f.x + q_f.y * k_f.y;` to:
+            `local_dot = fmaf(q_f.x, k_f.x, local_dot);`
+            `local_dot = fmaf(q_f.y, k_f.y, local_dot);`
+        *   Change `O_reg[j].x = O_reg[j].x * exp_diff + exp_logit * k_f.x;` to:
+            `O_reg[j].x = fmaf(exp_logit, k_f.x, O_reg[j].x * exp_diff);`
+    *   **Step 2 (Reduction Kernel Tuning):** In `split_k_reduce_kernel`, the memory access pattern for reading `O_tmp` is causing L2 cache issues (NCU: "memory access pattern for global loads... might not be optimal"). Ensure that the thread lanes (0..255) map directly to the contiguous 512 dimensions (2 dimensions per thread via `float2`). The current mapping `d_idx = lane * 2` is coalesced, but we must explicitly enforce `#pragma unroll` on the chunk dimension ($S=64$) to maximize memory bandwidth utilization.
+
+3.  **Phase 3: The "Safety Valve" (CRITICAL)**
+    *   **NaN Guard:** The mathematical repair mechanism from the parent MUST remain untouched. If all chunks are padded, the global max is $-\infty$.
+        `if (m_global == -INFINITY) { /* write zero */ }`
+    *   **Base-2 LSE Conversion:** Ensure the base-2 exact conversion is retained at the very end of the reduction kernel.
+        `lse_ptr[t * 16 + h] = m_max * 1.4426950408889634f + log2f(l_sum);`
+    *   **Exact Fallback:** The $N \ge 128$ single-pass kernel must also receive the `fmaf` instruction optimization, but its structural logic remains intact to ensure no performance degradation on large batch sizes.
+
+4.  **Phase 4: Implementation Details**
+    *   **Libraries:** `<torch/extension.h>`, `<cuda_bf16.h>`, `<cuda_fp16.h>`, `<math.h>`.
+    *   **Functions:** Apply `fmaf(a, b, c)` explicitly in the inner loops of both the single-pass and split-k compute kernels.
+    *   **Workspace:** The workspace allocation (`O_tmp`, etc.) in the PyTorch C++ entry point remains mathematically required for Split-K across blocks without Cooperative Groups, but its performance penalty is mitigated by FMA speedups in the compute phase.

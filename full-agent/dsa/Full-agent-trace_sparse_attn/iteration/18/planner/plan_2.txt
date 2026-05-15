@@ -1,0 +1,30 @@
+Outline 2: Two-stage structure/parameter split with Tensor-Core score tiles + exact normalization
+
+Mathematical Formulation
+- Variables X:
+  - Structural variables: tile sizes BM, BN, BK, number of warps, staging depth, dispatch threshold tau on num_tokens.
+  - Parameter variables: per-tile score fragments S_{t,h,n}, online-softmax state (m,l), and output accumulator O in FP32.
+- Constraints C:
+  - Score definition is exact: z_n = sm_scale * (q_nope·k_nope_n + q_pe·k_pe_n).
+  - Invalid sparse entries n with idx_n=-1 are masked to -infinity before softmax update.
+  - Output uses ckv as value vector, matching reference semantics.
+  - No intermediate BF16 accumulation; only final store is BF16.
+- Objective f(X):
+  - Minimize runtime cost J = alpha * HBM_bytes + beta * kernel_launches + gamma * inactive_warps, subject to exact semantics.
+
+Solver Strategy
+- Decouple structure and parameters:
+  1) Structure finding: deterministic hand-tuned finite search over a small candidate set {(BN,BK,warps,stages)}.
+  2) Parameter tuning: exact online softmax recurrence inside each tile.
+- High-throughput path uses WMMA/mma.sync for q_nope(1x512)·k_nope(512xBN) and q_pe(1x64)·k_pe(64xBN), then merges logits in FP32.
+- Low-latency path uses a warp-only FMA kernel to avoid underfilled CTA overhead.
+
+Validity Mechanism
+- Tile candidates are compile-time fixed and selected by deterministic dispatch; no invalid configuration is emitted.
+- Before every WMMA tile, sparse mask is materialized and invalid columns receive -INF logits so they never affect O or lse.
+- Final safety fallback to Outline-1-like scalar SIMT kernel if alignment/architecture conditions for WMMA are not satisfied.
+
+Why this solution?
+- Expected improvement: gives a real architectural change for large workloads by using tensor cores on the dominant dot products while retaining exact online normalization.
+- Advantages: matches task requirement for dynamic multi-path dispatch, may improve large-T throughput substantially.
+- Disadvantages: implementation complexity is high; sparse irregular gather makes WMMA staging delicate and more crash-prone than a pure SIMT design.

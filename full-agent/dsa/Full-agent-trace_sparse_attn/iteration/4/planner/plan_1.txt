@@ -1,0 +1,22 @@
+### Outline 1: Single-Kernel Split-K via Cooperative Groups & PTX Thread Block Sync
+
+**Objective:** Eliminate the HBM round-trip overhead of the intermediate Split-K workspace while maintaining exact FP32 online softmax semantics.
+
+**Mathematical Formulation:**
+*   **Variables ($X$):** Implementation of cross-block reduction using Cooperative Groups or PTX grid synchronization primitives (`__threadfence()`, `atomicAdd`).
+*   **Constraints ($C$):**
+    *   $C_1$: Must not deadlock.
+    *   $C_2$: Output must equal the exact two-pass Split-K result (Base-2 LSE, FP32 accums).
+*   **Objective ($f(X)$):** Minimize execution latency by removing global memory writes/reads of `O_tmp`, `m_tmp`, `l_tmp`.
+
+**Solver Strategy:**
+*   Implement a "Lock-Free" single-pass Split-K reduction using atomic operations on a much smaller, persistent global memory workspace (only for final accumulation, not per-chunk storage).
+*   Each block computes its chunk's local maximum ($m_i$), log-sum-exp ($l_i$), and unnormalized output ($O_i$).
+*   Blocks atomically update a global lock counter. The *last* block to finish (checked via `atomicInc`) becomes responsible for the final reduction across all chunks.
+
+**Validity Mechanism:**
+*   **Safety Valve:** Maintain the two-kernel architecture as a strict fallback. If Cooperative Groups or atomic syncing introduces numerical instability or hangs during compilation/testing, revert to the FMA-optimized two-pass approach.
+
+**Why this solution?**
+*   **Advantages:** Completely eliminates the massive memory traffic of writing $N \times 16 \times 64 \times 512$ floats to HBM.
+*   **Disadvantages:** High risk of deadlocks or race conditions if atomic logic is slightly off. May increase register pressure due to complex synchronization state.

@@ -1,0 +1,44 @@
+## Strategic Summary Report — Solution `6da80c61` (Iteration 40, Generation 10)
+
+---
+
+### 1. Executive Summary
+
+This iteration was a **new global-best breakthrough** because the plan correctly abandoned the off-frontier assigned parent `ba626bb8` (1.548) and rebased onto the then-best `dce0e38f` (1.5901), introducing a TMA-style `tl.make_block_ptr` weight-load variant in GEMM1 that pushed kernel latency from 1.452ms → **1.448ms** and score to **1.5985 (15.98x)** — surpassing every prior solution in the database.
+
+---
+
+### 2. Data-Driven Findings (Facts ONLY)
+
+- **Sibling Rank:** 1 out of 1 known children of parent `ba626bb8` (sole observed child; no siblings competing).
+- **Cross-lineage Position:** **#1 globally.** Surpasses prior best `dce0e38f` (1.5901) by **+0.0084 score, -0.004ms kernel latency**, and the assigned parent `ba626bb8` (1.5482) by +0.0503.
+- **Score Delta (vs declared parent `ba626bb8`):** 1.5482 → **1.5985** = **+0.0503 absolute (+3.2% relative)**. Vs effective rebase target `dce0e38f`: +0.0084.
+- **Key Change:** (a) Lineage-jump rebase of entire kernel + routing stack onto `dce0e38f` (sentinel-sort `_route_tokens`, FP8-TC GEMM2, bf16 epilogue). (b) Added a new `grouped_gemm1_kernel_tma` variant using `tl.make_block_ptr` + `tl.advance` + `tl.trans` for W loads, selected via `USE_TMA_GEMM1=True` flag with raw-pointer kernel preserved as try/except fallback. (c) +1 GEMM2 autotune config (`BLOCK_M=32, num_warps=8, num_stages=4`).
+- **Core Metrics:**
+  - Correctness: **1.0** (Passed)
+  - Kernel latency: **1.448ms** (vs `dce0e38f` 1.452ms; vs parent 1.500ms)
+  - Max absolute error: **36,864** (vs `dce0e38f` 33,792; vs `ba626bb8` 34,816 — slight precision regression)
+  - Max relative error: 3.97e11 (up from 3.07e11)
+  - Eval time: **60.28s** (vs `dce0e38f` 75.42s; vs parent 79.06s — improvement despite more kernels)
+  - Reference latency: 16.54ms; total workloads: 19
+
+---
+
+### 3. Strategic Analysis (The "So What?")
+
+- **Root Cause:** **Plan quality was the dominant factor, with flawless execution.** The planner correctly diagnosed that the assigned parent was off-frontier, explicitly rebased onto `dce0e38f`, and selected the single highest-value untapped lever (TMA weight loads in GEMM1 — the kernel consuming ~55% of total latency). The try/except + raw-pointer-fallback safety valve made the structural change risk-free: even if TMA failed to compile, the floor would match `dce0e38f`. The +0.0084 gain (~0.5% of 1.452ms) is at the low end of the predicted 5-10% TMA range, suggesting TMA is helping but the kernel may not yet be bandwidth-bound enough on weight loads for the full benefit — or the `tl.trans` overhead is clawing back part of the win.
+- **Key Insight:** The most important lesson is that **the "preserved-fallback + strategic flag" pattern (`USE_TMA_GEMM1=True` + try/except + raw-pointer kernel kept verbatim)** is the correct template for introducing structural changes under a floor guarantee. This is the pattern future planners should replicate for any risky structural jump. Secondary insight: **TMA gains are real but smaller than theoretical** on this workload — likely because GEMM1 is already well-pipelined with `num_stages=4-5`, leaving less bandwidth to unlock.
+- **Identified Risk:** (1) **Precision drift:** abs error climbed 33,792 → 36,864 (+9%) and relative error 3.07e11 → 3.97e11 (+29%). Unexpected, since TMA loads should be numerically identical to raw-pointer loads. Likely explanation: autotune now selects slightly different tile configs for the TMA kernel, changing the order of fp32 accumulation. Still within tolerance, but the headroom to the ~50k watchlist threshold is eroding. (2) **Diminishing TMA return** — only +0.008 on an "expected 0.03-0.07" change suggests GEMM1 compute may now be approaching the tensor-core throughput ceiling, not the HBM bandwidth ceiling. (3) **MAP-Elite diversity unchanged** — lineage continues converging to a single architectural pattern; structural exploration space is narrowing.
+
+---
+
+### 4. Actionable Guidance (The "What's Next?")
+
+- **Recommend Exploration [highest priority]:** **Apply TMA to GEMM2 weight loads.** GEMM2 (K=I=2048, N=H=7168) has a much larger N dimension and should benefit even more from TMA bulk copies than GEMM1. Replicate the exact pattern from this solution (`tl.make_block_ptr` + `tl.advance` + `tl.trans`) with the same try/except safety net. Expected payoff: another +0.01–0.03.
+- **Recommend Exploration [high priority]:** **Fused Triton routing kernel.** Remains the largest unexplored lever. With GEMM kernels now approaching their ceiling, routing launch overhead becomes the dominant remaining fraction on small-T (decode) workloads. Consolidate sigmoid → group-top2 → top-4 groups → masked top-8 → renorm → CSR into 1-2 Triton kernels.
+- **Recommend Fusion:** **Persistent GEMM1→SwiGLU→GEMM2 kernel** keeping the `[Tk_total, 4096]` intermediate tile-resident in SRAM, eliminating the HBM round-trip for `G1`. High risk but potentially transformative (~10-15%).
+- **Recommend Stripping:** **Prune the raw-pointer GEMM1 kernel** after 2-3 more iterations if TMA proves reliably faster on all 19 workloads. Carrying dual kernels doubles autotune compile cost and adds complexity. Gate this on an observed TMA win across every workload variant.
+- **Warn — Precision trajectory:** Abs error has grown 30k → 34k → 37k over three iterations. Track per-iteration; if it crosses ~50k, **freeze further bf16/fp8 fusions** and consider reverting the bf16 epilogue to fp32 for a precision-vs-speed checkpoint.
+- **Warn — Forbidden regressions:** Do NOT introduce `tl.atomic_add`, `reset_to_zero` in autotune, `axis=` arg on `tl.max(tl.abs(c))`, or replace `tl.float8e4nv` with `tl.float8_e4m3fn`. All proven to regress in this lineage.
+- **Warn — Saturation approach:** Gains have now decayed +0.18 → +0.04 → +0.01 → +0.04 → +0.008. The next 2-3 iterations must attempt genuinely structural changes (TMA-on-GEMM2, fused routing, persistent kernel) rather than config tweaks. A hard ceiling near 1.65-1.70 score is plausible without architectural innovation.
+- **Warn — Lineage hygiene validated:** The explicit lineage-jump strategy (ignore off-frontier assigned parent, rebase onto global best) has now delivered TWO consecutive breakthroughs (`dce0e38f`, `6da80c61`). This must become standard planner policy: **always sample from the global frontier when the assigned parent is >0.03 below best.**

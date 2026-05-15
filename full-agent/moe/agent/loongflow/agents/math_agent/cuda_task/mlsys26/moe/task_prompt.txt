@@ -1,0 +1,127 @@
+# Role
+You are a world-class expert in high-performance GPU computing, specializing in Triton kernel development for PyTorch on NVIDIA B200 (sm100, Blackwell architecture). Your expertise spans Triton JIT kernels and PyTorch native ops (e.g., `torch._scaled_mm`). You excel at writing highly optimized Triton kernels that fully exploit B200's FP8 and FP16 tensor cores.
+
+# Task
+You will be given a JSON task definition for a **FP8 block-scale Mixture-of-Experts (MoE)** operation (DeepSeek-V3 / R1 topology). Your goal is to implement a **highly optimized solution** that significantly outperforms the provided PyTorch reference implementation while maintaining strict numerical correctness.
+
+The computation involves:
+1. **DeepSeek no-aux routing**: sigmoid -> group top-2 sum -> top-4 groups -> global top-8 experts
+2. **FP8 GEMM1** (gate+up projection): `[Tk, H] fp8 x [2I, H] fp8 -> [Tk, 2I] f32`
+3. **SwiGLU**: `silu(x2) * x1` where `x1 = G1[:, :I]`, `x2 = G1[:, I:]`
+4. **FP8 GEMM2** (down projection): `[Tk, I] f32 x [H, I] fp8 -> [Tk, H] f32`
+5. **Weighted scatter-add**: per-token routing weights applied and accumulated into output
+
+FP8 block-scale convention (block_size = 128):
+- `hidden_states_scale`: `[H//128, T]` -- K-block x global-token (transposed layout)
+- `gemm1_weights_scale`: `[2I//128, H//128]` per expert
+- `gemm2_weights_scale`: `[H//128, I//128]` per expert
+
+# Output Format
+Provide a **single Python file** -- the content to be evaluated.
+
+Your Python file MUST:
+1. Be self-contained in a single `.py` file
+2. Expose exactly the `run()` entry point below (signature must match exactly)
+3. You may use: Triton kernels (`@triton.jit`) and PyTorch native ops (`torch._scaled_mm`, `torch.mm`, etc.)
+
+```python
+@torch.no_grad()
+def run(
+    routing_logits: torch.Tensor,        # [T, 256] float32
+    routing_bias: torch.Tensor,          # [256]    bfloat16
+    hidden_states: torch.Tensor,         # [T, 7168] torch.float8_e4m3fn
+    hidden_states_scale: torch.Tensor,   # [56, T]  float32
+    gemm1_weights: torch.Tensor,         # [32, 4096, 7168] torch.float8_e4m3fn
+    gemm1_weights_scale: torch.Tensor,   # [32, 32, 56]    float32
+    gemm2_weights: torch.Tensor,         # [32, 7168, 2048] torch.float8_e4m3fn
+    gemm2_weights_scale: torch.Tensor,   # [32, 56, 16]    float32
+    local_expert_offset: int,
+    routed_scaling_factor: float,
+) -> torch.Tensor:
+    # Returns: output [T, 7168] bfloat16
+    ...
+```
+
+# Correctness Requirements
+1. Output shape `[T, 7168]` dtype `bfloat16`.
+2. Numerical tolerance: `rtol=1e-2, atol=1e-2`.
+3. All GEMM accumulation in **FP32**; convert to BF16 only at final output.
+4. Must handle any value of `T` (variable sequence length).
+5. FP8 dequantization: `float_val ~ fp8_val * scale` (per 128-element block).
+
+# Key Optimization Directions
+
+## 1. Leverage FP8 Tensor Cores (Critical)
+B200 FP8 tensor cores provide ~4x throughput over FP32. When writing custom Triton GEMM kernels, keep operands in FP8 for `tl.dot` and apply block-scales **after** dot accumulation, rather than casting to FP32 before the dot. When `BK=128` and `BN=128`, each tile aligns to exactly one scale block, so the post-multiply is a cheap scalar operation.
+
+## 2. Fuse FP8 Dequant into GEMM
+The reference materialises full fp32 weight tensors upfront -- extremely memory-intensive. Instead, load fp8 tiles and apply block scales during accumulation. This avoids a `[32, 4096, 7168]` f32 scratch buffer (~14 GB) and redundant HBM reads.
+
+## 3. Indirect A-Scale Lookup
+`hidden_states_scale` has shape `[H//128, T]` (feature-block x global-token). After gathering token rows, the GEMM kernel must look up scales via the **original global token index**, not the local expert-batch index.
+
+## 4. Expert-Parallel Dispatch
+The serial `for le in range(32)` loop serialises expert computation on GPU. A grouped-GEMM approach that uses the expert index as a grid dimension eliminates per-expert launch overhead and maximises SM utilisation. Build dispatch structures (CSR offsets) entirely on GPU using vectorized ops like `torch.bincount` + `cumsum` to avoid CPU-GPU synchronization.
+
+## 5. SwiGLU + FP16 Quantization for GEMM2 Tensor Core Utilization (Critical)
+Compute SwiGLU in a standalone kernel and dynamically quantize its output to FP16 (per-row scaling). GEMM2 then runs as FP16×FP16 on tensor cores with a scale correction in the epilogue. B200 FP16 TC throughput is 2x over TF32, making this the highest-impact optimization for GEMM2.
+
+## 6. T-Adaptive Dispatch Strategy
+Performance characteristics differ drastically by T. Use programmatic dispatch: small T (decode) benefits from K-splitting to increase parallelism; medium T benefits from moderate tile sizes; large T (prefill) benefits from large tiles and higher occupancy. Select tile sizes, K-split factors, and even kernel variants based on T at launch time.
+
+## 7. Worklist-Based Dispatch (Eliminate Empty CTAs)
+Using expert as a grid dimension causes many CTAs to early-exit for experts with few tokens. For GEMM2 especially, build a compact worklist of (expert_id, token_start) pairs covering only active tiles, then launch exactly that many CTAs. This eliminates idle CTA overhead in typical skewed routing distributions.
+
+## 8. Fused Routing Kernel
+Multiple PyTorch ops for routing (sigmoid, topk, argsort, bincount, cumsum) incur many kernel launches and implicit syncs. Fuse the entire routing + sort pipeline into one or two Triton kernels using atomic operations and spin-barriers. This is especially impactful for small T where launch overhead dominates.
+
+## 9. Triton Performance Features (Triton 3.6.0)
+- **Software pipelining**: Control pipeline depth via `num_stages` in `@triton.Config(...)`. Use standard `for k in range(0, K, BLOCK_K):` loops inside kernels.
+- **`tl.make_block_ptr`**: Use block pointers for weight loads to enable hardware TMA (async bulk copy) on Blackwell, providing higher bandwidth than regular pointer arithmetic loads
+- **Autotuning**: Use `@triton.autotune` with multiple `triton.Config` entries to find optimal tile sizes, `num_warps`, and `num_stages` per problem shape
+
+## 10. Split-K GEMM for Small Batches
+When `Tk` is small (decode regime), a standard GEMM tiles poorly. Split-K approaches with atomic accumulation can keep SMs busy across the K=7168 reduction axis. Use higher K_SPLITS (4-8) for very small T (1-4 tokens) and reduce as T grows.
+
+# Implementation Pitfalls to Avoid
+- **int32 pointer overflow**: Expert weight tensors `[32, 4096, 7168]` have offsets exceeding int32 range. Use `int64` for pointer arithmetic in Triton kernels (`.to(tl.int64)`).
+- **CPU-GPU sync in dispatch**: Avoid Python loops over GPU tensors for building expert offsets. Each element access triggers a sync. Use `torch.bincount`, `torch.cumsum`, `torch.cummax` instead. Ideally allow at most ONE CPU-GPU sync per forward pass (to read max_tokens for grid sizing), and use async stream copy for that.
+- **Dimension constexpr**: Declare known dimension sizes (H=7168, I=2048) as `tl.constexpr` to enable compiler optimizations.
+
+
+Below is an example of the expected structure. Your task definition is in the initial file.
+
+===== Example Start =====
+
+```python
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def _fp8_gemm_kernel(A_ptr, B_ptr, C_ptr, M, N, K, ...):
+    # Option 1: FP8 tensor core dot (keep fp8, scale after)
+    # Option 2: Dequant-then-dot (fp32)
+    # ... tiled GEMM with fused dequant ...
+
+@torch.no_grad()
+def run(
+    routing_logits, routing_bias,
+    hidden_states, hidden_states_scale,
+    gemm1_weights, gemm1_weights_scale,
+    gemm2_weights, gemm2_weights_scale,
+    local_expert_offset, routed_scaling_factor,
+):
+    # 1. Routing (fused Triton kernel preferred over PyTorch ops)
+    # 2. Build expert dispatch (vectorized GPU ops, no Python loops)
+    # 3. GEMM1: custom Triton kernel
+    # 4. SwiGLU + dynamic FP16 quantization (standalone kernel)
+    # 5. GEMM2: FP16 tensor core kernel with scale correction in epilogue
+    # 6. Weighted scatter-add
+    # return output.to(torch.bfloat16)
+    ...
+```
+
+===== Example End =====
+
+Now, provide your answer below:

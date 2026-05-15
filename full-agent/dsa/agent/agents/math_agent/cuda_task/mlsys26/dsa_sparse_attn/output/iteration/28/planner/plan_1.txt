@@ -1,0 +1,16 @@
+Plan 1: Reducer-Native Workspace Layout (Isolated A/B Change)
+
+Variables X: Layout of O_tmp for split-K path. Change from [T,S,16,512] to [T,16,S,512] so the reducer's inner loop over s reads contiguous memory per (t,h).
+Constraints C: All math unchanged. Kernels produce identical FP32 partial states. Reducer reads float4 packs with stride = 512 floats instead of stride = 16*512 floats across s.
+Objective f(X): Reduce reducer memory traffic latency by maximizing L2/L1 cache hit rate and coalescing.
+
+Solver Strategy: Deterministic code transformation. Compute-kernel write indexing and reduce-kernel read indexing both change consistently.
+- Compute kernel writes: O_tmp[t*16*S*512 + h*S*512 + s*512 + d] (instead of t*S*16*512 + s*16*512 + h*512 + d)
+- Reduce kernel reads: same base, iterating s contiguous per (t,h,d_idx).
+
+Validity Mechanism: Both producer and consumer use identical flattened indexing helpers. Algorithmic math is unchanged (online-softmax partial state merge). Correctness guaranteed by equivalence of layout transform.
+
+Why: The best-scoring iteration 20 achieved 12.63x by collapsing reducer shared memory usage. The next high-leverage untested lever is the layout. Reducer currently strides 32KB between consecutive s reads (16*512*4 bytes) — catastrophic for cache. Reducer-native layout strides 2KB. Expected meaningful gain with minimal risk.
+
+Advantages: Minimal code change; math unchanged; guaranteed correctness; directly targets documented unresolved bottleneck.
+Disadvantages: Compute kernel write pattern changes; need to verify alignment; may cause minor compute regression (unlikely).

@@ -1,0 +1,19 @@
+**Mathematical Formulation**:
+- **Variables ($X$)**: The unroll factor $U$, vectorization width $W$ (float, float2, float4), and the number of warps per block $W_B$.
+- **Constraints ($C$)**: 
+  1. $K$ dimension must be fully reduced.
+  2. The state tensor update $\Delta S = g \cdot S + dv \cdot k$ must use exact FP32 Fused Multiply-Add (FMA) instructions.
+- **Objective ($f(X)$)**: Minimize the synchronization overhead (barrier count) while maximizing instruction-level parallelism (ILP).
+
+**Solver Strategy**: 
+- **Multi-Phase Architecture (Structure vs. Parameters)**: 
+  - *Phase 1 (Structure)*: The kernel is structurally divided into a "Head-Level Precomputation" phase and a "V-Row Update" phase.
+  - *Phase 2 (Parameters)*: We use runtime dynamic loops (e.g., `for (int k = tx; k < K; k += blockDim.x)`) rather than fixed `#pragma unroll 4`. The "solver" is the NVCC compiler's loop optimizer, which we guide using `#pragma unroll` without a fixed numerical bound where safe.
+
+**Validity Mechanism**: 
+- **Reduction Safety Valve**: Warp reductions for arbitrary $K$ require careful handling of non-power-of-2 sizes. We implement a mathematically exact reduction utility using CUB (`cub::WarpReduce`) or a padded shared memory reduction. This guarantees that the dot products $qk\_dot$ and $qh$ are computed with exact precision regardless of $K$, preventing precision drift or out-of-bounds warp shuffles.
+
+**Why this solution?**:
+- **Expected Performance**: Excellent, as it retains the parent's core FMA architecture but swaps rigid unrolls for flexible CUB/dynamic loops.
+- **Advantages**: Uses standard CUDA library constructs (CUB) for mathematically robust reductions.
+- **Disadvantages**: CUB reductions may introduce slight overhead compared to the raw `__shfl_down_sync` tree used in the parent.

@@ -1,0 +1,35 @@
+### Outline 2: Hybrid Triton Grouped GEMM with Two-Level Safety Fallback and Exact Masked Bounds
+
+**Mathematical Formulation**
+- **Variables (X):**
+  - `tok`, `exp`, `offs`: CSR dispatch state.
+  - `G1`: grouped expert-batch output of GEMM1.
+  - `Oe`: grouped expert-batch output before scatter.
+  - Triton tile meta-parameters `BM, BN, BK, warps, stages`.
+- **Constraints (C):**
+  - Expert partition correctness: for every dispatched row `r`, row belongs to exactly one local expert bucket determined by sorted expert ids.
+  - Kernel launch domain must satisfy `pid_m < ceil(Tk/BM)` per expert and `pid_n < ceil(N/BN)`.
+  - All loads/stores beyond logical bounds must be masked.
+  - For GEMM1, activation scales indexed by original token id and `k_block`; for GEMM2, weight scales indexed by output block and `k_block`.
+  - Intermediate buffers must be zero-initialized or fully written.
+- **Objective (f(X)):**
+  - Minimize latency under exact routing and correct block-scale semantics.
+
+**Solver Strategy**
+- Deterministic hierarchical solver:
+  1. Exact vectorized routing and dispatch in PyTorch.
+  2. Primary execution path: Triton grouped GEMM1 and grouped GEMM2.
+  3. Secondary repair path: if expert token counts are small, irregular, or a debug condition is hit, switch that expert to safe PyTorch matmul fallback.
+  4. Use Triton autotune over a finite config set as a deterministic search over tile parameters.
+- This acts as a mixed discrete optimizer over backend choice per expert.
+
+**Validity Mechanism**
+- Introduce a repair function that recomputes any suspect expert block with a reference-safe path when `Tk < threshold`, when `Tk` is not aligned to tile size, or when backend support is missing.
+- Use exact launch grids based on `Tk_total`, not global `T`, for grouped outputs to avoid partially unwritten rows.
+- Force all pointer arithmetic in Triton to int64 before stride multiplication.
+- Add explicit `n_mask` and `k_mask` handling in kernels, even when dimensions are multiples of 128, to prevent undefined behavior during future config changes.
+
+**Why this solution?**
+- **Expected performance improvement:** could preserve most of Triton speed while fixing structural correctness bugs through a surgical fallback.
+- **Advantages:** balances speed and safety; avoids all-or-nothing dependence on custom kernels; likely stronger than parent if bug is only on edge experts/small Tk.
+- **Disadvantages:** more code complexity; fallback branching may add overhead; still relies on custom Triton correctness in the common path.

@@ -1,0 +1,19 @@
+**1. Executive Summary:**
+This iteration was a regression because an attempt to vectorize global memory stores via shared memory transposition failed to correctly align the `uint4` memory pointers in the high-workload kernel, severely compromising correctness and yielding a significant performance penalty compared to its sibling.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   `**Sibling Rank:**` 2 out of 2 children. Top sibling score: 4.41.
+*   `**Score Delta:**` From parent (4.51) to child (4.27).
+*   `**Key Change:**` Implemented a shared memory transposition strategy in both compute kernels to convert strided `float2` register values into perfectly coalesced `float4` and `uint4` global memory stores.
+*   `**Core Metrics:**` Numerical correctness dropped catastrophically (max relative error skyrocketed from 0.139 to 0.869), while kernel latency showed a minor, misleading decrease (0.046ms to 0.045ms) due to the faulty output logic.
+
+**3. Strategic Analysis (The "So What?"):**
+*   `**Root Cause:**` The failure lies entirely in the execution of the plan within `dsa_forward_kernel`. The pointer math for the 128-bit store (`int base_u4_idx = (t * 16 * 512) / 8;`) failed to account for the block and thread offsets (`h` and `tid`), effectively causing all warps to overwrite the same block of memory and destroying the output data. 
+*   `**Key Insight:**` While vectorizing global memory stores is a valid theoretical optimization, utilizing a shared memory staging area introduces immense complexity in address calculation. The sibling solution proved that modifying the `split_k` path with this exact transposition logic bloats instruction count without improving latency.
+*   `**Identified Risk:**` Aggressively packing data into `uint4` or `float4` types via raw pointer casting (`*reinterpret_cast<uint4*>`) is extremely fragile in CUDA. If the base pointer is not strictly 16-byte aligned, or if the offset math is slightly off, it will cause silent data corruption or illegal memory access errors.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   `Warn`: Immediately abandon the shared memory transposition strategy for vectorizing outputs. The address calculation complexity and instruction bloat outweigh the theoretical benefits of 128-bit stores for this specific memory access pattern.
+*   `Recommend Stripping`: Discard this child solution entirely. Revert to the parent baseline (or the top sibling) where output writing is stable and numerically correct.
+*   `Recommend Fusion`: Salvage the warp-reduction logic (`__shfl_down_sync`) implemented in the sibling solution's `split_k_reduce_kernel`, as it demonstrated a concrete latency reduction without compromising correctness.
+*   `Recommend Exploration`: Shift the optimization focus away from the output staging pipeline. Instead, target the inner loop of `dsa_forward_kernel` (the high-workload path). Explore using `int4` vectorized loads (via `__ldg` or direct casting) for the *input* `q_nope` and `q_pe` tensors to maximize read bandwidth, which is a safer and potentially higher-yield optimization.

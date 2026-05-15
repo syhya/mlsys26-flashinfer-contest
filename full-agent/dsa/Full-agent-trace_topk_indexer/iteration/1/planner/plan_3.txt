@@ -1,0 +1,14 @@
+Outline 3: Global Atomic Thresholding
+
+Mathematical Formulation:
+- Variables (X): Global threshold T_b for each batch.
+- Objective (f(X)): Find T_b such that count(S_{b, p, t} > T_b) >= K.
+
+Solver Strategy:
+- Multi-pass binary search for T_b, followed by atomic insertion of valid indices.
+
+Validity Mechanism:
+- Strict binary search bounds ensure exactly K elements are found.
+
+Why this solution?:
+- Can be fast for skewed distributions. Disadvantage: Multi-pass over memory is slow, and performance depends on data distribution (variance/luck).

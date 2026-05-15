@@ -1,0 +1,6 @@
+Plan 3: Split-K GEMM for decode (very small T)
+- Introduce K-split with atomic add accumulation for T<=4 workloads
+- Keep existing kernels for larger T
+- Advantages: may help decode regime
+- Disadvantages: atomic f32 add overhead; complex correctness; benchmark weights this little
+- Expected: ~12.3x (score ~1.23)

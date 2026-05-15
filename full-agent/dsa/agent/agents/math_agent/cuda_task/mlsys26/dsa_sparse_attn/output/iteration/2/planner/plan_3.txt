@@ -1,0 +1,17 @@
+### Outline 3: Warp-Specialized Pipeline and Multi-Start Dispatch
+**Mathematical Formulation:**
+* **Variables:** Number of producer warps ($W_p$), number of consumer warps ($W_c$).
+* **Constraints:** $W_p + W_c \le 16$ (total warps per block). Shared memory limit $\le 75$ KB.
+* **Objective:** Overlap global memory loads with tensor core / dense compute.
+
+**Solver Strategy:**
+* **Algorithm:** Asynchronous Data Movement (`cp.async`) and Pipeline.
+* Divide the 16 warps per block into 4 Producer warps (loading $K$ cache) and 12 Consumer warps (computing $QK^T$).
+* Use `cp.async.cg.shared.global` to bypass registers and load directly into shared memory.
+
+**Validity Mechanism:**
+* **Synchronization:** Use `cuda::pipeline` or `__syncthreads()` with carefully orchestrated shared memory double buffering to ensure data validity.
+
+**Why this solution?:**
+* **Advantages:** Excellent for large batches where memory latency dominates.
+* **Disadvantages:** Very complex to implement correctly in C++ without CuTe. Does NOT solve the "small batch size" problem (still only 1 block per token). It will not fix the 0.05 waves per SM issue highlighted by NCU.

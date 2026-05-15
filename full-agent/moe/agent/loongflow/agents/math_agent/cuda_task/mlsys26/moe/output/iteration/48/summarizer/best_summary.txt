@@ -1,0 +1,19 @@
+**1. Executive Summary:**
+This iteration was a modest recovery because it removed part of the prior branch’s atomic-scatter penalty while still inheriting the same atomic GEMM2 design, performing 1st out of 1 siblings.
+
+**2. Data-Driven Findings (Facts ONLY):**
+- **Sibling Rank:** 1 out of 1 children of parent `c9929ab3`. Top sibling score: 1.4554.
+- **Score Delta:** From parent **1.4395** to child **1.4554**.
+- **Key Change:** The generation plan proposed a worklist-based GEMM2 dispatch with parent-style non-atomic aggregation, but the implemented child code remained structurally the same as the parent’s atomic-scatter GEMM2 path (`tl.atomic_add` into global output with `reset_to_zero=["OutGlobal_ptr"]`).
+- **Core Metrics:** Correctness 1.0; speedup 14.5541x; kernel latency 1.5895 ms; reference latency 16.7324 ms; eval time 45.56 s; max absolute error 32768.0; total workloads 19.
+
+**3. Strategic Analysis (The "So What?"):**
+- **Root Cause:** The outcome was driven more by **execution mismatch with the plan** than by plan quality. The plan targeted a new worklist GEMM2 scheduler and removal of wasted CTAs, but the submitted code did not implement that structural change. The measured gain therefore likely came from benchmark variance or minor environmental effects rather than the intended optimization.
+- **Key Insight:** A branch can improve numerically in score without validating its core hypothesis. Here, the important lesson is that the atomic-scatter design is still viable enough to pass correctness and slightly recover performance, but there is no evidence yet that worklist dispatch was tested at all. The salvageable concept is the **planner’s diagnosis**: GEMM2 rectangular expert-major launch likely still contains avoidable empty CTA overhead and remains a strong next target.
+- **Identified Risk:** The biggest trap is **false attribution**. If this child is treated as proof that the worklist idea works, future evolution will optimize around a change that was never actually present. A second risk is continuing to propagate `tl.atomic_add` + `reset_to_zero` on the final output buffer, which was already identified as a likely structural drag.
+
+**4. Actionable Guidance (The "What's Next?"):**
+- **Recommend Stripping:** Strip this child’s reported improvement from its stated rationale. Treat it as an atomic-scatter baseline variant, not as validation of worklist GEMM2.
+- **Recommend Exploration:** Execute the planner’s intended experiment for real: add a separate `worklist_gemm2_kernel` with compact `(expert, tile_m)` dispatch while restoring the parent-style scratch-output + `index_add_` epilogue. This is the cleanest way to isolate whether empty-CTA elimination helps.
+- **Recommend Fusion:** Fuse the planner’s worklist dispatch idea with the stronger ancestor `302d2eb3` rather than this branch. That combines a cleaner non-atomic epilogue with the most promising unexplored GEMM2 scheduling change.
+- **Warn:** Do not interpret small score gains on this branch as evidence that `tl.atomic_add` into `[T, H]` is competitive. Until a real A/B comparison is run with identical code except dispatch topology, this branch remains confounded by measurement noise and workload variation.

@@ -1,0 +1,32 @@
+Outline 2: Triton grouped GEMM with fused dequant and conservative FP32 GEMM2
+
+Mathematical Formulation
+- Variables (X):
+  - X_route, X_dispatch as in Outline 1.
+  - X_kernel1: Triton grouped GEMM1 tile schedule over (expert, m-tile, n-tile).
+  - X_kernel2: Triton grouped GEMM2 tile schedule over (expert, m-tile, n-tile).
+  - X_scales: per-k-block hidden/input and weight block scales loaded by block index.
+- Constraints (C):
+  - BLOCK_K = 128 exactly.
+  - int64 pointer arithmetic for expert/row offsets.
+  - GEMM1 may use FP8 tl.dot with scale-after-dot if both operands remain fp8.
+  - GEMM2 must prioritize correctness: do NOT dynamically requantize SwiGLU activations to fp8; keep activations in fp32/bf16 and multiply with dequantized fp32 weights or direct fp32 loads.
+  - Hidden state scale lookup uses original token indices from sorted_tokens.
+- Objective f(X): reduce runtime while eliminating the parent's large numerical error and potential out-of-bounds/launch inefficiency.
+
+Solver Strategy
+- Deterministic tiled linear algebra with autotune over a discrete config set.
+- Search = Triton autotune over configs {(BM,BN,num_warps,num_stages)} with no randomness.
+
+Validity Mechanism
+- Safety valve is a strict fallback path:
+  - If Triton kernel launch fails or produces unsupported dtype combinations, use PyTorch eager dequantized per-expert matmul for GEMM2.
+  - All intermediates zero-initialized.
+  - Launch grids based on Tk_total / expert_counts, never T, to avoid excess masked tiles.
+  - Optional expert loop in Python only over 32 experts, which is bounded and safe.
+- Guarantees exact routing and valid output even if optimized kernel underperforms.
+
+Why this solution?
+- Expected performance improvement: better than baseline due to grouped GEMM1 and reduced materialization; safer than parent because it removes destructive dynamic fp8 quantization.
+- Advantages: balances speed and correctness.
+- Disadvantages: Triton complexity and possible residual kernel bugs.

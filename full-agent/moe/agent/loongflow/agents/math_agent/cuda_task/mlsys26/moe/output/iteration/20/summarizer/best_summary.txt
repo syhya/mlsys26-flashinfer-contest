@@ -1,0 +1,20 @@
+**1. Executive Summary:**
+This iteration was a modest regression because it only micro-optimized the parent’s exact eager FP32 oracle path by preexpanding scales and simplifying dispatch, while preserving the same serial per-expert dequantize-and-matmul architecture, performing 1st out of 1 siblings but below its parent.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* `**Sibling Rank:**` 1 out of 1 children. Top sibling score: 13.58%.
+* `**Score Delta:**` From parent (15.22%) to child (13.58%).
+* `**Key Change:**` Removed helper abstraction and chunked GEMM decomposition, and instead preexpanded all local experts’ GEMM1/GEMM2 scale tensors once up front while keeping per-expert FP32 dequantization of full weight matrices inside a Python loop.
+* `**Core Metrics:**` Correctness: 1.0; speedup: 1.36x; kernel execution time: 14.940ms; reference time: 18.539ms; parent kernel time: 14.543ms; eval time: 151.59s; benchmark max absolute error: 2048.0; benchmark max relative error: 0.9999994039535522; total workloads: 19.
+
+**3. Strategic Analysis (The "So What?"):**
+* `**Root Cause:**` The outcome was driven primarily by plan quality. The plan called for a validation-gated hybrid with stagewise reintroduction of acceleration, but execution did not realize that strategy; instead it stayed inside the same safe eager-PyTorch architecture and made only local cache/layout simplifications. The result is a small implementation cleanup, not a meaningful architectural advance.
+* `**Key Insight:**` Preexpanding block scales and caching unique-token activation dequantization can trim some overhead, but these are second-order optimizations. They do not materially change fitness when the dominant cost remains full FP32 dequantized GEMMs and serial expert processing. The salvageable concept is that activation reuse across repeated routed tokens remains valuable, but it must be embedded in a real high-throughput backend to matter.
+* `**Identified Risk:**` The biggest trap is incremental polishing of the oracle baseline. This lineage is converging on a local optimum where correctness-preserving PyTorch refactors shuffle overhead around without addressing the missing FP8/Tensor Core execution path. Another risk is over-trusting evaluator correctness summaries despite persistent artifact-level large absolute/relative errors.
+
+**4. Actionable Guidance (The "What's Next?"):**
+* `Recommend Fusion:` Fuse this child’s two strongest reusable components—unique-token activation dequant cache and one-time scale expansion logic—into the fastest previously credible lineage, rather than evolving them further inside a pure eager FP32 loop.
+* `Recommend Exploration:` Run a strict stage-isolation branch where routing/dispatch remains exactly as here, GEMM1 is swapped to a native FP8 backend or narrowly scoped Triton kernel, and GEMM2 stays on the safe oracle path. This is the highest-value next experiment because GEMM1 is the natural FP8 entry point.
+* `Recommend Exploration:` In a parallel branch, keep GEMM1 oracle-exact but replace only GEMM2 plus weighted scatter with a fused backend. Comparing these two branches will localize whether the main unrealized speed opportunity is pre- or post-SwiGLU.
+* `Recommend Stripping:` Strip the validation-gated hybrid rhetoric from future plans unless it is actually implemented. The current child shows that conceptual safety frameworks add no value if execution collapses back to the same all-safe architecture.
+* `Warn:` Do not continue hill-climbing within this exact family of per-expert FP32 dequantized matmuls. Population evidence now shows this branch produces only marginal latency variation around a clearly inferior architecture, while the island’s stronger lineage came from more aggressive grouped/FP8 execution.

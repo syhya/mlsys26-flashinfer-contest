@@ -1,0 +1,30 @@
+Outline 2: Small-workload persistent multi-block decomposition with exact merge reduction
+
+Mathematical Formulation:
+- Variables X:
+  1. Number of partial partitions P over the 2048 sparse slots.
+  2. Head-group size hg and block shape (32,hg).
+  3. Workspace layout for partial states: O_tmp[t,h,p,d], m_tmp[t,h,p], l_tmp[t,h,p].
+  4. Dispatch threshold tau_small selecting this path only for low token count.
+- Constraints C:
+  1. Each partial partition computes an exact online-softmax summary state (m_p,l_p,O_p) over its assigned valid subset.
+  2. Final state is exact merge: m=max(m_a,m_b), l=l_a*exp(m_a-m)+l_b*exp(m_b-m), O=O_a*exp(m_a-m)+O_b*exp(m_b-m).
+  3. Invalid indices map to neutral partial state m=-INF,l=0,O=0.
+  4. FP32 accumulation only; BF16 final store only; base-2 lse required.
+- Objective f(X): maximize occupancy for tiny num_tokens while preserving exactness.
+
+Solver Strategy:
+- Deterministic decomposition search over a small finite set: P in {8,16,32,64}, hg in {4,8}.
+- Select one robust static configuration in code; no runtime autotune.
+- Reduction is an exact associative-like merge over partial states, akin dynamic programming over chunks.
+
+Validity Mechanism:
+- Compute kernels never normalize partial outputs; they only emit exact summary states.
+- Final reduction kernel merges all partials exactly, then normalizes once.
+- Post-processing safety valve handles empty rows and invalid partitions deterministically.
+- If small path shape assumptions fail, dispatch to the parent large fused path.
+
+Why this solution?
+- Advantages: directly targets the current weak regime (tiny num_tokens under-occupancy), mathematically exact, decouples structure (partitioning) from parameter accumulation.
+- Expected improvement: more blocks for num_tokens in {1..32}, better SM occupancy than the parent split-K path.
+- Disadvantages: introduces workspace and a second kernel launch; benefit may be limited because benchmark overall is already extremely fast.

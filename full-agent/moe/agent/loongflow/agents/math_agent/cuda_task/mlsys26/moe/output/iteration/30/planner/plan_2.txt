@@ -1,0 +1,58 @@
+## Plan 2: Persistent Kernel with GEMM1+GEMM2 Kernel-Level Fusion via SRAM Staging
+
+### Mathematical Formulation
+
+**Variables (X):**
+- Fuse GEMM1 output tiles directly into GEMM2 computation without writing to HBM
+- Each expert's computation is fully contained in a persistent kernel
+- SRAM stages: GEMM1 tile → SwiGLU in registers → GEMM2 input tile
+
+**Constraints (C):**
+1. SRAM capacity: 228KB per SM on B200
+   - GEMM1 output tile [BLOCK_M × 4096] f32 = BLOCK_M × 4096 × 4 bytes
+   - For BLOCK_M=32: 32 × 4096 × 4 = 512KB — EXCEEDS SRAM limit
+   - For BLOCK_M=16: 16 × 4096 × 4 = 256KB — marginally too large
+   - INFEASIBLE: Cannot stage the full G1 tile in SRAM
+2. Alternative: sequential processing with register tiling
+   - Process GEMM2's K-loop in tiles aligned with GEMM1's output tile
+   - This requires BLOCK_K_GEMM2 = BLOCK_N_GEMM1 = 128
+   - Feasible for [BLOCK_M=16, tile=16×128] float32 = 8KB per tile
+
+**Solver Strategy:**
+A two-stage Triton kernel that processes one expert at a time:
+- Stage 1: Compute GEMM1 output tile for [BLOCK_M, BLOCK_K2=128] rows
+- Stage 2: Apply SwiGLU in registers, quantize to FP8, dot with W2 tile
+- K1 outer loop (H=7168) and K2 outer loop (I=2048) are INTERLEAVED
+
+Actually this creates a [H/BLOCK_K1 × I/BLOCK_K2] nested loop which is 56 × 16 = 896 iterations per tile — unacceptably long.
+
+### Why This Approach Is Problematic
+
+1. SRAM requirements for fused kernel exceed B200 per-SM SRAM
+2. The nested loop structure creates too many register variables
+3. GEMM1 accumulates across K=7168 (56 blocks) before producing C[m,k]
+   → Cannot feed partial GEMM1 results directly into GEMM2 without full row materialization
+4. The tile sizes that make GEMM1 fast (BLOCK_M=128) make GEMM2 staging infeasible
+
+### Validity Mechanism (Corrected Alternative)
+
+Instead of full fusion, use BLOCK_K fusion:
+- For a single [BLOCK_M, I=2048] row of G1:
+  - GEMM1 writes one row-chunk to G1 via normal path
+  - GEMM2 reads the entire I dimension (16 tiles of 128)
+  - The HBM traffic for G1 is Tk × 4096 × 4 bytes (write) + Tk × 2048 × 4 bytes (read)
+  - Not reducible without full mega-kernel fusion
+
+**Conclusion:** This plan is INFEASIBLE due to SRAM constraints and register pressure.
+Mark as REJECTED. Do not implement.
+
+### Why This Solution Is Not Selected
+
+**Advantages:** Would eliminate G1 HBM write+read (saves ~Tk × 32KB bandwidth)
+**Disadvantages:**
+1. SRAM constraint violation makes it infeasible
+2. Would require completely new kernel architecture
+3. High risk of correctness failures
+4. Expected compilation time > 300s
+
+**Expected Performance:** Unknown / REJECTED

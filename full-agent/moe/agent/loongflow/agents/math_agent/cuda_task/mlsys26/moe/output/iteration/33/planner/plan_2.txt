@@ -1,0 +1,12 @@
+PLAN 2: Adopt 8e3c776e verbatim + Split-K with atomic accumulation for GEMM1 small-T (decode) workloads.
+
+Mathematical Formulation:
+- Variables: K_SPLITS in {2,4,8} for GEMM1 when MAX_TK <= 8.
+- Constraints: split-K partial sums must atomic-add into G1 with FP32 accumulator; correctness preserved by associativity.
+- Objective: minimize average kernel time across 19 workloads (decode-heavy ones benefit most).
+
+Solver: Programmatic dispatch in run() — choose Split-K kernel when max_count<=8, else default.
+
+Validity: New Split-K kernel runs only on small-T path; default kernel handles all other shapes (8e3c776e behavior preserved).
+
+Why: Targets the small-T regime where SM occupancy is the bottleneck. Risk: atomic ops + FP8 accumulation interaction needs care. Expected: 16-17x if decode workloads dominate avg.

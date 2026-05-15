@@ -1,0 +1,17 @@
+**1. Executive Summary:**
+This iteration was a structural regression because the attempt to expand fast-path coverage via generalized template parameters and complex vectorization logic broke the compiler's ability to perfectly unroll and optimize, leading to lower performance relative to the parent.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   **Sibling Rank:** 2 out of 2 children. Top sibling score: 814.94%.
+*   **Score Delta:** From parent (827.21%) to child (811.48%).
+*   **Key Change:** Replaced the highly specific, hardcoded fast-path kernel with a set of generalized templates parameterized by vector sizes (`K_VEC`) and dynamic dimensions (`num_v_heads`, `num_q_heads`, `V`), coupled with a complex `switch` statement for runtime dispatch.
+*   **Core Metrics:** Execution time slightly increased (0.008407ms vs parent's 0.008389ms). The speedup factor dropped, partly due to the slight latency increase and partly due to baseline variance. Correctness was maintained at 1.0.
+
+**3. Strategic Analysis (The "So What?"):**
+*   **Root Cause:** The regression is primarily due to the loss of hardcoded, compile-time constants (like `V=128`, `NUM_V_HEADS=8`, `NUM_Q_HEADS=4`) in the fast-path template. By moving these to runtime arguments to save binary size and increase generality, the `nvcc` compiler lost the ability to perform aggressive, shape-specific optimizations (such as perfect register allocation and unrolling) that the parent benefited from. Additionally, the complex `VecTypes` struct overhead may have impacted instruction density.
+*   **Key Insight:** In CUDA, there is a strict trade-off between generality (passing dimensions at runtime) and absolute peak performance (baking dimensions into template arguments at compile time). For a memory-bound, highly tuned kernel, hardcoding the exact dimensions into the template is necessary to achieve the absolute lowest latency.
+*   **Identified Risk:** Attempting to build a "one-size-fits-all" fast-path by parameterizing dimensions reduces the compiler's optimization ceiling. The complexity of the template metaprogramming (`VecTypes`, `if constexpr`) added overhead without providing a corresponding performance benefit for the primary benchmark shape.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   **Recommend Stripping:** Revert the generalized `gdn_decode_kernel_fast` and its associated `VecTypes` complexity. The attempt to make the fast-path dynamic for `V` and `H` degraded peak performance.
+*   **Recommend Fusion:** If expanding the "catchment area" for other `K` dimensions is desired, do so by creating explicit, fully hardcoded templates (like the parent's `gdn_decode_kernel_fast<8, 4, 128, 128>`) for specific target shapes (e.g., `<..., 64>`, `<..., 256>`), rather than trying to make a single template flexible at runtime. Maintain the parent's pattern of strict compile-time constants for the absolute fast-path.

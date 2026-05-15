@@ -1,0 +1,43 @@
+### Plan 2: Hybrid Triton FP8 GEMM with Staged Validation
+
+**Mathematical Formulation:**
+
+Variables:
+- Same as Plan 1, plus:
+- tile_acc[BM, BN] ∈ R^{FP32}: per-tile accumulator in Triton kernel
+- block_scale_A[k//128], block_scale_W[n//128, k//128]: FP8 block scales
+
+Constraints:
+1. Exact routing topology (same as Plan 1)
+2. FP8 tensor core dot: tl.dot(fp8_A, fp8_W, out_dtype=tl.float32) * scale_A * scale_W
+3. Pointer arithmetic must use int64 to avoid overflow
+4. Masked stores must handle partial tiles correctly
+
+Objective:
+Same as Plan 1
+
+**Solver Strategy:**
+
+1. Routing & dispatch: exact PyTorch (same as Plan 1)
+2. GEMM1: custom Triton kernel with:
+   - Autotuned tile sizes (BM=64/128, BN=128, BK=128)
+   - FP8 tensor core dot with post-multiply scaling
+   - Indirect A-scale lookup via original token index
+3. SwiGLU: fused Triton kernel or standalone
+4. GEMM2: custom Triton kernel with:
+   - Fused SwiGLU input loading
+   - FP8 tensor core dot
+   - Fused routing weight multiply
+5. Accumulation: atomic add or torch.index_add_
+
+**Validity Mechanism:**
+
+1. Stage-by-stage validation: compare each expert's output against parent oracle
+2. Pointer overflow check: assert all offsets fit in int64
+3. Tile boundary check: verify masked stores don't corrupt adjacent memory
+4. Fallback: if any expert fails validation, use safe dequant path for that expert only
+
+**Why this solution:**
+- Advantages: Maximum performance potential; full control over memory access patterns; can fuse operations
+- Disadvantages: Complex implementation; risk of subtle indexing bugs; requires extensive testing
+- Expected improvement: 8-12x speedup if implemented correctly, but high risk of correctness failure

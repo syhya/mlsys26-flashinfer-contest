@@ -1,0 +1,72 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_510",
+        "solution_file_path": "output/b91c6b41-a90d-49c2-a8fe-56b8ab92fabe/17/executor/0_0/solution_510.py",
+        "evaluation_file_path": "output/b91c6b41-a90d-49c2-a8fe-56b8ab92fabe/17/executor/0_0/evaluation_510.json",
+        "score": 11.273848786377576,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 112.74x (ref: 2.922ms, kernel: 0.026ms)\",\n  \"score\": 11.273848786377576,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 112.73848786377575,\n    \"exec_time_ms\": 0.026298434782608692,\n    \"baseline_time_ms\": 2.922296492753623,\n    \"compile_time\": 0.0,\n    \"eval_time\": 179.34966278076172\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64\",\n    \"execution_time\": \"179.35s\",\n    \"kernel_latency_ms\": \"0.026ms\",\n    \"reference_latency_ms\": \"2.922ms\",\n    \"speedup\": \"112.74x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 2.922296492753623,\n      \"max_relative_error\": 2.0621767044067383,\n      \"max_absolute_error\": 0.015625,\n      \"total_workloads\": 23\n    },\n    \"correctness_check\": \"Passed\",\n    \"ncu_profile\": {\n      \"ncu_set\": \"full\",\n      \"ncu_page\": \"details\",\n      \"ncu_kernel_name\": null,\n      \"rows\": [\n        {\n          \"workload_uuid\": \"0c23b10c7b7645719517828c12eaa1d2\",\n          \"axes\": {\n            \"num_tokens\": 1,\n            \"num_pages\": 8462\n          },\n          \"output\": \"==PROF== Connected to process 1332 (/opt/conda/envs/py312/bin/python3.12)\\n\\n==ERROR== An error was reported by the counter measurement library:\\n==ERROR== For more information, see /tmp/nsight-compute-a7b7-f8ce.log\\n==ERROR== Failed to initialize the profiler: LibraryNotLoaded. Check that a compatible driver library is loaded.\\n==ERROR== For more information, see /tmp/nsight-compute-a7b7-f8ce.log\\n==PROF== Trying to shutdown target application\\n==ERROR== The application returned an error code (9).\\n\"\n        }\n      ]\n    }\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_ebd",
+        "solution_file_path": "output/b91c6b41-a90d-49c2-a8fe-56b8ab92fabe/17/executor/0_0/solution_ebd.py",
+        "evaluation_file_path": "output/b91c6b41-a90d-49c2-a8fe-56b8ab92fabe/17/executor/0_0/evaluation_ebd.json",
+        "score": 8.736802601300557,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 87.37x (ref: 3.062ms, kernel: 0.035ms)\",\n  \"score\": 8.736802601300557,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 87.36802601300556,\n    \"exec_time_ms\": 0.0347451884057971,\n    \"baseline_time_ms\": 3.0616019855072465,\n    \"compile_time\": 0.0,\n    \"eval_time\": 207.28671193122864\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64\",\n    \"execution_time\": \"207.29s\",\n    \"kernel_latency_ms\": \"0.035ms\",\n    \"reference_latency_ms\": \"3.062ms\",\n    \"speedup\": \"87.37x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 3.0616019855072465,\n      \"max_relative_error\": 1.3726805448532104,\n      \"max_absolute_error\": 0.0078125,\n      \"total_workloads\": 23\n    },\n    \"correctness_check\": \"Passed\",\n    \"ncu_profile\": {\n      \"ncu_set\": \"full\",\n      \"ncu_page\": \"details\",\n      \"ncu_kernel_name\": null,\n      \"rows\": [\n        {\n          \"workload_uuid\": \"0c23b10c7b7645719517828c12eaa1d2\",\n          \"axes\": {\n            \"num_tokens\": 1,\n            \"num_pages\": 8462\n          },\n          \"output\": \"==PROF== Connected to process 1283 (/opt/conda/envs/py312/bin/python3.12)\\n\\n==ERROR== An error was reported by the counter measurement library:\\n==ERROR== For more information, see /tmp/nsight-compute-9bd1-d6ed.log\\n==ERROR== Failed to initialize the profiler: LibraryNotLoaded. Check that a compatible driver library is loaded.\\n==ERROR== For more information, see /tmp/nsight-compute-9bd1-d6ed.log\\n==PROF== Trying to shutdown target application\\n==ERROR== The application returned an error code (9).\\n\"\n        }\n      ]\n    }\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  },
+  {
+    "round": 1,
+    "candidates": [
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_4cb",
+        "solution_file_path": "output/b91c6b41-a90d-49c2-a8fe-56b8ab92fabe/17/executor/1_0/solution_4cb.py",
+        "evaluation_file_path": "output/b91c6b41-a90d-49c2-a8fe-56b8ab92fabe/17/executor/1_0/evaluation_4cb.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: INCORRECT_NUMERICAL: [1/2] /usr/local/cuda/bin/nvcc -MD -MF kernel.cuda.o.d -DTORCH_EXTENSION_NAME=torch_agent_49b33eb8_982113 -DTORCH_API_INCLUDE_EXTENSION_H -I/root/.cache/flashinfer_bench/cache/torch/torch_agent_49b33eb8_982113 -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -isystem /opt/conda/envs/py312/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_100,code=compute_100 -gencode=arch=compute_100,code=sm_100 --compiler-options '-fPIC' -std=c++20 -c /root/.cache/flashinfer_bench/cache/torch/torch_agent_49b33eb8_982113/kernel.cu -o kernel.cuda.o \\n[2/2] c++ kernel.cuda.o -shared -L/opt/conda/envs/py312/lib/python3.12/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda/lib64 -lcudart -o torch_agent_49b33eb8_982113.so\\n\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 173.58884382247925\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64\",\n    \"execution_time\": \"173.59s\",\n    \"error\": \"INCORRECT_NUMERICAL: [1/2] /usr/local/cuda/bin/nvcc -MD -MF kernel.cuda.o.d -DTORCH_EXTENSION_NAME=torch_agent_49b33eb8_982113 -DTORCH_API_INCLUDE_EXTENSION_H -I/root/.cache/flashinfer_bench/cache/torch/torch_agent_49b33eb8_982113 -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -isystem /opt/conda/envs/py312/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_100,code=compute_100 -gencode=arch=compute_100,code=sm_100 --compiler-options '-fPIC' -std=c++20 -c /root/.cache/flashinfer_bench/cache/torch/torch_agent_49b33eb8_982113/kernel.cu -o kernel.cuda.o \\n[2/2] c++ kernel.cuda.o -shared -L/opt/conda/envs/py312/lib/python3.12/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda/lib64 -lcudart -o torch_agent_49b33eb8_982113.so\\n\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_c81",
+        "solution_file_path": "output/b91c6b41-a90d-49c2-a8fe-56b8ab92fabe/17/executor/1_0/solution_c81.py",
+        "evaluation_file_path": "output/b91c6b41-a90d-49c2-a8fe-56b8ab92fabe/17/executor/1_0/evaluation_c81.json",
+        "score": 10.610316191319509,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 106.10x (ref: 2.828ms, kernel: 0.026ms)\",\n  \"score\": 10.610316191319509,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 106.10316191319508,\n    \"exec_time_ms\": 0.026392021739130432,\n    \"baseline_time_ms\": 2.82752934057971,\n    \"compile_time\": 0.0,\n    \"eval_time\": 242.00195956230164\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64\",\n    \"execution_time\": \"242.00s\",\n    \"kernel_latency_ms\": \"0.026ms\",\n    \"reference_latency_ms\": \"2.828ms\",\n    \"speedup\": \"106.10x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 2.82752934057971,\n      \"max_relative_error\": 6.408249378204346,\n      \"max_absolute_error\": 0.0078125,\n      \"total_workloads\": 23\n    },\n    \"correctness_check\": \"Passed\",\n    \"ncu_profile\": {\n      \"ncu_set\": \"full\",\n      \"ncu_page\": \"details\",\n      \"ncu_kernel_name\": null,\n      \"rows\": [\n        {\n          \"workload_uuid\": \"0c23b10c7b7645719517828c12eaa1d2\",\n          \"axes\": {\n            \"num_tokens\": 1,\n            \"num_pages\": 8462\n          },\n          \"output\": \"==PROF== Connected to process 1559 (/opt/conda/envs/py312/bin/python3.12)\\n\\n==ERROR== An error was reported by the counter measurement library:\\n==ERROR== For more information, see /tmp/nsight-compute-5a52-c24b.log\\n==ERROR== Failed to initialize the profiler: LibraryNotLoaded. Check that a compatible driver library is loaded.\\n==ERROR== For more information, see /tmp/nsight-compute-5a52-c24b.log\\n==PROF== Trying to shutdown target application\\n==ERROR== The application returned an error code (9).\\n\"\n        }\n      ]\n    }\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_507",
+        "solution_file_path": "output/b91c6b41-a90d-49c2-a8fe-56b8ab92fabe/17/executor/1_1/solution_507.py",
+        "evaluation_file_path": "output/b91c6b41-a90d-49c2-a8fe-56b8ab92fabe/17/executor/1_1/evaluation_507.json",
+        "score": 8.47220150416479,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 84.72x (ref: 2.821ms, kernel: 0.033ms)\",\n  \"score\": 8.47220150416479,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 84.7220150416479,\n    \"exec_time_ms\": 0.033371717391304345,\n    \"baseline_time_ms\": 2.8209086376811596,\n    \"compile_time\": 0.0,\n    \"eval_time\": 310.13126039505005\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64\",\n    \"execution_time\": \"310.13s\",\n    \"kernel_latency_ms\": \"0.033ms\",\n    \"reference_latency_ms\": \"2.821ms\",\n    \"speedup\": \"84.72x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 2.8209086376811596,\n      \"max_relative_error\": 4.914523124694824,\n      \"max_absolute_error\": 0.0078125,\n      \"total_workloads\": 23\n    },\n    \"correctness_check\": \"Passed\",\n    \"ncu_profile\": {\n      \"ncu_set\": \"full\",\n      \"ncu_page\": \"details\",\n      \"ncu_kernel_name\": null,\n      \"rows\": [\n        {\n          \"workload_uuid\": \"0c23b10c7b7645719517828c12eaa1d2\",\n          \"axes\": {\n            \"num_tokens\": 1,\n            \"num_pages\": 8462\n          },\n          \"output\": \"==PROF== Connected to process 1467 (/opt/conda/envs/py312/bin/python3.12)\\n\\n==ERROR== An error was reported by the counter measurement library:\\n==ERROR== For more information, see /tmp/nsight-compute-b598-d8b5.log\\n==ERROR== Failed to initialize the profiler: LibraryNotLoaded. Check that a compatible driver library is loaded.\\n==ERROR== For more information, see /tmp/nsight-compute-b598-d8b5.log\\n==PROF== Trying to shutdown target application\\n==ERROR== The application returned an error code (9).\\n\"\n        }\n      ]\n    }\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_d7f",
+        "solution_file_path": "output/b91c6b41-a90d-49c2-a8fe-56b8ab92fabe/17/executor/1_1/solution_d7f.py",
+        "evaluation_file_path": "output/b91c6b41-a90d-49c2-a8fe-56b8ab92fabe/17/executor/1_1/evaluation_d7f.json",
+        "score": 11.691181851147016,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 116.91x (ref: 3.027ms, kernel: 0.026ms)\",\n  \"score\": 11.691181851147016,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 116.91181851147016,\n    \"exec_time_ms\": 0.026124659420289853,\n    \"baseline_time_ms\": 3.026548086956522,\n    \"compile_time\": 0.0,\n    \"eval_time\": 404.71312069892883\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64\",\n    \"execution_time\": \"404.71s\",\n    \"kernel_latency_ms\": \"0.026ms\",\n    \"reference_latency_ms\": \"3.027ms\",\n    \"speedup\": \"116.91x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 3.026548086956522,\n      \"max_relative_error\": 2.8901185989379883,\n      \"max_absolute_error\": 0.015625,\n      \"total_workloads\": 23\n    },\n    \"correctness_check\": \"Passed\",\n    \"ncu_profile\": {\n      \"ncu_set\": \"full\",\n      \"ncu_page\": \"details\",\n      \"ncu_kernel_name\": null,\n      \"rows\": [\n        {\n          \"workload_uuid\": \"0c23b10c7b7645719517828c12eaa1d2\",\n          \"axes\": {\n            \"num_tokens\": 1,\n            \"num_pages\": 8462\n          },\n          \"output\": \"==PROF== Connected to process 1430 (/opt/conda/envs/py312/bin/python3.12)\\n\\n==ERROR== An error was reported by the counter measurement library:\\n==ERROR== For more information, see /tmp/nsight-compute-0c2e-0943.log\\n==ERROR== Failed to initialize the profiler: LibraryNotLoaded. Check that a compatible driver library is loaded.\\n==ERROR== For more information, see /tmp/nsight-compute-0c2e-0943.log\\n==PROF== Trying to shutdown target application\\n==ERROR== The application returned an error code (9).\\n\"\n        }\n      ]\n    }\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

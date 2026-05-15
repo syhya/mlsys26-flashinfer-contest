@@ -1,0 +1,13 @@
+**Mathematical Formulation**:
+- Variables (X): Expert looping and matrix slicing.
+- Constraints (C): Exact FP32 accumulation.
+- Objective (f(X)): Maximize numerical correctness without Triton bugs.
+
+**Solver Strategy**:
+Sequential heuristic dispatch using native PyTorch `torch._scaled_mm` in a Python loop.
+
+**Validity Mechanism**:
+By completely relying on cuBLAS-backed `torch._scaled_mm`, we mathematically guarantee correctness and avoid any custom Triton memory out-of-bounds or casting bugs.
+
+**Why this solution?**:
+Bulletproof correctness, but high overhead due to serial Python loop dispatch on the GPU.

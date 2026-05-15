@@ -1,0 +1,43 @@
+### Plan 1: Native FP8 Backend with torch._scaled_mm and Exact Routing
+
+**Mathematical Formulation:**
+
+Variables:
+- topk_idx[t, j] ∈ {0..255}: selected expert indices for token t, slot j
+- topk_w[t, j] ∈ R: normalized routing weights
+- A_e ∈ FP8^{T_e × H}: gathered activation rows for expert e
+- W1_e ∈ FP8^{2I × H}: GEMM1 weight for expert e
+- W2_e ∈ FP8^{H × I}: GEMM2 weight for expert e
+- G1_e ∈ R^{T_e × 2I}: GEMM1 output (FP32 accumulation)
+- S_e ∈ R^{T_e × I}: SwiGLU output
+- Y_e ∈ R^{T_e × H}: GEMM2 output
+- Out ∈ R^{T × H}: final accumulated output
+
+Constraints:
+1. Routing must follow exact DeepSeek topology: sigmoid → group top-2 sum → top-4 groups → global top-8
+2. Block-scale dequantization: val = fp8_val * scale[block_idx]
+3. All GEMM accumulation in FP32
+4. Scatter-add must preserve all expert contributions
+
+Objective:
+Maximize Score = Correctness × SpeedFactor, where Correctness is mandatory (>= 1.0)
+
+**Solver Strategy:**
+
+Use PyTorch native operations throughout:
+1. Routing: vectorized torch.topk + masking
+2. Dispatch: torch.nonzero + torch.argsort + torch.bincount
+3. GEMM1 & GEMM2: torch._scaled_mm (cuBLAS FP8 backend)
+4. SwiGLU: torch.nn.functional.silu
+5. Accumulation: torch.index_add_
+
+**Validity Mechanism:**
+
+1. Pre-flight check: verify torch._scaled_mm supports required dtypes and scale layouts
+2. Fallback path: if native API fails, use exact blockwise dequant + torch.mm
+3. Post-processing: clamp output to valid BF16 range before final cast
+
+**Why this solution:**
+- Advantages: Leverages highly optimized cuBLAS FP8 kernels; minimal custom code; deterministic
+- Disadvantages: torch._scaled_mm API may not support exact block-scale layout; requires careful scale tensor reshaping
+- Expected improvement: 3-5x speedup over parent while maintaining correctness

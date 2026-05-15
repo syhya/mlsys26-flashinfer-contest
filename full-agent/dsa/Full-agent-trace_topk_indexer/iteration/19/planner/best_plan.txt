@@ -1,0 +1,315 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Beat parent `dc51d5fc` (score 9.564, kernel 0.0356 ms, correctness=1.0) by eliminating the TIER-M HBM round-trip (`scores_buf`/`indices_buf` write then read back). Target: kernel latency ≈ 0.030–0.033 ms → score ≈ 10.5–11.5. Preserve correctness=1.0.
+
+**Selected Outline:** Plan 1 — Fused Score+BlockTopK Kernel for TIER-M (eliminate HBM round-trip), with strict fallback to parent pipeline for TIER-S (short) and TIER-L (long).
+
+**Rationale for Selection:**
+1. Every recent strategic summary flags this exact optimization as HIGH PRIORITY: *"Fuse `compute_scores_kernel` directly with `block_topk_kernel` for TIER-M — write scores to shared memory and sort in-place, eliminating one HBM round-trip per medium batch."*
+2. Decouples STRUCTURE (per-batch tier dispatch by `L`) from PARAMETERS (exact top-K via proven `cub::BlockRadixSort` primitive).
+3. Mathematically exact; no approximation; matches proven sort invariants (BlockedToStriped strided load+write).
+4. Downside-protected: if smem budget is exceeded at compile time or fusion correctness fails, single-line revert (`#define FUSE_TIERM 0`) restores parent's 9.564.
+
+---
+
+### Phase 1: Mathematical Definition
+
+For each batch `b`, let `L = seq_lens[b]`, `K = 2048`, `P = 64`, `N = max_num_pages * 64`.
+
+Per-token score:
+`score[b, p*64+t] = Σ_h ReLU( scale[t] * Σ_d Q[b,h,d] * fp8(K[page=block_table[b,p], t, d]) ) * weights[b,h]`, valid iff `p*64+t < L`.
+
+Output `topk_indices[b, 0..min(K,L)-1]` = any permutation of the indices of top-`min(K,L)` scores encoded as `block_table[b,p]*64 + t`; positions `≥ min(K,L)` = -1.
+
+**Three-tier partition (mutually exclusive, exhaustive) — same as parent:**
+
+| Tier | Condition | Kernel |
+|------|-----------|--------|
+| S    | `L ≤ 2048`           | `emit_short_topk_kernel` (enumeration) |
+| M    | `2048 < L ≤ 6144`    | **NEW `fused_score_topk_kernel<256,24>`** (scoring + in-smem radix sort) |
+| L    | `L > 6144`           | parent's `compute_scores_kernel` + `cub::DeviceSegmentedRadixSort` + `extract_topk_kernel` |
+
+Constants:
+```cpp
+constexpr int TOPK_CONST = 2048;
+constexpr int L_MED_MAX  = 6144;
+constexpr int BT_THREADS = 256;
+constexpr int BT_ITEMS   = 24;      // 256*24 = 6144
+static_assert(BT_THREADS * BT_ITEMS >= L_MED_MAX, "TIER-M buffer too small");
+```
+
+---
+
+### Phase 2: The Optimization Loop (Kernel Architecture)
+
+**A. `cvt_fp8x4_to_float4(uint32_t)`** — unchanged from parent: union cast 4×FP8-e4m3 → float4.
+
+**B. `emit_short_topk_kernel`** (TIER-S) — verbatim from parent. Launch `<<<batch_size, 256>>>`.
+
+**C. `compute_scores_kernel`** (TIER-L ONLY now) — verbatim from parent, with an ADDITIONAL guard at top:
+```cpp
+int seq_len = seq_lens[b];
+if (seq_len <= L_MED_MAX) return;   // TIER-S and TIER-M handled elsewhere
+if (p * 64 >= seq_len) return;
+```
+This kernel now only writes to `scores_buf`/`indices_buf` for TIER-L batches. All other logic unchanged.
+
+**D. NEW `fused_score_topk_kernel<256, 24>`** (TIER-M):
+One block per batch. Computes scores in-register, holds top-6144 items in registers (BlockRadixSort's thread-local arrays), sorts in-block, writes top-2048 directly to `topk_indices`. No `scores_buf`/`indices_buf` traffic.
+
+```cpp
+template <int BLOCK_THREADS, int ITEMS_PER_THREAD>
+__global__ void fused_score_topk_kernel(
+    const uint8_t* __restrict__ q_index_fp8,
+    const uint8_t* __restrict__ k_index_cache_fp8,
+    const float*   __restrict__ weights,
+    const int32_t* __restrict__ seq_lens,
+    const int32_t* __restrict__ block_table,
+    int32_t*       __restrict__ topk_indices,
+    int max_num_pages, int topk, int l_med_max)
+{
+    int b = blockIdx.x;
+    int L = seq_lens[b];
+    if (L <= topk) return;          // TIER-S
+    if (L > l_med_max) return;      // TIER-L
+
+    // ---- Shared memory: reuse parent's scoring layout ----
+    __shared__ float q_smem_f[128][65];   // transposed Q, +1 pad for bank conflicts
+    __shared__ float k_smem[8][128];      // K staging per warp
+    __shared__ float weights_smem[64];
+
+    using BlockRadixSort = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int32_t>;
+    __shared__ typename BlockRadixSort::TempStorage temp_storage;
+
+    // ---- Register-resident key/value arrays (initialize to padding sentinel) ----
+    float   keys[ITEMS_PER_THREAD];
+    int32_t vals[ITEMS_PER_THREAD];
+    #pragma unroll
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) { keys[i] = -1e30f; vals[i] = -1; }
+
+    // ---- Load Q (256 threads dequantize 2048 FP8 bytes into transposed layout) ----
+    const uint32_t* q_global_u32 = (const uint32_t*)(q_index_fp8 + b * 8192);
+    for (int i = threadIdx.x; i < 2048; i += BLOCK_THREADS) {
+        uint32_t q_val = q_global_u32[i];
+        float4 q_f = cvt_fp8x4_to_float4(q_val);
+        int head = i / 32, cg = i % 32;
+        q_smem_f[cg*4+0][head] = q_f.x;
+        q_smem_f[cg*4+1][head] = q_f.y;
+        q_smem_f[cg*4+2][head] = q_f.z;
+        q_smem_f[cg*4+3][head] = q_f.w;
+    }
+    if (threadIdx.x < 64) weights_smem[threadIdx.x] = weights[b*64 + threadIdx.x];
+    __syncthreads();
+
+    int warp_id = threadIdx.x / 32;     // 0..7
+    int lane_id = threadIdx.x % 32;
+
+    // ---- Iterate over pages: num_pages = ceil(L/64), at most 96 for L<=6144 ----
+    int num_pages = (L + 63) / 64;
+
+    // Each iteration handles 8 pages * 8 tokens/warp = 64 tokens; 8 warps process 8 tokens each.
+    // Same scoring core as parent's compute_scores_kernel, but score is kept in register
+    // and written into keys[]/vals[] slot determined by (page, token) -> strided index.
+    //
+    // Strided-item mapping (to match BlockRadixSort BlockedToStriped convention):
+    //   logical global position g = p*64 + t_in_page,  0 <= g < L
+    //   load pattern in the sort kernel is:   keys[i] at thread tid corresponds to g = i*BLOCK_THREADS + tid
+    //   => thread tid stores into keys[i] iff g = i*256 + tid, i.e. i = g/256, tid = g%256.
+    //
+    // We compute scores page-by-page, but each score produced by lane 0 of a warp goes
+    // to the thread-and-slot whose strided index matches (p*64+t). We use a shared-memory
+    // staging buffer of size 256 (one per thread) holding the just-produced score, then
+    // a warp shuffle / shared memory scatter distributes it to the owning thread's keys[]
+    // slot.
+    //
+    // Simpler and equivalent scheme: produce scores into a shared buffer s_scores[L_MED_MAX],
+    // s_indices[L_MED_MAX] (48 KB total), then do the strided register load exactly like
+    // parent's block_topk_kernel. This variant uses ~48 KB of extra smem but keeps the
+    // core scoring logic byte-identical to the parent (minimum correctness risk).
+    // ---- Use the simpler scheme: smem-staged scores (still no HBM round-trip) ----
+    __shared__ float   s_scores[L_MED_MAX];
+    __shared__ int32_t s_indices[L_MED_MAX];
+
+    // Initialize padding
+    for (int i = threadIdx.x; i < L_MED_MAX; i += BLOCK_THREADS) {
+        s_scores[i]  = -1e30f;
+        s_indices[i] = -1;
+    }
+    __syncthreads();
+
+    // Score each page (exactly parent's compute_scores_kernel inner loop structure)
+    for (int p = 0; p < num_pages; p++) {
+        int global_page_idx = block_table[b * max_num_pages + p];
+        const uint8_t* k_page_base = k_index_cache_fp8 + global_page_idx * (64 * 132);
+
+        // 8 warps * 8 iterations = 64 tokens per page
+        for (int iter = 0; iter < 8; iter++) {
+            int t = iter * 8 + warp_id;
+            bool valid = (p * 64 + t < L);
+
+            uint32_t k_val = *(const uint32_t*)(k_page_base + t*128 + lane_id*4);
+            float4 k_f = cvt_fp8x4_to_float4(k_val);
+            ((float4*)(k_smem[warp_id]))[lane_id] = k_f;
+            __syncwarp();
+
+            if (valid) {
+                float val0 = 0.0f, val1 = 0.0f;
+                #pragma unroll
+                for (int i = 0; i < 128; i++) {
+                    float k_v = k_smem[warp_id][i];
+                    val0 += q_smem_f[i][lane_id]      * k_v;
+                    val1 += q_smem_f[i][lane_id + 32] * k_v;
+                }
+                float scale;
+                if (lane_id == 0) scale = *(const float*)(k_page_base + 8192 + t*4);
+                scale = __shfl_sync(0xffffffff, scale, 0);
+                val0 *= scale; val1 *= scale;
+
+                float hs = 0.0f;
+                if (val0 > 0.0f) hs += val0 * weights_smem[lane_id];
+                if (val1 > 0.0f) hs += val1 * weights_smem[lane_id + 32];
+                #pragma unroll
+                for (int off = 16; off > 0; off /= 2) hs += __shfl_down_sync(0xffffffff, hs, off);
+
+                if (lane_id == 0) {
+                    if (isnan(hs)) hs = -1e20f;
+                    int g = p*64 + t;
+                    s_scores[g]  = hs;
+                    s_indices[g] = global_page_idx * 64 + t;
+                }
+            }
+            __syncwarp();
+        }
+    }
+    __syncthreads();
+
+    // ---- Strided load from smem into register keys/vals (matches BlockedToStriped) ----
+    #pragma unroll
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) {
+        int idx = i * BLOCK_THREADS + threadIdx.x;
+        if (idx < L) { keys[i] = s_scores[idx]; vals[i] = s_indices[idx]; }
+        else         { keys[i] = -1e30f;        vals[i] = -1; }
+    }
+
+    // ---- In-block exact top-K via CUB BlockRadixSort ----
+    BlockRadixSort(temp_storage).SortDescendingBlockedToStriped(keys, vals);
+
+    // ---- Strided write of top-K (paired with BlockedToStriped) ----
+    #pragma unroll
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) {
+        int out_pos = i * BLOCK_THREADS + threadIdx.x;
+        if (out_pos < topk) topk_indices[b*topk + out_pos] = vals[i];
+    }
+}
+```
+
+**Smem budget audit (H100, 228 KB opt-in max):**
+- `q_smem_f[128][65]`  = 33,280 B
+- `k_smem[8][128]`     =  4,096 B
+- `weights_smem[64]`   =    256 B
+- `s_scores[6144]`     = 24,576 B
+- `s_indices[6144]`    = 24,576 B
+- CUB BlockRadixSort TempStorage ≈ ~8–16 KB (union with staging; CUB internally reuses smem)
+- **Total ≈ ~95–100 KB**. Within H100's 228 KB opt-in budget; **must** call `cudaFuncSetAttribute(..., cudaFuncAttributeMaxDynamicSharedMemorySize, 131072)` — 128 KB safe margin.
+
+Launch: `<<<batch_size, 256>>>`.
+
+**E. `generate_offsets_begin_end`** — unchanged from parent; threshold `L_MED_MAX`. Empty segment for all batches with `L ≤ L_MED_MAX`.
+
+**F. `extract_topk_kernel`** — unchanged from parent; early-return if `L ≤ L_MED_MAX`.
+
+**G. Host pipeline `topk_indexer_forward`:**
+1. Make inputs contiguous; allocate `scores_buf`, `indices_buf` (ONLY used by TIER-L now, but still allocated at full size for CUB segmented sort input), `topk_indices[batch_size, 2048]`.
+2. One-time dynamic smem config (idempotent via `static bool`):
+   ```cpp
+   static bool smem_set = false;
+   if (!smem_set) {
+       cudaFuncSetAttribute((const void*)fused_score_topk_kernel<BT_THREADS, BT_ITEMS>,
+           cudaFuncAttributeMaxDynamicSharedMemorySize, 131072);  // 128 KB
+       smem_set = true;
+   }
+   ```
+3. `emit_short_topk_kernel<<<batch_size, 256>>>` (TIER-S).
+4. `compute_scores_kernel<<<dim3(max_num_pages, batch_size), 256>>>` (TIER-L only now, with `L > L_MED_MAX` guard). **Optimization**: this kernel now skips both TIER-S and TIER-M, reducing its total work.
+5. `fused_score_topk_kernel<256, 24><<<batch_size, 256>>>` (TIER-M fused).
+6. Allocate `scores_sorted`, `indices_sorted`, `begin_offsets`, `end_offsets`.
+7. `generate_offsets_begin_end` (threshold `L_MED_MAX`).
+8. CUB `DeviceSegmentedRadixSort::SortPairsDescending` size query + actual.
+9. `extract_topk_kernel<<<batch_size, 1024>>>`.
+10. Return `topk_indices`.
+
+---
+
+### Phase 3: The "Safety Valve" (CRITICAL — non-negotiable)
+
+1. **Strict partition invariant:** Each batch `b` falls into exactly one tier by `L`. Each kernel writes `topk_indices[b,:]` only for its tier (enforced by early-return guards). No race possible. Proof by case enumeration on `L`.
+2. **Exact top-K in every tier:**
+   - S: enumeration of all valid tokens (set-correct since `L ≤ K`).
+   - M (fused): scores computed identically to parent's `compute_scores_kernel` (byte-identical inner loop), then `cub::BlockRadixSort` — deterministic exact sort.
+   - L: device-wide `cub::DeviceSegmentedRadixSort::SortPairsDescending` — parent's proven path.
+3. **Correctness-critical pairing (inherited invariant):** strided load (`i*BLOCK_THREADS + threadIdx.x`) + `SortDescendingBlockedToStriped` + strided write of identical form. Preserved exactly.
+4. **Padding sentinel `-1e30f`** (strictly more negative than NaN sentinel `-1e20f`), so NaN-corrected scores still outrank padding.
+5. **NaN guard:** `if (isnan(hs)) hs = -1e20f;` preserved inside fused kernel.
+6. **Smem config idempotent:** `cudaFuncSetAttribute` under `static bool` guard; called before first launch.
+7. **`compute_scores_kernel` guard update:** new `if (seq_len <= L_MED_MAX) return;` — mutually exclusive with fused kernel's `if (L > L_MED_MAX) return;`. No batch gets scored twice.
+8. **`scores_buf`/`indices_buf` still allocated** at full `[batch_size, N]` size (required by CUB device-wide sort input shape) — harmless; only TIER-L batches write into them.
+9. **Variable-axis support:** no hardcoded batch/page/max_num_pages values.
+10. **Compile-time invariant:** `static_assert(BT_THREADS * BT_ITEMS >= L_MED_MAX, ...)`.
+11. **Fallback ladder:**
+    - If `fused_score_topk_kernel` smem overflows at JIT/launch: reduce `L_MED_MAX` to 4096 (= 256*16) and recompile; drops to `<256, 16>` — still wins on 4096-tier batches.
+    - If fused kernel produces wrong results: guard with `#ifdef FUSE_TIERM`; revert to parent's split `compute_scores_kernel` (handling all L > TOPK) + `block_topk_kernel` by one-line change. Zero regression vs parent 9.564.
+    - If `cudaFuncSetAttribute` fails: fall back to 48 KB static smem by dropping `<256, 24>` to `<256, 8>` (L ≤ 2048, which is TIER-S anyway — effectively disables TIER-M fusion). Still equals parent score.
+
+---
+
+### Phase 4: Implementation Details
+
+**Single file:** `kernel.cu`.
+**Headers (exact):**
+```cpp
+#include <torch/extension.h>
+#include <cuda_fp8.h>
+#include <tuple>
+#include <cub/cub.cuh>
+#include <cub/block/block_radix_sort.cuh>
+```
+
+**Constants (top of file after headers):**
+```cpp
+constexpr int TOPK_CONST = 2048;
+constexpr int L_MED_MAX  = 6144;
+constexpr int BT_THREADS = 256;
+constexpr int BT_ITEMS   = 24;
+static_assert(BT_THREADS * BT_ITEMS >= L_MED_MAX, "TIER-M buffer too small");
+```
+
+**Functions in order:**
+1. `inline __device__ float4 cvt_fp8x4_to_float4(uint32_t)` — verbatim from parent.
+2. `__global__ void emit_short_topk_kernel(...)` — verbatim from parent.
+3. `__global__ void compute_scores_kernel(...)` — parent's version **plus** new early-return `if (seq_len <= L_MED_MAX) return;` replacing the old `if (seq_len <= topk) return;` (so it only runs for TIER-L).
+4. **NEW `template<int BT, int IT> __global__ void fused_score_topk_kernel(...)`** — see Phase 2.D (merges scoring + BlockRadixSort).
+5. `__global__ void generate_offsets_begin_end(...)` — verbatim from parent (uses `L_MED_MAX` threshold).
+6. `__global__ void extract_topk_kernel(...)` — verbatim from parent (early-return if `L ≤ L_MED_MAX`).
+7. `torch::Tensor topk_indexer_forward(...)` — host pipeline per Phase 2.G, with the smem-attribute call BEFORE first launch.
+8. `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("topk_indexer_forward", ...); m.def("dsa_forward", ...); }`.
+
+**Randomness:** None. Fully deterministic. No multi-start needed.
+**Library check:** `<cuda_fp8.h>` + `<cub/cub.cuh>` + `<cub/block/block_radix_sort.cuh>` — all standard CUDA 12+, already validated by parent.
+**Compile target:** SM90+ (Hopper) — already validated.
+
+**Expected Performance:**
+- Parent `dc51d5fc`: 0.0356 ms, score 9.564 (best in database).
+- Fused kernel eliminates ~2 × (6144 × 8 B = 48 KB) HBM round-trip per TIER-M batch AND eliminates the separate `compute_scores_kernel` launch overhead for TIER-M batches (one fewer kernel launch per TIER-M-populated eval).
+- Per-batch TIER-M latency expected to drop from ~(scoring + block-sort) ≈ (0.010 + 0.005) ms to ~0.010 ms (~33% faster for TIER-M).
+- Aggregate kernel latency target: **0.028–0.033 ms → score ≈ 10.5–12.0** (vs parent 9.564).
+- Worst case (no TIER-M batches): fused kernel is a no-op (early-returns immediately); same as parent.
+
+**Critical correctness guards (NON-NEGOTIABLE):**
+- `compute_scores_kernel`'s new threshold = `L_MED_MAX` (not `TOPK`). Matches fused kernel's `L > L_MED_MAX -> return`.
+- Fused kernel's inner scoring loop must be byte-equivalent to `compute_scores_kernel`'s inner loop (same Q-load pattern, same K-staging, same ReLU × weights, same warp reduction, same NaN guard).
+- Smem attribute call MUST happen before first fused-kernel launch; guard with `static bool` to do it exactly once.
+- The `s_scores`/`s_indices` staging arrays MUST be fully initialized to `-1e30f`/`-1` before scoring loop (not just for valid positions) so strided load past `L` safely reads padding.
+- `__syncthreads()` between scoring phase and strided-load phase, and implicit inside `BlockRadixSort` before the output write.
+
+**Fallback if fused kernel fails correctness or smem:**
+- One-line disable: replace `fused_score_topk_kernel` launch with parent's original `block_topk_kernel` + revert `compute_scores_kernel`'s threshold back to `TOPK`. Restores parent's exact 9.564 score with zero code churn.

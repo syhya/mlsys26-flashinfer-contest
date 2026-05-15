@@ -1,0 +1,7 @@
+Mathematical Formulation:
+- Variables (X): Block size, shared memory allocation.
+- Objective (f(X)): Minimize kernel launch overhead and execution time.
+- Constraints (C): topk (2048) <= max_num_pages * 64.
+Solver Strategy: Fused FP8 Compute + Block-Level Histogram/Bitonic Partial Sort. We maintain a running Top-K in shared memory using a block-wide reduction.
+Validity Mechanism: Masking via sequence length bounds. Output constraints strictly padded with -1.
+Why this solution?: Single kernel avoids HBM write/read of intermediate scores. However, maintaining a 2048-element TopK state across a thread block is highly complex and may exceed shared memory limits or cause serialization.

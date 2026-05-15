@@ -1,0 +1,25 @@
+Outline 2: Rebase onto global best 6da80c61 and implement a fused Triton routing+dispatch builder while preserving GEMM kernels.
+
+Mathematical Formulation
+- Variables (X): routing kernel decomposition, temporary tensors for group scores/topk/masks/CSR arrays, work partition for tokens and experts.
+- Constraints (C):
+  1. Must exactly implement DeepSeek no-aux routing: sigmoid -> group top-2 sum -> top-4 groups -> masked top-8 experts -> q-based renormalized weights.
+  2. Local expert filtering and CSR offsets must match the current PyTorch route_tokens semantics, including stable grouping by local expert.
+  3. No CPU loops over tensors; all dispatch structures built on GPU.
+  4. GEMM1/GEMM2 kernels and FP32 accumulation unchanged.
+- Objective f(X): minimize routing overhead and total latency.
+
+Solver Strategy
+- Deterministic graph transformation / finite-state pipeline design.
+- Use one or two Triton kernels to compute routing scores and compact (token, expert, weight) tuples, followed by torch.bincount/cumsum or an in-kernel prefix-sum style compaction.
+- Treat this as exact algorithm replacement, not approximate optimization.
+
+Validity Mechanism
+- Preserve parent PyTorch _route_tokens as a reference fallback inside the file.
+- Add a compile-time/runtime switch USE_TRITON_ROUTING; if the Triton route builder fails or produces empty/invalid metadata, fall back to parent route_tokens.
+- Keep stable ordering by encoding row-major rank into the sort key or by post-sort with stable argsort on GPU tensors.
+
+Why this solution?
+- Expected improvement: routing is one of the last non-fused parts and matters especially at small T.
+- Advantages: potentially larger structural gain than micro-tuning kernels.
+- Disadvantages: highest correctness risk because routing semantics and tie/order behavior are fragile.

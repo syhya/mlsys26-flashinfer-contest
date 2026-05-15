@@ -1,0 +1,5 @@
+Plan 3: Rebase to 302d2eb3 + TMA via tl.make_block_ptr for weight loads
+- Variables: pointer construction style for W tile loads
+- Constraints: int64 indexing, shape preservation
+- Risk: HIGH; lineage history shows multiple TMA attempts failed
+- Why: Potential 5-10% GEMM1 speedup but unreliable

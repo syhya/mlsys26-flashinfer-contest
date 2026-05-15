@@ -1,0 +1,13 @@
+Plan 3: Fuse Reducer with Compute via Cooperative Groups Grid Sync
+
+Variables X: Single-kernel split-K with grid-level barrier.
+Constraints C: Needs CUDA cooperative launch; arch/driver dependency.
+Objective f(X): Eliminate kernel launch overhead and workspace round-trip to HBM.
+
+Solver Strategy: cudaLaunchCooperativeKernel, grid.sync() after partial compute, then reduction phase in same kernel.
+
+Validity Mechanism: Global atomics or workspace still needed; complex.
+
+Why: Big potential if it works; high risk.
+Advantages: Potentially eliminate 2nd kernel launch overhead.
+Disadvantages: Fragile, may not compile with environment restrictions; cooperative launch requires special flags; past attempts suggest executors avoid fragile patterns. High correctness risk.

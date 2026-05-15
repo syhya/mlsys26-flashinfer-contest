@@ -1,0 +1,7 @@
+Plan 1: Rebase onto dce0e38f + add GEMM1 TMA via tl.make_block_ptr for weight loads.
+- Variables: weight load address pattern (block ptr vs raw ptr arithmetic).
+- Constraints: All numerics identical; autotune list ⊇ parent.
+- Solver: Triton autotune over superset of configs. Floor = parent.
+- Validity: If TMA path fails to compile, autotune drops it silently. Keep raw-pointer kernel as fallback variant via separate kernel.
+- Why: GEMM1 K=7168 dominates 55% of latency. TMA on Blackwell yields 5-10% improvement. High upside, moderate risk.
+- Disadvantage: tl.make_block_ptr API can be finicky with grouped expert indexing (3D weight tensor needs careful base-ptr calc).

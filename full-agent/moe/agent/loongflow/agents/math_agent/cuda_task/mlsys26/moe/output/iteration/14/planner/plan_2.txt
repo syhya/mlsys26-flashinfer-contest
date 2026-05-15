@@ -1,0 +1,29 @@
+Outline 2: Fully dequantized expert-chunk solver with torch.mm / addmm and vectorized scale expansion
+
+Mathematical Formulation
+Variables (X):
+- Same routing and CSR variables as the task definition.
+- Explicit dequantized hidden-state slices A_e and weight matrices W1_e, W2_e for each expert e.
+Constraints (C):
+- Exact routing semantics.
+- Exact dequantization by Kronecker-style expansion of scale blocks: scale_expanded = repeat_interleave(scale, 128, dims).
+- FP32 GEMM accumulation.
+- Output validity and arbitrary T.
+Objective f(X):
+- Minimize implementation risk first, runtime second; target evaluator score >= 1.0 through mathematically exact semantics.
+
+Solver Strategy
+- Deterministic direct solver with no custom kernels.
+- Use PyTorch vector operations to construct exact dequantized matrices only for routed experts/tokens, never whole-model global dequant buffers.
+- For each expert, compute G1 = A_e @ W1_e^T, C = silu(G1[:,I:]) * G1[:,:I], O_e = C @ W2_e^T, weighted by routing weights, then scatter-add.
+- This is equivalent to solving the exact forward equations directly.
+
+Validity Mechanism
+- Because every stage mirrors the reference equations exactly, correctness is guaranteed up to standard FP32/BF16 tolerance.
+- No Triton indexing risk, no pointer overflow risk, no transposition ambiguity.
+- Final repair step: if any temporary shape mismatch or empty routing segment occurs, skip that expert and preserve zero contribution, maintaining valid output tensor.
+
+Why this solution?
+- Expected performance improvement: probably modest or possibly below baseline on large T, but safest path for numerical resolution.
+- Advantages: least likely to crash; nearly impossible to get scale semantics wrong; ideal oracle reference child.
+- Disadvantages: likely too slow to score well enough alone; may fail speed target despite perfect semantics.

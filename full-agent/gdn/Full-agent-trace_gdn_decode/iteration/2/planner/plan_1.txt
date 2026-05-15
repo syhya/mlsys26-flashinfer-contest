@@ -1,0 +1,18 @@
+### Plan 1: Multi-Block V-Dimension Parallelization
+
+**Mathematical Formulation:**
+* **Variables:** Grid dimensions $(G_x, G_y, G_z) = (B, HV, V / V_{PB})$ and Block dimensions $(B_x, B_y) = (32, V_{PB})$, where $V_{PB} = 4$.
+* **Constraints:** $V$ must be divisible by $V_{PB}$. Number of threads per block is $32 \times V_{PB}$.
+* **Objective:** Maximize SM occupancy $\mathcal{O}(V_{PB})$ by increasing the total number of blocks from $B \times HV$ (8) to $B \times HV \times (V / V_{PB})$ (256), thereby providing enough active warps to the scheduler to hide global memory latency.
+
+**Solver Strategy:**
+* **Grid/Block Reshaping Algorithm:** Transform the independent $V$-loop into independent CUDA blocks. Each block computes exactly $V_{PB}$ rows of the $V$ dimension.
+* **Vectorized Memory Mapping:** Map 32 threads in a warp to 128 elements of $K$ using `float4` vectorized global memory loads and stores for the `state` tensor.
+
+**Validity Mechanism:**
+* **Exact Algebraic Equivalence:** Use the exact same mathematical decoupling formula as the parent (which has been proven correct) but distribute the $V$-loop iterations across the z-dimension of the CUDA grid. 
+* **Bounds Checking:** If $V$ is not a multiple of $V_{PB}$, boundary checks will be enforced (though $V=128$ guarantees perfect division).
+
+**Why this solution?**
+* **Advantages:** Directly solves the 6.21% SM occupancy issue identified in the parent's NCU profiling. By launching 256 blocks of 128 threads instead of 8 blocks, we achieve over 1000 active warps across the GPU, effectively hiding the 73.9% L1TEX memory fetch stalls.
+* **Disadvantages:** Slightly increases grid launch overhead, but this is negligible compared to the massive latency-hiding benefits.

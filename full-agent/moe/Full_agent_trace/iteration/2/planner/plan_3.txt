@@ -1,0 +1,34 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement an optimized FP8 MoE by fusing the entire expert pipeline (GEMM1 -> SwiGLU -> GEMM2) into a single, massive Triton Persistent Kernel.
+
+**Selected Outline:** Single-Pass Persistent Fused Kernel
+
+**Rationale for Selection:**
+1.  **Ultimate Memory Bandwidth Reduction**: Keeps the intermediate activation (G1/C) entirely in SRAM/Registers, eliminating HBM roundtrips completely.
+2.  **Low Latency**: Perfect for decode-phase (small T) where kernel launch overhead dominates.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Definition & Setup**
+    *   **Variables**: Global memory pointers, scale pointers.
+    *   **Operations**: Combined evaluation of $O = (\text{SwiGLU}(A \cdot W1)) \cdot W2 \cdot \text{routing}$.
+    *   **Constraints**: Maximize register usage without spilling. Tile size must fit within shared memory.
+
+2.  **Phase 2: The Optimization Loop (Triton Autotuning)**
+    *   Extensive `@triton.autotune` configurations to balance register pressure.
+    *   Configs will prioritize small `BLOCK_M` (e.g., 16, 32) and large `BLOCK_N` to ensure the full hidden dimension can be processed efficiently.
+
+3.  **Phase 3: The "Safety Valve" (CRITICAL)**
+    *   **Register Spill Prevention**: If the compiler spills too many registers, performance drops drastically. Provide extremely conservative `num_warps=8` configurations as fallbacks.
+    *   **Pointer Math**: Rigorously apply `tl.int64` casting to all offset calculations.
+
+4.  **Phase 4: Implementation Details**
+    *   **Step 4.1: Routing**: Vectorized PyTorch routing.
+    *   **Step 4.2: Fused Kernel Design**:
+        *   Load A tile, A scale.
+        *   Loop K to compute full row of G1 (Requires block-wise accumulation across K, which implies either Split-K or atomic adds if `BLOCK_K < H`).
+        *   *Wait, this requires full accumulation of G1 before SwiGLU. Fusing across a reduction dimension is mathematically invalid unless the entire K dimension fits in SRAM.*
+    *   **Step 4.3: Redesign to Semi-Fused**:
+        *   Since $H=7168$, we cannot keep it all in SRAM.
+        *   Fallback: Keep the two-kernel design (Plan 1) as the single-pass fusion is architecturally unviable for large H without massive L2 cache reliance.

@@ -1,0 +1,9 @@
+{
+  "status": "framework_error",
+  "summary": "Evaluation execution timed out.",
+  "score": 0.0,
+  "metrics": {
+    "error": "Evaluation execution timed out (>3600s)"
+  },
+  "artifacts": {}
+}

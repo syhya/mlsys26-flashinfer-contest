@@ -1,0 +1,15 @@
+Outline 2: Block-level Min-Heap Top-K Fusion
+
+Mathematical Formulation:
+- Variables (X): Token scores S_{b, p, t}
+- Objective (f(X)): Maximize retained scores in local memory.
+- Constraints (C): Memory limit of shared memory per block.
+
+Solver Strategy:
+- Each CUDA block maintains a size-2048 Min-Heap in shared memory or global memory.
+
+Validity Mechanism:
+- Heap push/pop logic strictly enforces the top-K constraint locally, followed by a global heap merge.
+
+Why this solution?:
+- Saves global memory writes. Disadvantage: Maintaining a 2048-element heap per block is non-convex and slow due to thread divergence and shared memory pressure.

@@ -1,0 +1,33 @@
+**1. Executive Summary:**
+This iteration was a decisive breakthrough because adopting the expanded autotuning configuration space (10 configs, `MAX_TK` key, `n_mask` enforcement in both GEMMs, and BF16-upcast GEMM2) unlocked a faster autotuned tile configuration, achieving the task objective (score > 1.0) at 10.60x speedup — dramatically outperforming all 3 siblings from the same parent (scores: 80.31%, 15.22%, and this child at **105.96%**).
+
+---
+
+**2. Data-Driven Findings (Facts ONLY):**
+
+- **Sibling Rank:** 1 out of 3 children of parent `0114e7fa`. Sibling scores: `12a8176f` = 80.31%, `a4064493` = 15.22%, `a8623435` (this child) = **105.96%**. This child is ranked **1st** and is the **only sibling to exceed the task objective (score ≥ 1.0)**.
+- **Score Delta:** From parent `0114e7fa` (81.29%) to child `a8623435` (**105.96%**), a delta of **+24.67 percentage points**.
+- **Key Change:** Three simultaneous structural improvements: (1) Expanded GEMM1 autotune from 3 configs (key=`T`) to **10 configs** (key=`MAX_TK`), adding `BLOCK_M=16/32` and `num_stages=4/5`; (2) Changed grid launch M-dimension from `cdiv(T, BLOCK_M)` to `cdiv(max_count, BLOCK_M)` (tighter bound avoiding unnecessary over-tiling); (3) Added explicit `n_mask = n_offs < N_dim` masking to GEMM1 output stores (previously missing, potential source of OOB writes).
+- **Core Metrics:** Kernel latency: **2.419ms** (vs. parent 3.022ms, grandparent best ~2.810ms). Reference latency: 18.907ms. Speedup: **10.60x**. Correctness: 1.0. Eval time: 261.22s (longer due to larger autotune search space). Max absolute error in bench stats: 8192.0 (unchanged from lineage baseline — not a functional blocker since correctness check passed). Total workloads: 19.
+
+---
+
+**3. Strategic Analysis (The "So What?"):**
+
+- **Root Cause:** The outcome was driven by **both plan quality and execution quality**. The plan correctly identified that: (a) the parent's autotune key `T` was suboptimal for variable per-expert workloads — `MAX_TK` captures the actual bottleneck per-expert token count; (b) the grid M-dimension over-tiling (`cdiv(T, BLOCK_M)`) was wasting thread blocks on empty experts; and (c) the missing `n_mask` in GEMM1 stores was a latent out-of-bounds write risk. The combination of these three fixes simultaneously improved correctness robustness and unlocked a better autotuned configuration that the previous 3-config search space could not find.
+- **Key Insight:** The most important lesson from this iteration is that **autotuning key design matters as much as the search space itself**. Switching from `T` (sequence length) to `MAX_TK` (maximum per-expert token count) caused Triton to benchmark and cache configurations specific to the actual compute intensity of the bottleneck expert, rather than the total sequence length. This is a fundamentally more correct abstraction and enabled `BLOCK_M=16` or `BLOCK_M=32` configs to be selected for decode-regime token counts where the old `BLOCK_M=64/128` configs were suboptimal. Additionally, the BF16 GEMM2 path (c_bf16 + w_bf16) has proven stable and correct — no further precision changes are needed there.
+- **Identified Risk:** The benchmark still reports `max_absolute_error: 8192.0` across all workloads. While the evaluator's `correctness_check` passes (confirmed by `correctness: 1.0`), this large error in artifact stats suggests that on certain extreme workloads (e.g., very short sequences, `seq_len=7`), the BF16 GEMM2 path accumulates error. The risk is that future harder workloads or stricter tolerance testing could expose this. The GEMM2 BF16 path has a ceiling on numerical precision that FP8 cannot compensate for in the intermediate activations. Additionally, the 261s eval time (vs 60-82s for siblings) indicates the 10-config autotune search is slowing down overall iteration velocity — a minor operational concern.
+
+---
+
+**4. Actionable Guidance (The "What's Next?"):**
+
+- **Recommend Exploration:** The current score of 105.96% (10.60x speedup) exceeds the 1.0 objective but leaves performance on the table. The next frontier is pushing GEMM2 from BF16 TCs back to FP8 TCs safely. The proven path to do this is **per-tile scalar quantization** (not per-row) for the SwiGLU activations: `c_scale = tl.maximum(tl.max(tl.abs(c)) / 448.0, 1e-12)` (global tile max, not `axis=1`). This unlocks FP8 TCs for GEMM2 while maintaining exact dequantization. The best-known DB solution (ff4217c7, score ~1.0253 at 2.600ms) used this approach — fusing it with the current child's improved autotune configuration could push to 11-12x speedup.
+
+- **Recommend Fusion:** The expanded autotune search space + `MAX_TK` key from this child should be **fused into the GEMM2 kernel as well**. Currently GEMM2 uses the same 9-config autotune with `MAX_TK`, but missing the `BLOCK_M=16` small-batch config. Adding `triton.Config({'BLOCK_M': 16, 'BLOCK_N': 128}, num_warps=4, num_stages=4)` to GEMM2 is low-risk and may improve decode-regime latency by 5-10%.
+
+- **Recommend Exploration:** Investigate whether `num_stages=6` provides additional benefit for GEMM1 (K=7168, 56 K-iterations). The current configs max out at `num_stages=5`. A deeper pipeline stage could hide an additional round of HBM latency across the long K-loop, potentially shaving 3-8% off GEMM1 time. This is low-risk since autotuning will simply not select it if it hurts performance.
+
+- **Recommend Stripping:** Remove the redundant `n_mask` check from within the GEMM2 `tl.range` loop's `w2_scale_ptrs` load — the scale tensor is indexed by `n_block_idx = n_offs // 128`, which may already be broadcasting correctly, and the extra masking adds register pressure. Profile first before stripping.
+
+- **Warn:** Do not regress the `MAX_TK` autotune key back to `T` in future iterations. The `T` key caused the system to cache a suboptimal config for all parent/grandparent solutions in this lineage. The `MAX_TK` key is demonstrably superior and should be treated as a **locked best practice** for all future grouped-GEMM variants in this task.

@@ -1,0 +1,8 @@
+Plan 3: Restore dual-path ancestor (94736692) and tighten the fused large kernel by replacing the costly per-tile all-invalid check with a cheap warp-ballot-based skip, and use __expf/__log2f/__fdividef fast-math intrinsics consistently throughout.
+
+Variables X: fast-math intrinsic usage, tile skip mechanism.
+Constraints C: preserve FP32 accum and base-2 lse precision.
+Objective f(X): minimize per-tile overhead in fused path.
+Solver: Exact online softmax unchanged; micro-optimize control flow.
+Validity: Same safety valve as ancestor.
+Why: Lowest risk. Likely small gain, but guaranteed non-regression vs the 12.63 ancestor.

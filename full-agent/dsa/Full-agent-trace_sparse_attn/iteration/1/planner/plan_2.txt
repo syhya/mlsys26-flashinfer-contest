@@ -1,0 +1,5 @@
+Outline 2: Warp-Specialized Asynchronous Pipeline
+Mathematical Formulation: Asynchronous execution of memory loads (Q, K, V) and tensor-core MMA operations.
+Solver Strategy: Use `cp.async` for memory movement to shared memory, overlapping with warp-level compute.
+Validity Mechanism: Strict synchronization barriers (`__syncthreads`) and memory bounds checking to ensure no out-of-bounds access.
+Why this solution?: Maximizes memory bandwidth and hides latency, ideal for memory-bound sparse attention.

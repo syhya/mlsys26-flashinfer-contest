@@ -1,0 +1,82 @@
+## Plan 2: Aggressive GEMM1 Optimization via Split-K / Persistent Kernel
+
+### Mathematical Formulation
+
+**Variables (X):**
+- GEMM1 operates on K=7168 reduction axis (56 blocks of 128)
+- GEMM2 operates on K=2048 reduction axis (16 blocks of 128)
+- `BLOCK_K` = 128 (fixed)
+- New: `SPLIT_K` ∈ {2, 4, 7}: split the K dimension for GEMM1 to increase parallelism
+- For small Tk (decode), standard tiling poorly utilizes SMs because M-dimension is small
+- Split-K launches `SPLIT_K` times more threadblocks, each reducing K/SPLIT_K elements, then atomic-add to output
+
+**Constraints (C):**
+- BLOCK_K = 128 strictly (scale alignment)  
+- Split-K reduction must use atomics (tl.atomic_add) or two-pass reduction
+- Scale indexing with split-K: each split processes k_start..k_start+K/SPLIT_K
+  - k_block_idx must be global (not local to the split) for correct scale lookup
+  - a_scale[k_block_idx, token_id] must use absolute block index
+  - w_scale[e, n_block_idx, k_block_idx] must use absolute block index
+- Output buffer: separate partial sum buffer, reduce after
+
+**Objective f(X):**
+Maximize SM utilization by increasing grid size. For T=7 (decode regime), a standard GEMM1 
+with E_local=32 experts × Tk_e ≈ 2 tokens per expert gives only ~32×1×32=1024 threadblocks for 
+BLOCK_M=64. On B200 with thousands of SMs, this severely under-utilizes hardware.
+
+Split-K with SPLIT_K=7 gives 7x more threadblocks for the K dimension, filling more SMs.
+
+### Solver Strategy
+
+**Phase 1: Standard GEMM1 for large T (prefill)**
+For T ≥ 128 (prefill), standard BLOCK_M=64 or 128 adequately fills SMs. Use the existing approach.
+
+**Phase 2: Split-K GEMM1 for small T (decode, T ≤ 32)**
+For very small T:
+- Grid: (N_tiles, M_tiles, E_local * SPLIT_K)
+- Each block processes K/SPLIT_K elements instead of K
+- Accumulate partial sums using tl.atomic_add to float32 output buffer
+- OR: two-pass approach: first pass → partial [Tk, 2I, SPLIT_K] buffer, second pass → sum
+
+**Runtime Dispatch:**
+```python
+if max_count <= 32:  # decode regime
+    use_split_k_gemm1(...)
+else:  # prefill regime
+    use_standard_gemm1(...)
+```
+
+### Validity Mechanism
+1. Atomic add path: use `tl.atomic_add` with float32 — avoids race conditions
+2. Scale correctness: k_block_idx = (k_start_global + k_offset) // 128 — uses ABSOLUTE k index
+3. Output initialized to zeros BEFORE split-k launch (required for atomic add correctness)
+4. Standard path (large T) is identical to the proven ff4217c7 kernel — no regression risk
+
+### Why This Solution?
+
+**Expected Performance Improvement:**
+For decode workloads (T=7, the specific seq_len shown in ncu_profile):
+- Standard GEMM1 severely under-utilizes B200 SMs due to small batch
+- Split-K fills SMs with more threadblocks
+- Expected 20-40% improvement for decode regime
+
+For prefill (T=512+): No change, uses existing proven kernel.
+
+**Advantages:**
+1. Directly addresses the known "decode regime" bottleneck (seq_len=7 shown in NCU profile)
+2. Split-K is a standard technique for small-batch GEMMs on NVIDIA hardware
+3. Can be combined with FP8 TCs (same dot operation, just different K range)
+4. Does not risk regression on prefill workloads (separate code path)
+
+**Disadvantages:**
+1. Complex implementation: atomic_add path or two-pass kernel required
+2. Scale indexing is tricky with split-K (absolute k_block_idx required)
+3. Over-engineering risk: the 19 workloads may already include large T where this helps less
+4. Two code paths increases code complexity and risk of bugs
+5. The main bottleneck may be prefill (T=512+), not decode — split-K helps decode, not prefill
+6. Atomic operations on float32 have non-deterministic summation order (possible precision risk)
+
+**Risk Assessment: HIGH**
+The complexity of split-K with FP8 block scales is significant. The atomic add path with
+correct per-block scale indexing is easy to get wrong. This is a higher-risk approach 
+that offers uncertain benefit for the benchmark workloads.

@@ -1,0 +1,33 @@
+### Outline 1: Grouped Triton FP8 GEMM with Exact Routing/Dispatch and FP32 Safety Path
+
+**Mathematical Formulation**
+- **Variables (X):**
+  - Routing tensors: `scores`, `scores_bias`, `topk_idx`, `weights`
+  - Dispatch tensors: `sorted_tokens`, `sorted_experts`, `sorted_route_w`, `expert_offsets`
+  - Grouped worklists for GEMM1/GEMM2 over active assignments
+  - Output tensor `Y in R^{T x 7168}`
+- **Constraints (C):**
+  1. Exact DeepSeek routing semantics: sigmoid -> top2/group -> top4 groups -> top8 experts.
+  2. Routing weights normalized from unbiased sigmoid scores only.
+  3. FP8 block-scale semantics respected exactly per 128x128 tile.
+  4. GEMM accumulation in FP32.
+  5. Final output dtype is BF16.
+  6. Handle any `T`, empty experts, and zero local assignments.
+- **Objective (f(X)):** maximize benchmark score by minimizing latency subject to correctness >= tolerance.
+
+**Solver Strategy**
+- Use a deterministic two-level solver:
+  1. Exact tensor-algebra solve for routing/dispatch using PyTorch vector ops.
+  2. Grouped Triton kernel solve for GEMM1 and GEMM2 with expert id as grid dimension and fixed/autotuned tile configs.
+- The optimization is discrete configuration search over a small deterministic set of Triton tile parameters.
+
+**Validity Mechanism**
+- Exact routing implemented in PyTorch only.
+- A deterministic safety path handles experts with small `Tk` using eager `torch.mm` on exact dequantized slices.
+- Final accumulation uses `index_add_` in FP32, then cast to BF16.
+- If Triton path is unsupported for a shape/layout, fall back per expert to exact eager math.
+
+**Why this solution?**
+- **Expected performance improvement:** recovers most of the lost speed by removing per-expert full eager dequant/matmul while preserving the exact, validated routing/dispatch backbone.
+- **Advantages:** best chance to approach prior 8.6x lineage; avoids full global dequantization; exploits tensor cores on FP8 tiles; bounded fallback prevents invalid outputs.
+- **Disadvantages:** highest implementation complexity; Triton pointer arithmetic and grouped scheduling are error-prone; more likely to need careful debugging.

@@ -1,0 +1,43 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement an expanded, heavily optimized GDN decode kernel that maximizes speedup across a wider range of target dimensions (specifically expanding the fast-path to $K \in \{64, 128, 256\}$) while mathematically guaranteeing correctness and safety for arbitrary $B$, $V$, and $K$ dimension sizes, strictly avoiding generic template parameters that break compiler optimization.
+
+**Selected Outline:** Multi-Template Fast Path Expansion via Explicit Instantiation (Structure vs. Parameters Decoupling)
+
+**Rationale for Selection:**
+1.  **Directly Addresses Parent's Failure**: The parent attempted to generalize the fast-path by making `NUM_V_HEADS`, `NUM_Q_HEADS`, and `V` runtime parameters, and parameterizing vectorization logic dynamically. This broke the compiler's perfect unrolling and register allocation, causing a performance regression.
+2.  **Mathematical Safety Guaranteed**: We revert to the proven strategy of hardcoding dimensions into specific C++ template instantiations, ensuring maximum compiler optimization. The deterministic PyTorch dispatch acts as a constraint projection, ensuring invalid dimensions never enter these fast paths.
+3.  **Data-Driven Success**: Follows the recommendation to expand the "catchment area" for peak performance without sacrificing the absolute latency of the $K=128$ benchmark.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Definition & Modeling**
+    *   **Variables ($X$)**: The critical tensor dimensions $V$ (sequence length) and $K$ (head dimension).
+    *   **Constraints ($C$)**: Fast-path execution requires specific, known dimensions to allow exact vectorization and `#pragma unroll`. Implicit casting of `bfloat16` to `float` is strictly forbidden by the environment (`-D__CUDA_NO_BFLOAT16_CONVERSIONS__`).
+    *   **Objective ($f(X)$)**: Minimize instruction latency by providing explicitly specialized kernels for target $(V, K)$ pairs, maximizing memory bus utilization via exact vectorized loads (`float2`, `float4`), and falling back to a safe generic kernel otherwise.
+
+2.  **Phase 2: The Optimization Loop (Explicit Template Specialization)**
+    *   **Algorithm**: C++ Template Instantiation for unrolled loops and explicit vectorization.
+    *   **Step 2.1**: Define a highly specific template `template <int NUM_V_HEADS, int NUM_Q_HEADS, int V, int K> __global__ void gdn_decode_kernel_fast(...)`.
+    *   **Step 2.2**: *Crucially*, keep `NUM_V_HEADS`, `NUM_Q_HEADS`, `V`, and `K` as compile-time template arguments. Do not pass them as runtime variables to the fast kernel.
+    *   **Step 2.3**: Inside the kernel, use `#pragma unroll` for the inner $K$-dimension reductions.
+    *   **Step 2.4**: Implement explicit vectorization blocks guarded by `if constexpr (K == 128)`, `if constexpr (K == 64)`, etc.
+        *   For $K=64$: Use `float2` (8 bytes) to load 2 `float32` state elements per thread (32 threads * 2 = 64).
+        *   For $K=128$: Use `float4` (16 bytes) to load 4 `float32` state elements per thread (32 threads * 4 = 128).
+        *   For $K=256$: Use two `float4` loads to load 8 `float32` state elements per thread.
+
+3.  **Phase 3: The "Safety Valve" (CRITICAL Runtime Dispatch)**
+    *   **Logic**: Implement a deterministic C++ routing mechanism (the Solver) in the PyTorch entry point `gdn_forward`.
+    *   **Condition Check & Routing**:
+        *   Extract $K = q.size(3)$ and $V = v.size(3)$.
+        *   Evaluate conditions to route to explicitly instantiated kernels.
+        *   `if (K == 128 && V == 128 && num_v_heads == 8 && num_q_heads == 4)` -> Launch `gdn_decode_kernel_fast<8, 4, 128, 128>`.
+        *   `else if (K == 64 && V == 128 && num_v_heads == 8 && num_q_heads == 4)` -> Launch `gdn_decode_kernel_fast<8, 4, 128, 64>`.
+        *   `else if (K == 256 && V == 128 && num_v_heads == 8 && num_q_heads == 4)` -> Launch `gdn_decode_kernel_fast<8, 4, 128, 256>`.
+    *   **Final Fallback (Safety Guarantee)**: `else` -> Launch the mathematically exact, dynamic-loop `gdn_decode_kernel_generic<<<...>>>`. This acts as a repair step, guaranteeing that if any exotic dimension is passed, the kernel evaluates successfully (score $\ge 1.0$).
+
+4.  **Phase 4: Implementation Details & Strict Constraints**
+    *   **Libraries**: Strictly include `<cuda_bf16.h>`, `<torch/extension.h>`.
+    *   **Type Conversions**: Use explicit conversion intrinsics: `__bfloat162float(bf16_val)` and `__float2bfloat16(float_val)`.
+    *   **Warp Autonomy**: Maintain zero `__syncthreads()` within the V-loop to allow warps to process their assigned $V$ indices independently.
+    *   **Memory Alignment**: Call `.contiguous()` on all input tensors before extracting data pointers in the C++ runtime.

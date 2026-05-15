@@ -1,0 +1,12 @@
+PLAN 3: Host-side dispatch + merge block_topk variants (eliminate always-on kernel launches)
+
+Math: count batches per tier via a tiny count kernel, copy to host, only launch tier kernels whose count > 0.
+Variables: per-tier batch count c_S, c_M, c_L.
+Constraints: sum=batch_size.
+Objective: minimize number of kernel launches per call.
+
+Solver: (1) count kernel ~0.002ms. (2) cudaMemcpyAsync to host pinned buffer, cudaStreamSynchronize. (3) conditional kernel launches.
+Validity: same tier kernels as dc51d5fc, just conditionally launched. Each batch still partitioned correctly.
+Why: attack launch-overhead floor. However, cudaStreamSynchronize adds latency (~5-10us on Hopper). Disadvantage: the sync cost likely exceeds saved launch overhead; risky.
+
+Fallback: revert to dc51d5fc.

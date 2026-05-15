@@ -1,0 +1,21 @@
+### Strategic Analysis Report
+
+**1. Executive Summary:**
+This iteration was a misleading regression because although absolute kernel latency improved (0.097ms → 0.085ms), the score dropped from 4.24x to 4.02x due to a lower reference baseline on this run, exposing that the "uint4 K-load" change delivered real but insufficient gains to offset benchmark variance.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   **Sibling Rank:** 1 out of 1 children (only child of parent 9c9e445c). No competing siblings.
+*   **Score Delta:** From parent (4.236) to child (4.017), a **−0.22 regression** (−5.2%).
+*   **Key Change:** Replaced 32 scalar `uint32_t` K-cache loads per warp with 8 vectorized `uint4` (128-bit) loads using only lanes 0–7, and hoisted the per-token scale load into `scale_smem` rather than a `__shfl_sync` broadcast.
+*   **Core Metrics:** Kernel latency 0.097ms → **0.085ms** (−12% absolute improvement, matching the plan's prediction). Reference baseline shifted 3.972ms → 3.367ms (−15%), fully explaining the score regression. Correctness 1.0 preserved; max error 0.
+
+**3. Strategic Analysis (The "So What?"):**
+*   **Root Cause:** The **plan was sound and the execution was correct** — the uint4 vectorization achieved its predicted ~12% kernel speedup. The score regression is **entirely an artifact of benchmark baseline variance** (the reference ran 15% faster this evaluation, likely GPU/thermal/measurement noise on the Modal eval backend). This is a genuine algorithmic improvement masked by noise.
+*   **Key Insight:** Score comparisons across iterations are **not reliable when relative delta is below ~15%** because the reference baseline itself fluctuates. The absolute kernel latency (0.085ms) is now the new floor and should be the real metric of comparison going forward. The uint4 K-load is worth keeping.
+*   **Identified Risk:** The scoring kernel is approaching a hard latency floor (~0.08ms). Only **8 of 32 lanes per warp** are active during K-load — a further inefficiency. More critically, the **CUB segmented radix sort over the full N=max_num_pages*64 score buffer remains untouched** and is now a proportionally larger share of the 0.085ms budget. Continued micro-optimization of the scoring kernel will yield diminishing returns.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   **Warn:** Do NOT discard this child's code despite the nominal regression. The uint4 K-load is a real improvement; the score drop is baseline noise. Re-evaluate or treat `e343572b` as the effective new baseline for lineage purposes.
+*   **Recommend Exploration (HIGH PRIORITY):** Pivot away from scoring-kernel micro-optimization and attack the **TopK selection stage**. Fuse a block-level or device-level approximate Top-K (e.g., CUB `BlockRadixSort` per-batch in shared memory, or a bucketed/threshold-based filter that emits only ~4K candidates to a smaller sort buffer) to eliminate the full-N segmented sort. Expected gain: >20% total latency reduction — far exceeding any further scoring tweak.
+*   **Recommend Fusion:** Consider fusing scoring + per-block local Top-K into a single kernel, so each `(batch, page)` block emits only its local top-128 candidates directly, reducing the CUB sort input size by ~16x.
+*   **Recommend Stripping:** If pursuing further scoring optimization, activate the idle 24 lanes during K-load — e.g., have 2 warps cooperate to load 2 tokens simultaneously with full-warp participation, or interleave K-load of iter+1 with dot-product of iter (software pipelining with `cp.async`).

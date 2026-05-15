@@ -1,0 +1,22 @@
+### Strategic Analysis Report
+
+**1. Executive Summary:**
+This iteration was a **regression** because the planned fused score+BlockRadixSort TIER-M kernel was *never actually implemented* — only the parent's TIER-S/long pipeline was emitted, while the elaborate plan claimed a TIER-M fusion — yielding a score of 8.11 vs the parent's 8.97 and significantly underperforming the sole sibling `dc51d5fc` (9.56), which successfully built the simpler 3-tier dispatch.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   **Sibling Rank:** 2 out of 2 children of parent `2fb50fd2`. Top sibling `dc51d5fc` scored **9.564**; this child scored **8.112**.
+*   **Score Delta:** Parent **8.970** → Child **8.112** (−0.858, ≈ −9.6%).
+*   **Key Change (intended vs actual):** The `generate_plan` specified a new `fused_score_topk_kernel<256,24>` for TIER-M with in-shared-memory scoring + `cub::BlockRadixSort`, plus dynamic-smem overlay tricks. **Actual code shipped is byte-for-byte identical to the parent `2fb50fd2`** — no fused kernel, no `cub::BlockRadixSort`, no `L_MED_MAX` tier, no `cudaFuncSetAttribute` call. Only the parent's S + long-CUB pipeline exists.
+*   **Core Metrics:** Kernel latency 0.045 ms (parent) → **0.044 ms** (child) — essentially identical raw kernel time. Reference baseline drifted 2.79 ms → 2.49 ms (workload-mix variance), so the same kernel time produced a worse speedup ratio (89.70× → 81.12×). Correctness 1.0; 12/12 workloads passed.
+
+**3. Strategic Analysis (The "So What?"):**
+*   **Root Cause:** This is a pure **execution failure**, not a plan failure. The plan was ambitious and well-reasoned (fusing scoring with block-radix-sort to remove an HBM round-trip), but the Executor produced a copy of the parent solution with zero plan-derived modifications. The score regression is not algorithmic — it is **benchmark noise** on top of an unchanged kernel (reference baseline shifted, exec_time variance ±2%).
+*   **Key Insight:** When the Executor silently no-ops a complex plan, the scoring system still records a "result" that misleadingly looks like the plan was tried and failed. **Sibling `dc51d5fc` (9.56) proves the simpler non-fused 3-tier dispatch works**; this iteration provides zero new evidence about whether the *fused* variant would help. The salvageable lesson: the planned fusion remains an untested hypothesis, not a refuted one.
+*   **Identified Risk:** (1) Wasted iteration budget — no new genetic material was produced. (2) The sample weight / planner may now under-prioritize the fusion idea based on a false-negative signal. (3) Continuing to evolve from this child instead of `dc51d5fc` would lock in a strictly worse base.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   **Warn:** Treat this child as a **null mutation / duplicate of parent `2fb50fd2`**. Do NOT use its score as evidence against the fused-TIER-M hypothesis — the hypothesis was never tested. Future planners should avoid penalizing the "fused score+sort" idea based on this data point.
+*   **Recommend Stripping:** Deprioritize this node (`4b112149`) for future sampling — it offers no diversity over its parent and is dominated by sibling `dc51d5fc`.
+*   **Recommend Exploration (re-attempt the fusion from `dc51d5fc`):** Re-run the *same* fusion plan but seeded from sibling `dc51d5fc` (the 9.56 winner) instead of `2fb50fd2`. Provide the Executor with a minimal, surgical diff spec: "add `fused_score_topk_kernel`, change one guard in `compute_scores_kernel` from `seq_len <= 2048` to `seq_len <= L_MED_MAX`, swap one launch." Smaller, more concrete edits reduce no-op risk.
+*   **Recommend Exploration (alternative axis):** Pursue the *other* high-value branch from `dc51d5fc`'s summary — a **TIER-L2 large-block radix sort** (`cub::BlockRadixSort<float,512,32>`, 16384 items) for `6144 < L ≤ 16384`. This is a copy-paste of the existing TIER-M pattern with different template params, much lower execution risk than the smem-overlay fusion.
+*   **Recommend Fusion (meta-strategy):** Adopt a "**plan-execution audit**" guard: before scoring, diff the child code against the parent; if `diff == 0` lines but the plan claims substantive changes, flag the iteration as an execution failure rather than a scientific result.

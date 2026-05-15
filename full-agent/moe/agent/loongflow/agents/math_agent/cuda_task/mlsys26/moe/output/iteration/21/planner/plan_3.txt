@@ -1,0 +1,102 @@
+### Plan 3: torch._scaled_mm Native FP8 GEMM with Fused SwiGLU
+
+**Mathematical Formulation:**
+
+Variables:
+- X ∈ R^{T×H}: hidden states (FP8 with block scales)
+- W1 ∈ R^{E×2I×H}: GEMM1 weights (FP8 with block scales)
+- W2 ∈ R^{E×H×I}: GEMM2 weights (FP8 with block scales)
+- X_scale_vec ∈ R^{Tk}: per-token scale factors for hidden states
+- W1_scale_mat ∈ R^{E×2I}: per-expert-output scale factors for GEMM1
+- W2_scale_mat ∈ R^{E×H}: per-expert-output scale factors for GEMM2
+- G1 ∈ R^{Tk×2I}: GEMM1 output (FP32)
+- S ∈ R^{Tk×I}: SwiGLU output (FP32)
+- Y ∈ R^{T×H}: final output (BF16)
+
+Constraints:
+1. Use PyTorch native torch._scaled_mm for FP8 GEMMs (cuBLAS-backed, proven stable)
+2. Convert block scales to row/column scales compatible with _scaled_mm API
+3. Compute SwiGLU in FP32 without quantization
+4. All accumulation in FP32
+5. Grouped dispatch structure preserved
+
+Objective:
+- Maximize f(X) = speedup_ratio * correctness_factor
+- Where correctness_factor = 1.0 if max_abs_error <= threshold, else 0.1
+- This balances speed and correctness
+
+**Solver Strategy:**
+
+Use PyTorch native operations with the following architecture:
+
+1. **Routing & Dispatch** (proven correct from parent):
+   - Exact DeepSeek no-aux routing
+   - GPU-only CSR dispatch construction
+
+2. **Scale Conversion** (deterministic transformation):
+   - Convert block scales to row/column scales for _scaled_mm:
+     - For hidden_states: compute per-token scale as geometric mean of K-blocks
+     - For W1: compute per-output-channel scale as geometric mean of K-blocks
+     - For W2: compute per-output-channel scale as geometric mean of K-blocks
+   - This is a deterministic projection that preserves approximate magnitude
+
+3. **GEMM1 with torch._scaled_mm**:
+   - For each expert e:
+     - Gather tokens: X_e = hidden_states[tok_ids]  (FP8)
+     - Gather scales: X_scale_e = X_scale_vec[tok_ids]
+     - Call: G1_e = torch._scaled_mm(X_e, W1[e].T, scale_a=X_scale_e, scale_b=W1_scale_mat[e], out_dtype=torch.float32)
+   - This uses cuBLAS FP8 tensor cores with proven numerical stability
+
+4. **SwiGLU** (FP32 computation):
+   - Compute in PyTorch: S = F.silu(G1[:, I:]) * G1[:, :I]
+   - No quantization, pure FP32
+
+5. **GEMM2 with torch._scaled_mm**:
+   - For each expert e:
+     - Compute per-row scale for S_e (if needed for API)
+     - Call: Y_e = torch._scaled_mm(S_e, W2[e].T, scale_a=S_scale_e, scale_b=W2_scale_mat[e], out_dtype=torch.float32)
+   - Apply routing weights
+   - Accumulate into output
+
+6. **Scatter-add and cast to BF16**
+
+**Validity Mechanism:**
+
+1. **Native Op Guarantee**: torch._scaled_mm is PyTorch's official FP8 GEMM, extensively tested by PyTorch team
+2. **Scale Conversion Validation**: 
+   - Verify converted scales preserve magnitude: assert torch.allclose(block_scale_mean, row_scale, rtol=0.1)
+   - If conversion fails, fall back to exact block dequant + torch.mm
+3. **Numerical Monitoring**: 
+   - After each GEMM, check for NaN/Inf
+   - If detected, fall back to FP32 path for that expert
+4. **Reference Comparison**: 
+   - Optionally run reference path on first call to validate scale conversion
+   - Cache conversion parameters if successful
+
+**Why This Solution:**
+
+Advantages:
+- Leverages PyTorch's official FP8 support (likely well-optimized and numerically stable)
+- Avoids custom Triton kernel bugs
+- Uses FP8 tensor cores for both GEMM1 and GEMM2
+- No dynamic activation quantization (SwiGLU stays in FP32)
+- Simpler implementation than custom kernels
+- PyTorch team has likely solved the numerical stability issues we're facing
+
+Disadvantages:
+- Scale conversion from block-scale to row/column-scale is an approximation
+- May not perfectly match reference semantics
+- torch._scaled_mm API may have constraints on scale format
+- Per-expert loop still has Python overhead (though less than full dequant)
+- Requires PyTorch version with _scaled_mm support
+
+Expected Performance:
+- Target: 6-8x speedup (close to grandparent's 8.63x, using native FP8 ops)
+- Numerical error: should be better than grandparent (no dynamic quantization) but may have scale conversion error
+- Score estimate: 0.6-0.8 (60-80%)
+- High risk/high reward: if scale conversion works well, could beat current best
+
+**Implementation Risk Assessment:**
+- Medium risk: depends on whether block-scale → row-scale conversion preserves accuracy
+- Mitigation: include fallback to exact dequant if scale conversion validation fails
+- This plan is "algorithmically sound" if the scale conversion is done carefully

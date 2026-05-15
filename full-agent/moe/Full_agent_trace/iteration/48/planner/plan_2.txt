@@ -1,0 +1,30 @@
+Outline 2: T-adaptive dual-path solver with small-T split-K fallback and large-T expert-grouped path
+
+Mathematical Formulation
+- Variables (X):
+  1. Dispatch mode m in {small_T, medium_large_T}.
+  2. Split-K factor s in {1,2,4,8} for GEMM1/GEMM2 when Tk is tiny.
+  3. Tile sizes BM, BN chosen from a finite autotune set.
+  4. Intermediate tensors G1 and output O.
+- Constraints (C):
+  1. Exact routing semantics as task definition.
+  2. fp32 accumulation in both GEMMs; bf16 only at final output.
+  3. For split-K path, partial reductions must sum exactly in fp32 before any cast.
+  4. Chosen dispatch mode must be deterministic function of T and/or max expert occupancy.
+- Objective f(X): minimize total latency over variable T by solving a piecewise discrete optimization problem over dispatch modes.
+
+Solver Strategy
+- Deterministic piecewise policy:
+  1. If T <= threshold_1 or max_count <= threshold_2, use split-K GEMM path.
+  2. Else use grouped GEMM path.
+- Thresholds are fixed constants chosen from architecture-aware heuristics; autotune resolves BM/BN within each path.
+
+Validity Mechanism
+- Safety valve: always keep parent path as the default branch; only enter split-K for small shapes.
+- Partial sums are accumulated into fp32 scratch and reduced before output.
+- If split-K scratch allocation exceeds budget or any shape assumption fails, revert to parent branch.
+
+Why this solution?
+- Expected improvement: task explicitly notes strong T dependence; parent uses one policy for all T.
+- Advantages: targets decode regime where standard grouped GEMM under-occupies hardware.
+- Disadvantages: higher implementation complexity; split-K with atomics or reduction scratch adds correctness/perf risk; thresholds are heuristic.

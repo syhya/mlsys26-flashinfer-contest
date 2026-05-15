@@ -1,0 +1,16 @@
+**Mathematical Formulation**:
+- Variables ($X$): Memory transaction width per thread, $W \in \{2, 4, 8, 16\}$ bytes. Tile size $T \in \{8, 16, 32\}$.
+- Constraints ($C$): $T \times 128 \times 2 \le \text{Smem Capacity}$. $W \le 16$. Total threads $N=128$.
+- Objective ($f(X)$): Minimize $N_{loads} = \frac{L_{seq} \times 128}{W \times N}$.
+
+**Solver Strategy**:
+- Vectorized Block Tiling. Maximize $W=16$ (float4) and choose $T=16$.
+- 128 threads load 2 float4s each, fully covering $T=16$ tokens for Q, K, V.
+- Compute inner loop entirely from shared memory.
+
+**Validity Mechanism**:
+- Boundary constraint `t_offset < valid_tokens` ensures no out-of-bounds memory access. 
+- Math operations are strictly identical to the parent, ensuring the Recurrent Neural Network state correctness.
+
+**Why this solution?**:
+- Reduces memory instructions by 8x. Eliminates memory bandwidth bottleneck.

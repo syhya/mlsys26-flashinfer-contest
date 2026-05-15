@@ -1,0 +1,26 @@
+Outline 1: Rebase onto global best 6da80c61 and add GEMM2 TMA load path with exact fallback.
+
+Mathematical Formulation
+- Variables (X): kernel selection flag USE_TMA_GEMM2; GEMM2 tile parameters (BLOCK_M, BLOCK_N=128, num_warps, num_stages); optional extra autotune configs.
+- Constraints (C):
+  1. Routing math remains exactly DeepSeek no-aux: q=sigmoid(logits), biased ranking=q+bias, group top-2 sum, top-4 groups, masked global top-8, renormalized weights from q.
+  2. GEMM1 and existing GEMM2 FP8 tensor-core computation remain numerically equivalent to parent for all retained paths.
+  3. All GEMM accumulations in FP32; final output BF16 only.
+  4. int64 pointer arithmetic for expert-base offsets.
+  5. BLOCK_N=128 in GEMM2 so scale-block indexing remains exact.
+- Objective f(X): minimize end-to-end latency subject to correctness >= evaluator threshold.
+
+Solver Strategy
+- Deterministic algorithmic strategy: constrained model selection over a finite candidate set.
+- Use Triton autotune as the solver over a superset of configs.
+- Keep the current best raw-pointer GEMM2 path and add a second GEMM2 TMA/block_ptr path; runtime dispatcher chooses TMA first, fallback on exception or compile failure.
+
+Validity Mechanism
+- Exact fallback: preserve parent 6da80c61 code path verbatim and call it if new GEMM2 TMA kernel fails.
+- Since routing and GEMM1 are unchanged, validity reduces to GEMM2 load equivalence; TMA changes only how FP8 tiles are loaded, not math.
+- Maintain same FP8 triad: scalar tl.max(tl.abs(c)), cast to tl.float8e4nv, tl.dot(c_fp8, w2_fp8), post-scale by c_scale and w2_scale.
+
+Why this solution?
+- Expected improvement: GEMM2 still occupies a large fraction of runtime; TMA on B200 may reduce weight-load overhead similarly to GEMM1 TMA.
+- Advantages: strongest floor guarantee, minimal surface area, no routing-risk.
+- Disadvantages: likely small upside because GEMM2 is already highly optimized and prior TMA gain in GEMM1 was modest.

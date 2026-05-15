@@ -1,0 +1,39 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Maximize the speedup of the GDN decode kernel (maintaining >8000x) while broadening its peak-performance applicability across various tensor dimensions (specifically K) using a mathematically safe, template-based routing architecture.
+
+**Selected Outline:** Expanded Template Instantiation via Metaprogramming with Deterministic Runtime Dispatch.
+
+**Rationale for Selection:**
+1. **Mathematical Safety Guaranteed**: By keeping the mathematically exact and safe generic fallback kernel, we guarantee a correctness score of 1.0 for *any* arbitrary input dimension.
+2. **Optimal Performance Retention**: It preserves the zero-barrier, fully unrolled FMA logic that achieved the 827x peak score for $K=128$.
+3. **Robust Generalization**: Expanding templates to $K \in \{64, 128, 256\}$ acts as a deterministic "multi-start" equivalent, allowing the compiler to generate multiple highly optimized, register-locked solutions for different dimension spaces.
+
+**Best Plan:**
+
+1. **Phase 1: Mathematical Definition**
+    * **Variables ($X$)**: The tensor dimension $K$ (head dimension).
+    * **Constraints ($C$)**: The highly optimized fast-path requires vectorized memory loads (`float4`). This mathematically strictly requires $K \bmod 4 = 0$ and threads $\times 4 \le K$.
+    * **Objective ($f(X)$)**: Minimize execution latency by maximizing compile-time unrolling and register usage. We define the optimal state as a fully unrolled loop without `__syncthreads()` in the V-dimension, which the compiler can only achieve if $K$ is a known compile-time constant.
+
+2. **Phase 2: The Optimization Loop (Template Metaprogramming Generation)**
+    * **Algorithm**: Instead of a Python runtime search, we use C++ Template Metaprogramming as the "solver". The compiler acts as the optimizer, generating distinct, optimal machine code for a defined set of discrete states.
+    * **Action**: Define the `gdn_decode_kernel_fast` as a template over `int K` and `int V_UNROLL`.
+    * **Loop (Multi-State Instantiation)**: Instruct the compiler to explicitly instantiate this template for the set of standard target dimensions: $K \in \{64, 128, 256\}$.
+    * **Optimization Logic**: Inside the templated kernel, use `#pragma unroll` for all $K$-dependent reductions. Because $K$ is a template parameter, the compiler will unroll the loop exactly $K/4$ times, mathematically guaranteeing maximum FMA pipelining without branch divergence.
+
+3. **Phase 3: The "Safety Valve" (CRITICAL Runtime Deterministic Dispatch)**
+    * **Logic**: We must never allow an input tensor to enter a kernel whose memory access pattern exceeds its bounds. We use a deterministic C++ routing step as the absolute safety valve.
+    * **Implementation**: Inside the `gdn_forward` PyTorch entry point, extract runtime variables: `int K_rt = q.size(3);`.
+    * **Constraint Enforcement (The Switch Statement)**:
+        * Evaluate exact conditions:
+        * `if (K_rt == 128 && V % 4 == 0)` -> Launch `<K=128>` template.
+        * `else if (K_rt == 64 && V % 4 == 0)` -> Launch `<K=64>` template.
+        * `else if (K_rt == 256 && V % 4 == 0)` -> Launch `<K=256>` template.
+    * **The Ultimate Fallback**: `else { launch gdn_decode_kernel_generic(...) }`. This generic kernel uses dynamic loops (`for (int k = tx; k < K; k += blockDim.x)`) and scalar memory access, guaranteeing that even if a strange dimension like $K=117$ is passed, the exact mathematical result is computed safely, ensuring a score $\ge 1.0$.
+
+4. **Phase 4: Implementation Details**
+    * **Libraries**: Strictly `<torch/extension.h>`, `<cuda_bf16.h>`. No external algorithms; pure C++ and CUDA.
+    * **Math Intrinsics**: Retain explicit `__bfloat162float()` conversions (required by `-D__CUDA_NO_BFLOAT16_CONVERSIONS__`) and `expf()`/`logf()`.
+    * **Warp Primitives**: Retain the exact `#pragma unroll` warp reduction logic (`__shfl_down_sync`) from the parent, but parameterize the loop bounds based on the template parameter $K$.
+    * **Memory Layout Constraints**: Ensure `q = q.contiguous()`, etc., before passing pointers, guaranteeing that the 1D pointer math exactly maps to the multi-dimensional tensor layout.

@@ -1,0 +1,14 @@
+Plan 1: Fused Block-Level Top-K with Threshold Pruning + uint4 K-cache loads
+
+Mathematical Formulation:
+- X = scores s[b,t] for b in [0,B), t in [0,seq_len[b]); we want T_b = top-2048 set per batch.
+- C: |T_b| = min(2048, seq_len[b]); positions t >= seq_len[b] excluded.
+- f: select indices maximizing sum of selected scores per batch.
+
+Solver Strategy:
+- Per-block (one page): compute 64 scores using shared-mem transposed Q (kept), use uint4 loads for K (8 lanes per token, 4 tokens per warp = quarter-warp grouping), then do block-level partial top-32 selection via cub::BlockRadixSort, write only 32 per page to compact buffer of size B * max_num_pages * 32. Then segmented radix sort on this much smaller array (1/2 size).
+
+Validity Mechanism:
+- Pad invalid scores with -inf, write -1 indices. Final extract kernel writes -1 for tail when actual_topk < 2048. Since topk=2048 and we keep top-32 per page (>=2048/64=32), guarantees coverage.
+
+Why: Halves sort workload. Risk: top-32 per page may not cover top-2048 if extreme distribution. Need top-32 not safe — if 2048 top items concentrate in a few pages, miss. UNSAFE.

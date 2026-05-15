@@ -1,0 +1,79 @@
+## Plan 1: Combine FP8 TCs in GEMM2 + tl.range() Pipelining + num_warps=16 Expansion
+
+### Mathematical Formulation
+
+**Variables (X):**
+- BLOCK_M ∈ {16, 32, 64, 128} — M-tile per expert, autotuned
+- BLOCK_N = 128 (fixed for n_block_idx=pid_n correctness in GEMM2)
+- BLOCK_K = 128 (fixed, = block-scale granularity)
+- num_warps ∈ {4, 8, 16}
+- num_stages ∈ {3, 4, 5} — pipeline depth for tl.range()
+
+**Constraints (C):**
+1. c_scale = scalar (global tile max, NOT per-row): `c_abs_max = tl.max(tl.abs(c))` — NO axis argument
+2. c_scale = tl.maximum(c_abs_max / 448.0, 1e-12) — prevents NaN
+3. c_fp8 = (c / c_scale).to(tl.float8_e4m3fn) — FP8 cast
+4. n_block_idx = pid_n — ONLY valid when BLOCK_N=128
+5. pid_e.to(tl.int64) before stride multiplication — int64 overflow prevention
+6. acc updated via: acc += tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32) * c_scale * w2_scale
+
+**Objective:**
+Minimize kernel latency by maximizing B200 FP8 TC utilization in BOTH GEMM1 and GEMM2.
+
+### Solver Strategy
+
+This is NOT a random search. Triton autotuning deterministically benchmarks all configs.
+The solver is: `@triton.autotune` with `key=['MAX_TK']`.
+
+Key change vs b550fc5e:
+- GEMM2 kernel: Replace `w2_f32 = w2_fp8.to(tl.float32) * w2_scale; tl.dot(swiglu_out, w2_f32)`
+  with per-tile scalar FP8 quantization of swiglu:
+  ```
+  c_abs_max = tl.max(tl.abs(c))         # SCALAR, no axis
+  c_scale = tl.maximum(c_abs_max / 448.0, 1e-12)
+  c_fp8 = (c / c_scale).to(tl.float8_e4m3fn)
+  dot_result = tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32)
+  acc += dot_result * c_scale * w2_scale   # BOTH scalars
+  ```
+
+Key addition vs ff4217c7:
+- GEMM2 K-loop changes from `range()` to `tl.range()` for software pipelining
+- Expanded autotune configs including num_warps=16 for large tiles
+
+### Autotune Configs for GEMM2 (ALL BLOCK_N=128):
+```
+triton.Config({'BLOCK_M': 16,  'BLOCK_N': 128}, num_warps=4,  num_stages=4),
+triton.Config({'BLOCK_M': 32,  'BLOCK_N': 128}, num_warps=4,  num_stages=4),
+triton.Config({'BLOCK_M': 32,  'BLOCK_N': 128}, num_warps=4,  num_stages=5),
+triton.Config({'BLOCK_M': 64,  'BLOCK_N': 128}, num_warps=4,  num_stages=3),
+triton.Config({'BLOCK_M': 64,  'BLOCK_N': 128}, num_warps=4,  num_stages=4),
+triton.Config({'BLOCK_M': 64,  'BLOCK_N': 128}, num_warps=4,  num_stages=5),
+triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8,  num_stages=3),
+triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8,  num_stages=4),
+triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8,  num_stages=5),
+triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=16, num_stages=4),
+```
+
+### Validity Mechanism
+
+1. ALL GEMM2 configs have BLOCK_N=128 → n_block_idx=pid_n is always correct
+2. Scalar c_scale (no axis) → post-dot multiplication is mathematically exact
+3. G1 = torch.zeros() → masked rows contribute 0 not garbage
+4. pid_e.to(tl.int64) everywhere → no int32 overflow
+
+### Why This Solution?
+
+**Expected Performance Improvement:**
+- FP8 TCs in GEMM2: ~2x vs FP32/BF16 TCs on B200 (B200 FP8 = 3.5 PFLOPS, BF16 = 1.75 PFLOPS)
+- GEMM2 accounts for ~25% of total kernel time (K=2048 vs GEMM1's K=7168)
+- Expected total kernel improvement: 10-15% → from 2.320ms to ~2.0-2.1ms
+- Target score: ~1.30-1.40
+
+**Advantages:**
+- Mathematically proven correct (ff4217c7 validated per-tile scalar FP8 for GEMM2)
+- Software pipelining (tl.range) preserved from b550fc5e (proven +12% improvement)
+- First solution to combine BOTH improvements simultaneously
+
+**Disadvantages:**
+- Executors keep falling back to BF16/FP32 path. MUST include explicit FP8 code.
+- Per-tile tl.max overhead (~2-3% extra computation in GEMM2 loop)

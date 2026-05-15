@@ -1,0 +1,7 @@
+Plan 2: Rebase onto dce0e38f + fused Triton routing kernel.
+- Variables: routing op count (8 PyTorch ops -> 1-2 Triton kernels).
+- Constraints: produce identical (sorted_tokens, sorted_experts, sorted_weights, expert_offsets) tuple as PyTorch path within FP determinism.
+- Solver: Single-pass Triton kernel computing sigmoid + group top-2 + top-4 groups + masked top-8 + renorm.
+- Validity: Wrap with USE_FUSED_ROUTING flag; fall back to PyTorch path if any correctness check fails.
+- Why: PyTorch routing has ~8 launches; fusing saves ~30-80us on small T workloads.
+- Disadvantage: HIGH correctness risk — DeepSeek topk tie-breaking is fragile. Multiple prior summaries warn against this without staged tests.

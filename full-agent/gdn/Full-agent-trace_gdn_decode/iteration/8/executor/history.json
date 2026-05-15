@@ -1,0 +1,137 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_255",
+        "solution_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/0_0/solution_255.py",
+        "evaluation_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/0_0/evaluation_255.json",
+        "score": 751.7355080420162,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 7517.36x (ref: 105.971ms, kernel: 0.009ms)\",\n  \"score\": 751.7355080420162,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 7517.355080420162,\n    \"exec_time_ms\": 0.008518395061728395,\n    \"baseline_time_ms\": 105.97086577777779,\n    \"compile_time\": 0.0,\n    \"eval_time\": 526.4405846595764\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_decode_qk4_v8_d128_k_last\",\n    \"execution_time\": \"526.44s\",\n    \"kernel_latency_ms\": \"0.009ms\",\n    \"reference_latency_ms\": \"105.971ms\",\n    \"speedup\": \"7517.36x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 105.97086577777779,\n      \"max_relative_error\": 0.37495818734169006,\n      \"max_absolute_error\": 6.103515625e-05,\n      \"total_workloads\": 54\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_f7a",
+        "solution_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/0_0/solution_f7a.py",
+        "evaluation_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/0_0/evaluation_f7a.json",
+        "score": 792.7240806198134,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 7927.24x (ref: 111.581ms, kernel: 0.008ms)\",\n  \"score\": 792.7240806198134,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 7927.240806198134,\n    \"exec_time_ms\": 0.00840808950617284,\n    \"baseline_time_ms\": 111.58144172839508,\n    \"compile_time\": 0.0,\n    \"eval_time\": 498.9837713241577\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_decode_qk4_v8_d128_k_last\",\n    \"execution_time\": \"498.98s\",\n    \"kernel_latency_ms\": \"0.008ms\",\n    \"reference_latency_ms\": \"111.581ms\",\n    \"speedup\": \"7927.24x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 111.58144172839508,\n      \"max_relative_error\": 0.37495818734169006,\n      \"max_absolute_error\": 6.103515625e-05,\n      \"total_workloads\": 54\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  },
+  {
+    "round": 1,
+    "candidates": [
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_b06",
+        "solution_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/1_0/solution_b06.py",
+        "evaluation_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/1_0/evaluation_b06.json",
+        "score": 798.3023980959256,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 7983.02x (ref: 109.762ms, kernel: 0.008ms)\",\n  \"score\": 798.3023980959256,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 7983.023980959255,\n    \"exec_time_ms\": 0.00820029012345679,\n    \"baseline_time_ms\": 109.76158800308642,\n    \"compile_time\": 0.0,\n    \"eval_time\": 634.2104799747467\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_decode_qk4_v8_d128_k_last\",\n    \"execution_time\": \"634.21s\",\n    \"kernel_latency_ms\": \"0.008ms\",\n    \"reference_latency_ms\": \"109.762ms\",\n    \"speedup\": \"7983.02x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 109.76158800308642,\n      \"max_relative_error\": 0.39720454812049866,\n      \"max_absolute_error\": 6.103515625e-05,\n      \"total_workloads\": 54\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_c0b",
+        "solution_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/1_0/solution_c0b.py",
+        "evaluation_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/1_0/evaluation_c0b.json",
+        "score": 680.2312968783725,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 6802.31x (ref: 108.266ms, kernel: 0.010ms)\",\n  \"score\": 680.2312968783725,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 6802.3129687837245,\n    \"exec_time_ms\": 0.009533435185185186,\n    \"baseline_time_ms\": 108.2664207469136,\n    \"compile_time\": 0.0,\n    \"eval_time\": 687.5216994285583\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_decode_qk4_v8_d128_k_last\",\n    \"execution_time\": \"687.52s\",\n    \"kernel_latency_ms\": \"0.010ms\",\n    \"reference_latency_ms\": \"108.266ms\",\n    \"speedup\": \"6802.31x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 108.2664207469136,\n      \"max_relative_error\": 0.39304274320602417,\n      \"max_absolute_error\": 6.103515625e-05,\n      \"total_workloads\": 54\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_bdd",
+        "solution_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/1_1/solution_bdd.py",
+        "evaluation_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/1_1/evaluation_bdd.json",
+        "score": 482.9178117914,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 4829.18x (ref: 106.142ms, kernel: 0.013ms)\",\n  \"score\": 482.9178117914,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 4829.178117914,\n    \"exec_time_ms\": 0.013188447530864199,\n    \"baseline_time_ms\": 106.14218351234568,\n    \"compile_time\": 0.0,\n    \"eval_time\": 556.0547330379486\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_decode_qk4_v8_d128_k_last\",\n    \"execution_time\": \"556.05s\",\n    \"kernel_latency_ms\": \"0.013ms\",\n    \"reference_latency_ms\": \"106.142ms\",\n    \"speedup\": \"4829.18x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 106.14218351234568,\n      \"max_relative_error\": 0.37495818734169006,\n      \"max_absolute_error\": 6.103515625e-05,\n      \"total_workloads\": 54\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_f6a",
+        "solution_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/1_1/solution_f6a.py",
+        "evaluation_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/1_1/evaluation_f6a.json",
+        "score": 679.1379045016415,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 6791.38x (ref: 108.925ms, kernel: 0.010ms)\",\n  \"score\": 679.1379045016415,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 6791.379045016415,\n    \"exec_time_ms\": 0.009623018518518519,\n    \"baseline_time_ms\": 108.92472131481482,\n    \"compile_time\": 0.0,\n    \"eval_time\": 479.30452847480774\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_decode_qk4_v8_d128_k_last\",\n    \"execution_time\": \"479.30s\",\n    \"kernel_latency_ms\": \"0.010ms\",\n    \"reference_latency_ms\": \"108.925ms\",\n    \"speedup\": \"6791.38x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 108.92472131481482,\n      \"max_relative_error\": 0.37495818734169006,\n      \"max_absolute_error\": 6.103515625e-05,\n      \"total_workloads\": 54\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  },
+  {
+    "round": 2,
+    "candidates": [
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_c51",
+        "solution_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/2_0/solution_c51.py",
+        "evaluation_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/2_0/evaluation_c51.json",
+        "score": 810.5951592953252,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 8105.95x (ref: 113.572ms, kernel: 0.008ms)\",\n  \"score\": 810.5951592953252,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 8105.951592953252,\n    \"exec_time_ms\": 0.008403333333333334,\n    \"baseline_time_ms\": 113.57198113580246,\n    \"compile_time\": 0.0,\n    \"eval_time\": 966.5838906764984\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_decode_qk4_v8_d128_k_last\",\n    \"execution_time\": \"966.58s\",\n    \"kernel_latency_ms\": \"0.008ms\",\n    \"reference_latency_ms\": \"113.572ms\",\n    \"speedup\": \"8105.95x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 113.57198113580246,\n      \"max_relative_error\": 0.37495818734169006,\n      \"max_absolute_error\": 6.103515625e-05,\n      \"total_workloads\": 54\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_ce1",
+        "solution_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/2_0/solution_ce1.py",
+        "evaluation_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/2_0/evaluation_ce1.json",
+        "score": 695.2143407115569,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 6952.14x (ref: 110.926ms, kernel: 0.010ms)\",\n  \"score\": 695.2143407115569,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 6952.143407115569,\n    \"exec_time_ms\": 0.009546111111111111,\n    \"baseline_time_ms\": 110.9256849691358,\n    \"compile_time\": 0.0,\n    \"eval_time\": 757.9889686107635\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_decode_qk4_v8_d128_k_last\",\n    \"execution_time\": \"757.99s\",\n    \"kernel_latency_ms\": \"0.010ms\",\n    \"reference_latency_ms\": \"110.926ms\",\n    \"speedup\": \"6952.14x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 110.9256849691358,\n      \"max_relative_error\": 0.37495818734169006,\n      \"max_absolute_error\": 6.103515625e-05,\n      \"total_workloads\": 54\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_0fb",
+        "solution_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/2_1/solution_0fb.py",
+        "evaluation_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/2_1/evaluation_0fb.json",
+        "score": 814.9399683408959,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 8149.40x (ref: 114.566ms, kernel: 0.008ms)\",\n  \"score\": 814.9399683408959,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 8149.3996834089585,\n    \"exec_time_ms\": 0.008386546296296296,\n    \"baseline_time_ms\": 114.56608061111112,\n    \"compile_time\": 0.0,\n    \"eval_time\": 936.8698184490204\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_decode_qk4_v8_d128_k_last\",\n    \"execution_time\": \"936.87s\",\n    \"kernel_latency_ms\": \"0.008ms\",\n    \"reference_latency_ms\": \"114.566ms\",\n    \"speedup\": \"8149.40x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 114.56608061111112,\n      \"max_relative_error\": 0.3993147015571594,\n      \"max_absolute_error\": 6.103515625e-05,\n      \"total_workloads\": 54\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_399",
+        "solution_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/2_1/solution_399.py",
+        "evaluation_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/2_1/evaluation_399.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: RUNTIME_ERROR: [1/2] /usr/local/cuda/bin/nvcc -MD -MF kernel.cuda.o.d -DTORCH_EXTENSION_NAME=torch_agent_3791cf94_86d024 -DTORCH_API_INCLUDE_EXTENSION_H -I/root/.cache/flashinfer_bench/cache/torch/torch_agent_3791cf94_86d024 -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -isystem /opt/conda/envs/py312/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_100,code=compute_100 -gencode=arch=compute_100,code=sm_100 --compiler-options '-fPIC' -std=c++20 -c /root/.cache/flashinfer_bench/cache/torch/torch_agent_3791cf94_86d024/kernel.cu -o kernel.cuda.o \\n[2/2] c++ kernel.cuda.o -shared -L/opt/conda/envs/py312/lib/python3.12/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda/lib64 -lcudart -o torch_agent_3791cf94_86d024.so\\nTraceback (most recent call last):\\n  File \\\"/opt/conda/envs/py312/lib/python3.12/site-packages/flashinfer_bench/bench/evaluators/default.py\\\", line 117, in check_correctness\\n    torch.cuda.synchronize(device)\\n  File \\\"/opt/conda/envs/py312/lib/python3.12/site-packages/torch/cuda/__init__.py\\\", line 1172, in synchronize\\n    return torch._C._cuda_synchronize()\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\ntorch.AcceleratorError: CUDA error: misaligned address\\nSearch for `cudaErrorMisalignedAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\\n\\n\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 1096.2852456569672\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_decode_qk4_v8_d128_k_last\",\n    \"execution_time\": \"1096.29s\",\n    \"error\": \"RUNTIME_ERROR: [1/2] /usr/local/cuda/bin/nvcc -MD -MF kernel.cuda.o.d -DTORCH_EXTENSION_NAME=torch_agent_3791cf94_86d024 -DTORCH_API_INCLUDE_EXTENSION_H -I/root/.cache/flashinfer_bench/cache/torch/torch_agent_3791cf94_86d024 -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include -isystem /opt/conda/envs/py312/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -isystem /opt/conda/envs/py312/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_100,code=compute_100 -gencode=arch=compute_100,code=sm_100 --compiler-options '-fPIC' -std=c++20 -c /root/.cache/flashinfer_bench/cache/torch/torch_agent_3791cf94_86d024/kernel.cu -o kernel.cuda.o \\n[2/2] c++ kernel.cuda.o -shared -L/opt/conda/envs/py312/lib/python3.12/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda/lib64 -lcudart -o torch_agent_3791cf94_86d024.so\\nTraceback (most recent call last):\\n  File \\\"/opt/conda/envs/py312/lib/python3.12/site-packages/flashinfer_bench/bench/evaluators/default.py\\\", line 117, in check_correctness\\n    torch.cuda.synchronize(device)\\n  File \\\"/opt/conda/envs/py312/lib/python3.12/site-packages/torch/cuda/__init__.py\\\", line 1172, in synchronize\\n    return torch._C._cuda_synchronize()\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\ntorch.AcceleratorError: CUDA error: misaligned address\\nSearch for `cudaErrorMisalignedAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\\n\\n\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_91e",
+        "solution_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/2_2/solution_91e.py",
+        "evaluation_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/2_2/evaluation_91e.json",
+        "score": 733.2072576651855,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 7332.07x (ref: 118.686ms, kernel: 0.010ms)\",\n  \"score\": 733.2072576651855,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 7332.072576651854,\n    \"exec_time_ms\": 0.00964266049382716,\n    \"baseline_time_ms\": 118.68617646604937,\n    \"compile_time\": 0.0,\n    \"eval_time\": 458.13945484161377\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_decode_qk4_v8_d128_k_last\",\n    \"execution_time\": \"458.14s\",\n    \"kernel_latency_ms\": \"0.010ms\",\n    \"reference_latency_ms\": \"118.686ms\",\n    \"speedup\": \"7332.07x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 118.68617646604937,\n      \"max_relative_error\": 0.37495818734169006,\n      \"max_absolute_error\": 6.103515625e-05,\n      \"total_workloads\": 54\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_f18",
+        "solution_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/2_2/solution_f18.py",
+        "evaluation_file_path": "output/c858b763-69d1-4af5-aff8-9d1ccafa4017/8/executor/2_2/evaluation_f18.json",
+        "score": 798.5975444231406,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 7985.98x (ref: 115.023ms, kernel: 0.009ms)\",\n  \"score\": 798.5975444231406,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 7985.975444231405,\n    \"exec_time_ms\": 0.008602722222222222,\n    \"baseline_time_ms\": 115.0229111265432,\n    \"compile_time\": 0.0,\n    \"eval_time\": 912.5044040679932\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_decode_qk4_v8_d128_k_last\",\n    \"execution_time\": \"912.50s\",\n    \"kernel_latency_ms\": \"0.009ms\",\n    \"reference_latency_ms\": \"115.023ms\",\n    \"speedup\": \"7985.98x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 115.0229111265432,\n      \"max_relative_error\": 0.37495818734169006,\n      \"max_absolute_error\": 6.103515625e-05,\n      \"total_workloads\": 54\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

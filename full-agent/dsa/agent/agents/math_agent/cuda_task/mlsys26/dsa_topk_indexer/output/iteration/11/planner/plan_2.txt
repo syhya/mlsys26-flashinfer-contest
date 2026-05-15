@@ -1,0 +1,13 @@
+Plan 2: Keep architecture, upgrade K-cache loads to uint4 + cooperative scale broadcast (vertical optimization).
+
+Mathematical: same scoring formulation. Only memory access changes.
+
+Solver: Within compute_scores_kernel, change inner loop to use 8 threads per token (quarter-warp), each loading 16 bytes (uint4) of K. Compute 4 tokens per warp simultaneously. Reduce arithmetic per thread: 16 channels per thread × 64 heads with q_smem in transposed layout.
+
+But wait — the parent's design already has each thread compute full 128-channel dot product for 2 heads (no cross-warp reduction). To use uint4 loads we either (a) revert to channel-parallel mapping (loses head-parallel benefit) or (b) load K cooperatively via 8 threads then broadcast K into shared memory with uint4 (the original parent code already loads K to shared memory). The K load currently uses 32 threads × uint32 per token = 128 bytes; switching to 32 threads × uint4 = 512 bytes, exceeding 128 bytes, wasting bandwidth.
+
+Better: change to 8 threads per token loading uint4 each (=128 bytes total per token), then store to k_smem. This reduces #instructions by 4x for K load, freeing the warp to load 4 tokens per iteration instead of 1. Iterations drop from 8 to 2.
+
+Validity: Same external CUB sort guarantees correctness. Strict NaN/-inf masking unchanged.
+
+Why: Direct vertical optimization recommended in summary. Low risk, deterministic. Likely 5-10% speedup.

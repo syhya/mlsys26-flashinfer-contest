@@ -1,0 +1,6 @@
+Plan 3: Keep best parent (fast-path + scoring kernel) unchanged; add uint4 K-load + software-pipelined K prefetch (next-iter K load overlapped with current-iter dot product)
+- Purely vertical micro-opt on long-path scoring.
+- Fast-path unchanged.
+- CUB sort unchanged.
+Expected gain: marginal (<10%) because CUB sort is bottleneck per summary insight. Amdahl wall.
+Low risk, low reward. Rejected in favor of plan 2 which attacks real bottleneck.

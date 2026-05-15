@@ -1,0 +1,135 @@
+# Role
+You are a world-class expert in high-performance computing, specializing in PyTorch and CUDA C++ programming.
+
+# Task
+You will be given a JSON task definition describing a GPU kernel operation. Your goal is to implement a **highly optimized CUDA kernel** that significantly outperforms the provided PyTorch reference implementation while maintaining strict numerical correctness.
+
+The definition includes:
+1. **Tensor specifications**: shapes, dtypes, and descriptions for all inputs and outputs
+2. **Axes**: dimension parameters (some constant, some variable like total_seq_len, num_seqs)
+3. **Constraints**: relationships between dimensions
+4. **Reference implementation**: a correct but unoptimized Python/PyTorch `run()` function
+
+# Input Format
+The initial file is a JSON object with the following structure:
+```json
+{
+  "name": "task_identifier",
+  "description": "What this kernel does",
+  "axes": { ... },       // Dimension parameters
+  "inputs": { ... },     // Input tensor specs (shape, dtype)
+  "outputs": { ... },    // Expected output specs
+  "constraints": [...],  // Dimension constraints
+  "reference": "..."     // Reference Python implementation
+}
+```
+The `reference` field contains a Python function `run(*inputs) -> outputs` that serves as the correctness baseline.
+
+# Output Format
+Provide exactly one final `cpp` code block containing the full contents of `kernel.cu`.
+
+Formatting requirements:
+1. Output exactly one fenced code block with language tag `cpp`.
+2. Include no explanation, analysis, or extra text outside the code block.
+3. Include all required `#include`s, helper functions, CUDA kernels, the required entry point, and the `PYBIND11_MODULE(...)` binding in the same file.
+4. Follow the exact function name and signature specified below.
+5. Return tensors with exactly the required shapes and dtypes.
+6. Make the code self-contained and directly compilable as `kernel.cu`.
+
+Your `kernel.cu` MUST include `<torch/extension.h>` and expose exactly this C++ entry point:
+
+```cpp
+#include <torch/extension.h>
+#include <tuple>
+
+// ... your CUDA kernels and helpers ...
+
+// Entry point – must have this exact name and signature
+std::tuple<torch::Tensor, torch::Tensor> gdn_forward(
+    torch::Tensor q,           // [total_seq_len, 4, 128]          bfloat16
+    torch::Tensor k,           // [total_seq_len, 4, 128]          bfloat16
+    torch::Tensor v,           // [total_seq_len, 8, 128]          bfloat16
+    torch::Tensor state,       // [num_seqs, 8, 128, 128]          float32  (k-last: [N,HV,V,K]), may be undefined/empty
+    torch::Tensor A_log,       // [8]                               float32
+    torch::Tensor a,           // [total_seq_len, 8]                bfloat16
+    torch::Tensor dt_bias,     // [8]                               float32
+    torch::Tensor b,           // [total_seq_len, 8]                bfloat16
+    torch::Tensor cu_seqlens,  // [num_seqs + 1]                   int64
+    float scale                // scalar float32 value
+);
+// Returns: {output [total_seq_len, 8, 128] bfloat16, new_state [num_seqs, 8, 128, 128] float32}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gdn_forward", &gdn_forward, "GDN Prefill Forward");
+}
+```
+
+# Correctness Requirements (HIGHEST PRIORITY)
+
+Correctness is the first priority. A fast but incorrect kernel scores zero.
+
+1. Output shapes and dtypes must match exactly: `output` is bfloat16, `new_state` is float32.
+2. Numerical tolerance: rtol=1e-2, atol=1e-2.
+3. All intermediate accumulation must be in **FP32**; convert back to BF16 only for final `output` store.
+4. All variable axes (`total_seq_len`, `num_seqs`) must work for any valid value.
+5. `state` is optional: check with `state.defined() && state.numel() > 0`; initialize recurrent state to zeros when not provided.
+6. `scale` is a scalar float value.
+7. `cu_seqlens[i]` and `cu_seqlens[i+1]` define the token range `[start, end)` for sequence `i`.
+8. Gate formulas must be exact:
+   - `softplus(x) = log(1 + exp(x))` (stable: return `x` directly when `x > 20`)
+   - `g = exp(-exp(A_log) * softplus(a + dt_bias))`
+   - `beta = sigmoid(b) = 1 / (1 + exp(-b))`
+
+
+
+# Optimization Priorities
+Once correctness is guaranteed, optimize with following suggestions:
+1. **Register-resident state**: Keep assigned state rows in registers throughout the token loop. Partition V=128 across thread blocks; each warp owns a fixed set of V rows and carries them through the loop. The number of V rows per warp (RPW) is a key tuning knob.
+2. **Warp-level reduction**: Use `__shfl_xor_sync` / `__shfl_sync` for per-token dot products (kh, qh over K=128).
+3. **Vectorized memory access**: Use `float4`, `uint2`, or `__nv_bfloat162` for loads/stores. Prefetch q/k values into registers early in the loop.
+4. **Fast math intrinsics**: Use `__expf`, `__logf`, `__frcp_rn`, `fmaf` for gate computation hot paths while staying within tolerance.
+5. **Launch configuration**: Use `__launch_bounds__` to control register allocation and improve occupancy.
+
+# Available Third-party Libraries
+You are encouraged to call these libraries directly from `kernel.cu` when they provide a performance advantage:
+- **CUB** (`<cub/cub.cuh>`): block-level and warp-level primitives (e.g., `cub::WarpReduce`) for dot-product reductions.
+- **CUTLASS / CuTe** (`<cute/tensor.hpp>` etc.): tile-level abstractions if a tiled outer-product approach is explored.
+- **Standard CUDA math** (`<cuda_bf16.h>`, `<cuda_fp16.h>`): bfloat16/fp16 arithmetic helpers.
+
+
+# Example
+
+===== Example Start =====
+
+Given model:
+
+```json
+{
+  "name": "task_identifier",
+  "description": "What this kernel does",
+  "axes": { ... },
+  "inputs": { ... },
+  "outputs": { ... },
+  "constraints": [...],
+  "reference": "..."
+}
+```
+
+You should respond with exactly one final code block in this form:
+
+```cpp
+#include <torch/extension.h>
+#include <tuple>
+
+// ... your CUDA kernels and helpers ...
+
+// Use the exact gdn_forward signature specified above.
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gdn_forward", &gdn_forward, "GDN Prefill Forward");
+}
+```
+
+===== Example End =====
+
+Now, provide your answer below:

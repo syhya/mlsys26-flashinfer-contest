@@ -1,0 +1,406 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a single-file `run()` for FP8 block-scale MoE on B200 that reaches **evaluation score >= 1.0** by preserving strict routing/block-scale correctness while recovering as much of the parent lineage’s speed as possible. The current island best score is **0.8626**, so the search is **not yet solved**; we should avoid another pure-safety regression and instead adopt a **robust hybrid plan** that isolates the faulty stage and only accelerates stages that can be validated deterministically.
+
+**Selected Outline:** Two-tier exact/optimized MoE with deterministic oracle cross-check at stage boundaries
+
+**Rationale for Selection:**
+1. The parent solution is correct enough to pass evaluator checks but is far too slow because it fully dequantizes in eager PyTorch and loops over experts serially.
+2. The summary explicitly says this child should be treated as a **correctness oracle**, not as a final architecture. That is valuable: we now have a safe reference implementation pattern for stagewise validation.
+3. The main unresolved issue in the fast lineage is likely a **structural bug in a specific stage** (grouped GEMM, token-scale lookup, scatter, or masked writes), not the overall routing formula.
+4. Therefore the most robust next step is **not** a totally new algorithm and **not** another full-FP32 regression. It is a **validation-gated hybrid algorithm**:
+   - keep exact routing/dispatch,
+   - keep an exact oracle implementation for every stage,
+   - enable optimized execution only for stages that match the oracle on deterministic calibration slices,
+   - fall back automatically for any stage that fails.
+5. This directly follows the database/global view: there is one island, best score still below 1.0, so we need a plan that combines the parent’s speed structure with the child’s correctness oracle rather than choosing either extreme.
+
+---
+
+## Phase 1: Mathematical Definition
+
+### 1.1 Core variables
+Let:
+- `T` = number of tokens.
+- `E_global = 256`, `E_local = 32`.
+- `H = 7168`, `I = 2048`, `BLOCK = 128`.
+- `N_GROUP = 8`, `GROUP_SIZE = 32`, `TOPK_GROUP = 4`, `TOPK_EXPERT = 8`.
+
+Define input tensors:
+- `L ∈ R^(T×256)` = `routing_logits`
+- `b ∈ R^(256)` = `routing_bias`
+- `A_fp8 ∈ FP8^(T×H)` = `hidden_states`
+- `S_A ∈ R^((H/128)×T)` = `hidden_states_scale`
+- `W1_fp8 ∈ FP8^(32×(2I)×H)` = `gemm1_weights`
+- `S_W1 ∈ R^(32×((2I)/128)×(H/128))` = `gemm1_weights_scale`
+- `W2_fp8 ∈ FP8^(32×H×I)` = `gemm2_weights`
+- `S_W2 ∈ R^(32×(H/128)×(I/128))` = `gemm2_weights_scale`
+
+Routing decision variables:
+- `G_top4[t]` = selected top-4 groups for token `t`
+- `E_top8[t, j]` = selected global expert ids for token `t`, `j ∈ {0..7}`
+- `α[t, j]` = normalized routing weights
+
+Dispatch variables:
+- `tok[k]` = token id for dispatched pair `k`
+- `exp[k]` = local expert id for dispatched pair `k`
+- `w[k]` = routing weight for dispatched pair `k`
+- `offs[e]` = CSR offset for expert `e`, length `E_local+1`
+
+Intermediate variables per expert `e`:
+- `A_e` = gathered activation rows for routed tokens of expert `e`
+- `G1_e = A_e @ W1_e^T ∈ R^(T_e×2I)`
+- `X1_e = G1_e[:, :I]`
+- `X2_e = G1_e[:, I:]`
+- `Swi_e = silu(X2_e) * X1_e ∈ R^(T_e×I)`
+- `Y_e = Swi_e @ W2_e^T ∈ R^(T_e×H)`
+- final accumulation `Out ∈ R^(T×H)`
+
+### 1.2 Hard constraints
+The child implementation must satisfy:
+
+1. **Exact routing topology**
+   - `σ = sigmoid(L.float())`
+   - `score = σ + b.float()` for selection only
+   - reshape into `[T, 8, 32]`
+   - group score = sum of top-2 experts within each group
+   - select top-4 groups
+   - restrict candidate experts to those groups
+   - select global top-8 experts by `score`
+   - final routing weights are from `σ`, not `score`, normalized rowwise and multiplied by `routed_scaling_factor`
+
+2. **Exact FP8 block-scale semantics**
+   - activation dequantization:
+     - `A_deq[t, h] = A_fp8[t, h].float() * S_A[h//128, t]`
+   - GEMM1 weight dequantization:
+     - `W1_deq[e, n, h] = W1_fp8[e, n, h].float() * S_W1[e, n//128, h//128]`
+   - GEMM2 weight dequantization:
+     - `W2_deq[e, h, i] = W2_fp8[e, h, i].float() * S_W2[e, h//128, i//128]`
+
+3. **Original token scale indexing**
+   - when expert batches gather tokens, activation scales must be read using the original global token ids, not local batch row ids.
+
+4. **Accumulation precision**
+   - GEMM1 and GEMM2 accumulations in FP32.
+   - final cast to BF16 only once.
+
+5. **Dispatch correctness**
+   - each local routed token/expert pair appears exactly once in the expert batch.
+   - scatter-add sums all local-expert contributions back to the token row.
+
+6. **Output contract**
+   - return tensor shape `[T, 7168]`, dtype `torch.bfloat16`.
+
+### 1.3 Optimization objective
+Use lexicographic objective:
+- Primary: correctness under task tolerance.
+- Secondary: minimize runtime.
+
+Formally:
+- maximize `f(X) = Valid(X) * Speedup(X)`
+- where `Valid(X)` dominates all speed considerations.
+
+This means the implementation should prefer a validated fast stage over an unvalidated speculative optimization.
+
+---
+
+## Phase 2: The Optimization Loop
+
+This is a **deterministic stage-selection and execution procedure**, not a random search.
+
+### 2.1 Step A — Solve routing exactly with vectorized PyTorch
+Use only standard tensor ops:
+1. `sig = torch.sigmoid(routing_logits.float())`
+2. `sel = sig + routing_bias.float().view(1, 256)`
+3. reshape `sel` to `[T, 8, 32]`
+4. compute `group_scores = topk(sel_group, k=2, dim=2).values.sum(dim=2)`
+5. choose `top_groups = topk(group_scores, k=4, dim=1).indices`
+6. build `group_mask` and `expert_mask`
+7. set experts outside chosen groups to `-inf`
+8. choose final `topk_idx = topk(pruned, k=8, dim=1).indices`
+9. gather weights from `sig`, normalize, multiply by `routed_scaling_factor`
+
+This stage is exact and should remain unchanged from the correctness oracle pattern.
+
+### 2.2 Step B — Build exact GPU dispatch structure
+Use GPU vectorized ops only:
+1. Compute `local_mask = (topk_idx >= local_expert_offset) & (topk_idx < local_expert_offset + 32)`
+2. `tok, slot = torch.nonzero(local_mask, as_tuple=True)`
+3. `local_exp = (topk_idx[tok, slot] - local_expert_offset).long()`
+4. `weights = topk_w[tok, slot].float()`
+5. sort by expert id using `torch.argsort(local_exp)`
+6. build CSR offsets using `torch.bincount` and `torch.cumsum`
+
+This decouples the hard discrete structure-finding problem from later numeric execution.
+
+### 2.3 Step C — Build a deterministic oracle implementation for each stage
+The oracle is the mathematical reference used for validation and fallback.
+
+Implement helpers:
+1. `dequant_hidden_rows(hidden_states, hidden_states_scale, token_ids)`
+   - gather FP8 rows by `token_ids`
+   - gather scales by original token ids from `hidden_states_scale[:, token_ids]`
+   - transpose to `[T_e, 56]`, expand each scale block by `repeat_interleave(128, dim=1)`, trim to `7168`
+   - multiply with `hidden_states[token_ids].float()`
+
+2. `dequant_w1_chunk(expert_w, expert_scale, n0, n1)`
+   - slice output rows `[n0:n1]`
+   - map block rows `n0//128 : ceil(n1/128)` from scale tensor
+   - expand only needed blocks to exact chunk shape
+   - return FP32 chunk
+
+3. `dequant_w2_chunk(expert_w, expert_scale, h0, h1)`
+   - slice output rows `[h0:h1]`
+   - expand only needed hidden blocks and all `I` columns
+   - return FP32 chunk
+
+4. `oracle_expert_forward(tok_e, w_e, expert_id, out_fp32)`
+   - dequant activation rows once for expert batch
+   - chunk GEMM1 across output channels
+   - form SwiGLU in FP32
+   - chunk GEMM2 across output hidden channels
+   - multiply by routing weights and scatter-add into `out_fp32`
+
+### 2.4 Step D — Candidate optimized stages
+Do **not** optimize the whole operator at once. Optimize per stage.
+
+Candidate stage set:
+- **Stage R/D**: routing + dispatch in PyTorch, fixed exact, never replaced.
+- **Stage G1**: candidate optimized backend.
+- **Stage G2+scatter**: candidate optimized backend only if independently validated.
+
+Recommended practical choice for next child:
+1. Keep routing/dispatch exact in PyTorch.
+2. Reintroduce a fast path for **GEMM1 first**, because it dominates cost and uses natural FP8 inputs.
+3. Keep **GEMM2 + scatter** on oracle path initially unless a previously known fast path can be validated cleanly.
+
+This targets the likely bug while still recovering speed.
+
+### 2.5 Step E — Deterministic calibration subset for stage validation
+For each expert `e`, before enabling a fast stage globally, validate it on a small deterministic calibration slice.
+
+Use this calibration algorithm:
+1. For each expert with `T_e > 0`, choose `m_cal = min(T_e, 8)` first rows of its sorted token batch.
+2. Build oracle stage output on those rows.
+3. Build candidate fast stage output on the same rows and same expert.
+4. Compare using:
+   - `max_abs = (fast - oracle).abs().max()`
+   - `max_rel = ((fast - oracle).abs() / (oracle.abs() + 1e-6)).max()`
+5. Accept stage if thresholds are satisfied, e.g. stagewise `max_abs <= 1e-2 * scale_guard + c` and `max_rel <= 5e-2` for calibration. Use conservative bounds.
+6. If any expert fails validation, disable that fast stage globally and use oracle for that stage.
+
+This is a deterministic accept/reject solver for stage choice.
+
+### 2.6 Step F — Full execution with chosen composition
+After validation, run full execution with one of the following compositions:
+
+- **Mode 1: Hybrid preferred**
+  - routing/dispatch exact
+  - GEMM1 fast path
+  - SwiGLU exact PyTorch
+  - GEMM2 oracle chunked FP32
+  - scatter exact `index_add_`
+
+- **Mode 2: Conservative fallback**
+  - full oracle path for all experts
+
+The executor should code both, but default to Mode 1 only if calibration passes.
+
+### 2.7 Step G — Output assembly
+1. Maintain `out_fp32 = torch.zeros((T, H), device=device, dtype=torch.float32)`
+2. For each expert span:
+   - compute contribution
+   - multiply by routing weights in FP32
+   - `out_fp32.index_add_(0, tok_e, y_e)`
+3. Return `out_fp32.to(torch.bfloat16)`
+
+---
+
+## Phase 3: The "Safety Valve" (CRITICAL)
+
+This phase is mandatory. It guarantees validity even if optimized stages are broken or unsupported.
+
+### 3.1 Safety Valve A — Backend admissibility gate
+Before any fast-path call, check all of the following:
+1. input dtype support exists for current runtime/device
+2. output accumulation can be FP32
+3. scale layout is representable exactly for the backend
+4. no extra lossy requantization is required for SwiGLU intermediates
+5. shapes are legal for the backend
+
+If any check fails, skip fast path entirely.
+
+### 3.2 Safety Valve B — Stagewise oracle cross-check
+Even if admissibility passes, do not trust the fast stage immediately.
+
+Use the deterministic calibration subset described above. If mismatch exceeds threshold for any tested expert, disable the fast stage globally.
+
+This prevents silent structural bugs such as:
+- wrong token-scale lookup
+- wrong expert stride/indexing
+- masked store corruption
+- pointer arithmetic overflow in custom kernels
+- bad scatter mapping
+
+### 3.3 Safety Valve C — Exact oracle fallback
+If a stage is rejected, replace it with exact chunked dequantization + `torch.mm`.
+
+That fallback is deterministic and mathematically aligned with the task:
+- no grouped-kernel assumptions
+- no speculative block-scale reinterpretation
+- no dependence on undocumented backend behavior
+
+### 3.4 Safety Valve D — Memory-bounded chunking
+To prevent OOM while preserving exactness:
+
+1. **Activation dequantization**
+   - dequant gathered rows once per expert batch
+   - if `T_e` is large, process token rows in chunks (e.g. 32/64 rows)
+
+2. **GEMM1 chunking**
+   - dequant `W1` in `n_chunk` slices such as 256 or 512 output channels
+   - compute `A_e @ W1_chunk.T`
+   - store directly into preallocated `g1`
+
+3. **GEMM2 chunking**
+   - dequant `W2` in `h_chunk` slices such as 256 or 512 hidden channels
+   - compute partial output
+   - multiply routing weights
+   - directly scatter-add slice into `out_fp32[:, h0:h1]` if convenient
+
+This keeps complexity polynomial and memory bounded.
+
+### 3.5 Safety Valve E — Final validity projection
+Before return:
+1. ensure `out_fp32` exists even when no local experts are hit
+2. optional defensive `torch.nan_to_num(out_fp32)` if any backend is used and numerical anomalies are possible
+3. cast exactly once: `return out_fp32.to(torch.bfloat16)`
+
+This guarantees a valid tensor output.
+
+---
+
+## Phase 4: Implementation Details
+
+### 4.1 Libraries to use
+Use only standard, available libraries in the evaluation environment:
+- `torch`
+- `torch.nn.functional as F`
+- optionally `triton` only if the executor already has a known-good kernel pattern; otherwise avoid introducing new Triton risk in this child
+
+No obscure packages.
+
+### 4.2 Exact helper functions to implement
+The single Python file should define:
+
+1. `route_tokens(routing_logits, routing_bias, routed_scaling_factor)`
+   - exact routing
+   - returns `topk_idx`, `topk_w`
+
+2. `build_local_dispatch(topk_idx, topk_w, local_expert_offset, e_local)`
+   - returns `sorted_tokens`, `sorted_local_exp`, `sorted_weights`, `expert_offsets`
+
+3. `expand_block_scales_2d(scale_2d, block0, block1, dim0, dim1)`
+   - generic helper for exact chunk expansion
+
+4. `dequant_hidden_rows(hidden_states, hidden_states_scale, token_ids)`
+   - exact activation dequantization using original token ids
+
+5. `dequant_gemm1_weight_chunk(expert_w, expert_scale, n0, n1)`
+   - exact chunked dequantization for GEMM1
+
+6. `dequant_gemm2_weight_chunk(expert_w, expert_scale, h0, h1)`
+   - exact chunked dequantization for GEMM2
+
+7. `oracle_gemm1(a_e, w1_fp8, s_w1, chunk_n=512)`
+   - returns full `g1` in FP32 using chunked dequant+mm
+
+8. `oracle_gemm2(s_e, w2_fp8, s_w2, chunk_h=512)`
+   - returns full or sliced `y_e` in FP32 using chunked dequant+mm
+
+9. `validate_stage_gemm1(...)`
+   - deterministic calibration subset comparison of candidate fast GEMM1 against oracle GEMM1
+   - returns boolean `use_fast_gemm1`
+
+10. `run_expert_hybrid(...)`
+    - executes expert computation using validated stage composition
+
+### 4.3 Recommended concrete algorithm for executor
+Implement the next child with this exact structure:
+
+1. Compute `topk_idx`, `topk_w`
+2. Build dispatch `sorted_tokens`, `sorted_weights`, `expert_offsets`
+3. If no local tokens, return zeros bf16
+4. Build `unique_tokens, inverse = torch.unique(sorted_tokens, sorted=True, return_inverse=True)`
+5. Dequantize unique activations once with oracle helper:
+   - this reuses the strongest idea from the parent child summary
+6. Validate candidate fast GEMM1 on deterministic calibration slices using those cached activations
+7. For each local expert:
+   - get token span from CSR
+   - gather cached activations using `inverse[start:end]`
+   - run GEMM1 using fast path if validated, else oracle
+   - `x1, x2 = g1[:, :I], g1[:, I:]`
+   - `s = F.silu(x2) * x1`
+   - run GEMM2 using oracle chunked path for this child
+   - multiply by routing weights
+   - scatter-add to `out_fp32`
+8. Return bf16 output
+
+### 4.4 Fast path recommendation
+For this iteration, the best robust compromise is:
+- **Optimize GEMM1 only** if validated.
+- Keep **GEMM2 exact/oracle**.
+- Do not attempt grouped fused GEMM2+scatter unless the executor has a previously validated implementation.
+
+Reason: this localizes the bug and still captures a substantial portion of speedup.
+
+### 4.5 Complexity and performance expectation
+This plan remains polynomial:
+- routing: `O(T * 256)` plus top-k overhead
+- dispatch: `O(T * 8 log(T*8))` worst-case sort cost
+- expert compute: proportional to routed token count
+- memory bounded by chunking
+
+Expected behavior versus the parent child:
+- substantially faster than full eager dequant of both GEMMs for all experts
+- safer than reinstating the full grouped Triton pipeline at once
+- much more likely to preserve correctness while improving speed enough to move back toward the island best score
+
+---
+
+## Review of Robustness
+
+### Does this rely on math rather than luck?
+Yes. The plan is a deterministic decomposition into:
+- exact routing,
+- exact dispatch,
+- exact oracle stage definitions,
+- deterministic validation-gated stage selection,
+- exact fallback.
+
+### Library Check
+Yes. The plan only requires standard libraries already present in the task environment:
+- `torch`
+- `torch.nn.functional`
+- optional `triton` only if already known-good
+
+### Randomness Check
+No randomness is required. Therefore no multi-start loop is needed.
+
+### Is the code implementable?
+Yes. The plan is code-ready in a single `.py` file and aligns with the task’s `run()` signature.
+
+---
+
+## Final Recommendation to Executor
+
+Generate the child as a **validation-gated hybrid MoE implementation**:
+1. Keep routing and dispatch exact and vectorized in PyTorch.
+2. Keep the parent child’s exact dequantized path as an oracle baseline.
+3. Reintroduce acceleration **stage by stage**, starting with GEMM1 only.
+4. Before using any optimized stage, validate it on deterministic calibration slices against the oracle.
+5. If validation fails or backend support is unclear, immediately fall back to the exact chunked oracle stage.
+6. Keep GEMM2 and scatter on the exact path for this iteration unless already validated independently.
+7. Accumulate in FP32 and cast to BF16 once at the end.
+
+This is the most algorithmically robust next step because it directly uses the learned oracle from the failed parent, preserves correctness guarantees, and restores speed only where the optimization can be mathematically justified and mechanically validated.

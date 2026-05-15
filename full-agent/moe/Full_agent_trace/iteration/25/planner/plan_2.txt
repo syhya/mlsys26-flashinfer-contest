@@ -1,0 +1,57 @@
+### Plan 2: Differential Debugging with Staged Validation
+
+**Mathematical Formulation:**
+
+Variables:
+- Same as Plan 1
+
+Constraints:
+- Same as Plan 1
+- Additional: Each stage output must match reference within tolerance
+
+Objective:
+- Identify the FIRST stage where divergence occurs
+- Fix that stage, then proceed to next
+- Minimize total error propagation
+
+**Solver Strategy:**
+
+Multi-stage validation approach:
+1. Stage 1: Routing - validate against reference routing
+2. Stage 2: GEMM1 - validate one expert's output against exact dequant
+3. Stage 3: SwiGLU - validate activation output
+4. Stage 4: GEMM2 - validate one expert's output
+5. Stage 5: Scatter-add - validate final accumulation
+
+For each stage:
+- Implement both "fast path" (Triton) and "oracle path" (exact PyTorch)
+- Compare outputs on small subset
+- If mismatch > threshold, use oracle for that stage
+- Iterate until all stages pass
+
+**Validity Mechanism:**
+
+1. Per-stage tolerance checking with explicit assertions
+2. Automatic fallback to oracle implementation if fast path diverges
+3. Logging of which stage fails for diagnostic purposes
+4. Final output guaranteed correct by construction (all stages validated)
+
+**Why this solution:**
+
+Advantages:
+- Systematically isolates the bug location
+- Provides diagnostic information for future iterations
+- Guarantees correctness through staged validation
+- Can mix fast and slow paths optimally
+
+Disadvantages:
+- Complex implementation with many branches
+- Validation overhead may reduce speed significantly
+- May not achieve high speedup if multiple stages need oracle
+- Debugging code adds maintenance burden
+
+Expected Performance:
+- Correctness: VERY HIGH (staged validation guarantees)
+- Speed: LOW to MEDIUM (validation overhead)
+- Score target: 0.5-1.0 (correctness yes, speed uncertain)
+- Primary value: DIAGNOSTIC for next iteration

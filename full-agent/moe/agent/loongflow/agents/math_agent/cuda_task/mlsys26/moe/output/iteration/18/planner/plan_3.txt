@@ -1,0 +1,37 @@
+Outline 3: Algorithmic reset with torch.compile-style vectorized expert packing and pure PyTorch block dequant matmuls
+
+Mathematical Formulation
+- Variables X:
+  - Local routed pairs packed into a dense expert-major layout.
+  - Blockwise dequantized hidden-state panels A_e and weight panels W1_e, W2_e.
+  - Final output Y.
+- Constraints C:
+  1. Exact DeepSeek routing semantics.
+  2. Exact FP8 blockwise scaling semantics.
+  3. Float32 accumulations only.
+  4. Output bfloat16 [T,7168].
+- Objective f(X):
+  - Maximize evaluator score by abandoning fragile custom kernels and using only semantically transparent vectorized PyTorch ops.
+
+Solver Strategy
+- Deterministic tensor-program approach:
+  1. Build routing and CSR exactly.
+  2. Use packed per-expert loops at Python level, but each expert uses large torch ops only.
+  3. Dequantize by broadcasting scale blocks instead of nested scalar loops.
+  4. Compute G1, SwiGLU, GEMM2, and scatter in PyTorch.
+- No stochastic components.
+
+Validity Mechanism
+- Exactness guaranteed because every step is explicit tensor algebra in PyTorch.
+- Repair rule: if temporary tensors would exceed a memory threshold, chunk across N or K blocks deterministically.
+- Output validity is guaranteed by exact scatter and final cast.
+
+Why this solution?
+- Expected performance improvement: lower implementation risk and likely enough speed if vectorization/chunking is efficient on B200, potentially surpassing older flawed Triton children if they are semantically wrong.
+- Advantages:
+  - Maximum robustness.
+  - Easy to verify and maintain.
+  - Zero Triton compilation or pointer-risk issues.
+- Disadvantages:
+  - Probably slower than the best custom-kernel approach.
+  - May not reach score >= 1.0 if latency remains too high.

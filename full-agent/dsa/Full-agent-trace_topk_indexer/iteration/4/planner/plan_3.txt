@@ -1,0 +1,21 @@
+Plan 3: Two-Stage Kernel with Warp-Level Vectorized Dot Products and CUB Radix Select
+
+Mathematical Formulation:
+- Variables: Memory access vector size (V), Threads per block (T).
+- Constraints: Alignment restrictions: FP8 deep_gemm format is 132 bytes per head, breaking 16-byte alignment.
+- Objective Function: Maximize cache hit rate and ensure coalesced memory loads.
+
+Solver Strategy:
+1. Stage 1 Kernel (Scoring): Assign 1 warp (32 threads) per token. The 128-dimensional head is processed by 32 threads (4 elements per thread). Use `float4` vectorized loads where possible, or fallback to `uint32_t` loads for FP8.
+2. The scale (4 bytes) is loaded separately. Compute dot product using `__dp4a` or explicit FP8-to-FP32 casts and FMA.
+3. Use `__shfl_down_sync` for rapid warp-level reduction across the 128 dimension. Apply ReLU, multiply by weight, and atomicAdd to the token's total score.
+4. Stage 2 Kernel (Selection): Write all scores to global memory. Use a two-pass Top-K: first a block-level Top-K using a heap/priority queue to reduce candidates, then a global gather and final CUB sort.
+
+Validity Mechanism:
+1. Padding enforcement: Initialize the global score buffer to exactly `-INFINITY`.
+2. Mathematical Equivalence: The warp reduction using `__shfl_down_sync` is deterministically equivalent to `sum(dim=...)` in PyTorch, avoiding race conditions that atomicAdd might introduce.
+3. Fallback: If `cub::DeviceRadixSort` memory allocation fails, use a deterministic pre-allocated workspace.
+
+Why this solution?
+- Advantages: Warp-level reduction is highly robust, easy to implement correctly, and avoids complex MMA register layouts.
+- Disadvantages: Not utilizing Tensor Cores limits the theoretical peak FLOPS, but bandwidth is often the bottleneck in indexing tasks anyway.

@@ -1,0 +1,25 @@
+Outline 2: Pure PyTorch exact block-dequant + batched expert solver
+
+Mathematical Formulation
+Variables (X): exact dequantized hidden rows A_e in R^{Tk_e x 7168}, exact dequantized W1_e in R^{4096 x 7168}, exact activated C_e in R^{Tk_e x 2048}, exact dequantized W2_e in R^{7168 x 2048}, output Y in R^{T x 7168}.
+Constraints (C): routing identical to specification; all dequantization by 128-block scales; GEMM accumulation in FP32; weighted scatter-add exact; output bf16.
+Objective f(X): maximize score, with primary objective correctness and secondary objective minimizing latency of exact batched implementation.
+
+Solver Strategy
+Use deterministic dense linear algebra only:
+- Solve routing via PyTorch topk operations.
+- Solve each expert subproblem exactly using torch matmul after explicit blockwise dequantization.
+- Optionally chunk dequantization over output blocks to reduce memory, which is a deterministic blocked linear solver.
+No randomness, no nonconvex search.
+
+Validity Mechanism
+Guarantee validity by construction:
+- Expand scales via repeat_interleave(128) and slice exact dimensions.
+- Dequantize only the needed token rows and expert weights.
+- Perform all matmuls in float32 and final index_add_.
+- If memory pressure is high, project to block-chunked matmul that is algebraically equivalent.
+
+Why this solution?
+Expected improvement: correctness should become unquestionably exact, useful if evaluator score rewards correctness more than speed.
+Advantages: simplest semantics, lowest bug risk, easiest to verify.
+Disadvantages: likely too slow to beat baseline enough for score >= 1.0; not leveraging B200 FP8 throughput well.

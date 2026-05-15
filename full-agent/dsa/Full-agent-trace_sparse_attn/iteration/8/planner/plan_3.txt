@@ -1,0 +1,19 @@
+**Objective:** Refine the intermediate memory layout to allow direct `float4` stores from registers without shared memory transposition, modifying the reduction kernel to read the new layout.
+
+**Mathematical Formulation:**
+* **Variables ($X$):** Thread accumulation strategy.
+* **Constraints ($C$):** 
+  1. Thread layout $(tid_y, tid_x) = (16, 32)$.
+  2. Each thread computes 16 elements (8 `float2`s).
+* **Objective ($f(X)$):** Maximize instruction-level parallelism and 128-bit memory utilization.
+
+**Solver Strategy:** 
+Layout Transformation. Instead of a single thread computing 8 scattered `float2` pairs (e.g., contiguous in $K$ but offset), we permute the dot product accumulation such that each thread holds $4 \times \text{float4}$ contiguous values.
+
+**Validity Mechanism:**
+If registers cannot be easily mapped to 4 contiguous floats, we explicitly cast `float2 O_reg[8]` to `float4 O_vec[4]` via pointer aliasing or explicit construction `make_float4(O_reg[0].x, O_reg[0].y, O_reg[1].x, O_reg[1].y)` during the final HBM store.
+
+**Why this solution?:**
+* **Expected Performance:** Direct translation of the parent's bottleneck into a solution without shared memory overhead.
+* **Advantages:** Zero shared memory overhead, pure math/register optimization.
+* **Disadvantages:** Tricky to align if the 8 `float2` registers do not represent contiguous memory offsets.

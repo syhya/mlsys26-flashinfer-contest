@@ -1,0 +1,29 @@
+Outline 2: Page-bucketed sparse attention with deterministic pre-pass compaction and segmented reduction
+
+Mathematical Formulation
+- Variables X:
+  1. For each token t, a compacted valid index list I_t = {idx_j | idx_j >= 0}.
+  2. A page-bucket partition B_t over I_t grouping entries by page = idx >> 6.
+  3. Segment descriptors S_t describing contiguous runs inside each page bucket.
+  4. Per-(token, head) online softmax state (m, l, O).
+- Constraints C:
+  1. The permutation induced by page bucketing must preserve the multiset of valid indices exactly; invalid entries are excluded.
+  2. Softmax result must equal reference over the same valid set.
+  3. All accumulations are FP32; final output BF16; lse FP32 base-2.
+  4. Any auxiliary buffer sizes are O(T * 2048), polynomial and bounded.
+- Objective f(X): minimize random global memory traffic by reordering valid sparse positions into page-local segments, improving cache locality and vectorized loads.
+
+Solver Strategy
+- Deterministic combinatorial preprocessing akin stable partition / bucket sort by page id.
+- Then use segmented online reduction per bucket and deterministic merge of partial softmax states using exact max-sum rescaling identities.
+
+Validity Mechanism
+- Stable compaction removes only -1 entries.
+- Merge step uses exact algebra for combining partial online softmax states:
+  m = max(m1, m2), l = l1*exp(m1-m) + l2*exp(m2-m), O = O1*exp(m1-m) + O2*exp(m2-m).
+- Final repair writes zeros/-INF if compacted length is zero.
+
+Why this solution?
+- Expected improvement: better locality when sparse indices cluster by page; fewer redundant page loads.
+- Advantages: mathematically exact and exploits structure of page-based encoding.
+- Disadvantages: auxiliary preprocessing may dominate for small workloads; more code complexity and higher implementation risk than outline 1.

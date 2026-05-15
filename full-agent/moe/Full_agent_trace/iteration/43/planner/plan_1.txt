@@ -1,0 +1,44 @@
+Outline 1: Structural-Correctness First Hybrid (PyTorch routing + torch._scaled_mm GEMMs + Triton scatter)
+
+Mathematical Formulation
+- Variables (X):
+  1. R in {0,1}^{T x 8}: top-8 routing indicator per token.
+  2. W in R^{T x 8}: normalized routing weights.
+  3. P: permutation/worklist arrays mapping token-expert pairs to contiguous expert batches.
+  4. G1_e = A_e * B1_e in R^{Tk_e x 4096} for each local expert e.
+  5. S_e = silu(G1_e[:, 2048:]) * G1_e[:, :2048] in R^{Tk_e x 2048}.
+  6. O_e = S_e * B2_e in R^{Tk_e x 7168}.
+- Constraints (C):
+  1. Output dtype must be bfloat16 and shape [T, 7168].
+  2. Routing follows exact DeepSeek no-aux topology: sigmoid -> group top2 sum -> top4 groups -> global top8 experts.
+  3. All GEMM accumulations are FP32.
+  4. FP8 block-scale dequant rule is respected exactly: value ~= fp8 * scale per 128-block.
+  5. Dispatch/grouping must preserve original token ids for scale lookup and final scatter-add.
+- Objective f(X): maximize evaluation score by first guaranteeing correctness >= 1.0 and then reducing latency using fused/native GPU kernels.
+
+Solver Strategy
+- Use deterministic decomposition rather than heuristic search.
+- Routing/dispatch solved by exact tensor algebra in PyTorch: topk, bincount, cumsum, argsort/stable sort.
+- GEMMs solved by PyTorch native tensor-core kernels via torch._scaled_mm when supported; fallback to torch.mm on explicitly dequantized per-expert slices only for active rows.
+- Scatter/reduction solved by exact grouped reduction using index_add_.
+
+Validity Mechanism
+- Decouple structure from arithmetic:
+  1. Structure-finding: exact routing/worklist in PyTorch.
+  2. Parameter tuning: choose among a small deterministic dispatch policy set based on T.
+- Safety valve:
+  1. Never launch Triton grid sized by T for per-expert batches; size by Tk_e/worklist only.
+  2. Use exact active-token counts from expert_offsets to avoid writing past Tk_total.
+  3. Keep original global token ids for hidden_states_scale lookup.
+  4. If torch._scaled_mm shape/layout path is unsupported, fallback to exact dequant + matmul for active experts only.
+  5. Final output built by FP32 accumulation then cast once to bf16.
+
+Why this solution?
+- Expected improvement: parent summary says persistent 8192 absolute error is structural, not precision-related. This plan directly attacks structural bugs by replacing risky custom Triton GEMMs with native GEMM primitives while preserving GPU-parallel dispatch.
+- Advantages:
+  1. Most robust correctness path.
+  2. Likely enough speed because only active token-expert pairs are processed.
+  3. Minimal risk of masking/pointer bugs.
+- Disadvantages:
+  1. May not be fastest possible.
+  2. Native scaled_mm API behavior can vary; requires careful fallback path.

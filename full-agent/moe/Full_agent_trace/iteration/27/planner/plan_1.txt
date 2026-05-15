@@ -1,0 +1,46 @@
+## Plan 1: Fused Single-Pass Kernel (GEMM1 + SwiGLU + GEMM2 in One Kernel)
+
+**Objective:** Eliminate the intermediate G1 buffer [Tk_total, 4096] float32 entirely by fusing GEMM1, SwiGLU, and GEMM2 into a single Triton kernel. This removes one complete HBM round-trip.
+
+### Mathematical Formulation
+
+**Variables (X):**
+- BLOCK_M, BLOCK_N, BLOCK_K: tile sizes for the fused kernel
+- num_stages: software pipeline depth
+- num_warps: warp count per block
+
+**Constraints (C):**
+- BLOCK_K = 128 (align with FP8 block-scale granularity)
+- BLOCK_N must be power of 2 (Triton requirement)
+- All pointer arithmetic uses int64
+- The inner accumulation for GEMM1 uses F32 accumulators
+- Per-tile scalar FP8 quantization for SwiGLU→FP8 path
+
+**Objective f(X):**
+- Minimize kernel execution time: t(GEMM1) + t(SwiGLU) + t(GEMM2) → t(fused)
+- Reduce HBM bandwidth: eliminate write+read of G1 buffer (~Tk_total * 4096 * 4 bytes = up to ~100MB)
+
+### Solver Strategy
+
+This is a kernel fusion problem. The approach:
+1. First compute GEMM1 tiles in registers/SRAM (accumulate H=7168 K-dim)
+2. Apply SwiGLU to the [BLOCK_M, I] gate and up projections held in shared memory
+3. Quantize SwiGLU output to FP8 per-tile
+4. Run GEMM2 tiles using the quantized BLOCK_M × BLOCK_K FP8 tiles
+
+**Problem:** The fused approach requires storing BOTH x1 and x2 (output of GEMM1) for the same token block simultaneously. With BLOCK_M=64, BLOCK_K=128, I=2048 → we need to accumulate 2*2048 = 4096 output columns for GEMM1 before doing GEMM2. This requires either:
+  a) Tiling over N_dim of GEMM1 separately, then running GEMM2 from shared memory → complex shared mem management
+  b) Splitting into two passes per expert but with activation-resident data → still requires large SRAM
+
+**Difficulty:** The GEMM1 output has shape [BLOCK_M, 2*I] which is 64*4096*4=1MB in float32 — far exceeds SRAM. This fusion is NOT viable without significant re-tiling.
+
+### Validity Mechanism
+- Since full fusion is infeasible, use a "partial fusion" approach: fuse SwiGLU directly into the GEMM2 kernel prologue (already done in ff4217c7), plus optimize GEMM1 with more aggressive software pipelining.
+- Fallback: If SRAM is insufficient, tile over N_dim of GEMM1 and GEMM2 independently.
+
+### Why This Solution?
+**Expected improvement:** 5-10% latency reduction from eliminating the G1 buffer write+read
+**Advantages:** Reduces HBM bandwidth significantly
+**Disadvantages:** Extremely complex to implement correctly; register pressure limits tile sizes; likely infeasible for full fusion within B200 shared memory constraints (192KB per SM)
+
+**Verdict: HIGH RISK, COMPLEX IMPLEMENTATION - Not recommended as primary approach**

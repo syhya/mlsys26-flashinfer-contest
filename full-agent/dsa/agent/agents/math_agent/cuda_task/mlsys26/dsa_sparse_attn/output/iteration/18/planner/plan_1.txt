@@ -1,0 +1,29 @@
+Outline 1: Warp-specialized online softmax kernel with paged-key staging
+
+Mathematical Formulation
+- Variables X:
+  - For each token t, head h, sparse slot s with physical index idx_s, define score z_s = sm_scale * (dot(q_nope[t,h,:], ckv[idx_s,:]) + dot(q_pe[t,h,:], kpe[idx_s,:])).
+  - Running online-softmax state per (t,h): m, l, and accumulator vector O in R^512 where O = sum_s exp(z_s - m_final) * V_s and V_s = ckv[idx_s,:].
+- Constraints C:
+  - Ignore padded sparse entries: idx_s = -1 contributes exactly zero to m,l,O.
+  - All reductions and accumulations must be FP32.
+  - Final output shape [T,16,512] BF16 and lse shape [T,16] FP32.
+  - lse must satisfy lse = log2(sum_s exp(z_s)).
+- Objective f(X):
+  - Maximize throughput by minimizing total HBM traffic and launch count while preserving exact reference semantics within tolerance.
+
+Solver Strategy
+- Deterministic dynamic programming style online reduction (FlashAttention-style recurrence), not a stochastic search.
+- Use one fused kernel path for medium/large workloads and one persistent small-T path for tiny workloads.
+- Within each warp, use shuffle-based exact reductions over 32 lanes for the 576-d dot product split across 18 BF16 pairs per lane-group.
+
+Validity Mechanism
+- Deterministic masking of idx=-1 before any load/use.
+- Explicit FP32 conversion with __bfloat162float / __bfloat1622float2 only.
+- Final lse computed as m * log2(e) + log2(l), with m already scaled by sm_scale; no natural-log output.
+- Safety fallback in dispatcher: if any tensor is non-contiguous or architecture lacks expected features, call a conservative scalar/vector kernel with same math.
+
+Why this solution?
+- Expected improvement: removes split-K temporary tensors O_tmp/m_tmp/l_tmp, which are the remaining major bandwidth tax in the low-workload path.
+- Advantages: single-kernel correctness-preserving online softmax, lower memory footprint, less launch overhead, robust to arbitrary num_tokens and num_pages.
+- Disadvantages: still mostly SIMT/FMA rather than tensor-core GEMM; harder to reach peak throughput for very large T.

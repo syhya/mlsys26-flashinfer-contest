@@ -1,0 +1,98 @@
+Plan 2: Fault-Isolating Staged Oracle with Minimal Triton GEMM1
+
+**Mathematical Formulation:**
+
+Variables:
+- Same as Plan 1
+
+Constraints:
+- Same as Plan 1
+- Additional: Each stage must be independently verifiable against exact oracle
+
+Objective:
+- Primary: Achieve correctness (eliminate 4096.0 error)
+- Secondary: Preserve reasonable speed (>2x baseline)
+
+**Solver Strategy:**
+
+Decouple the problem into stages with independent validation:
+
+Stage 1: Routing (Exact PyTorch)
+- Implement DeepSeek routing with explicit mathematical steps
+- No approximations, fully deterministic
+- Output: sorted_tokens, sorted_experts, sorted_weights, expert_offsets
+
+Stage 2: GEMM1 (Triton with validation)
+- Use parent's fast grouped Triton GEMM1 kernel
+- BUT: Add per-expert micro-validation
+- For each expert, validate first 2 rows against exact dequant oracle
+- If ANY expert fails validation, abort entire GEMM1 to fallback
+
+Stage 3: SwiGLU (Exact PyTorch)
+- No custom kernel, use torch.nn.functional.silu
+- Compute in FP32, no quantization
+
+Stage 4: GEMM2 (Exact per-expert PyTorch)
+- For each expert e:
+  - Exact dequantize W2[e] using block scales
+  - Compute C[e] @ W2[e].T in FP32
+  - Apply routing weights
+  - Scatter-add to output
+
+Stage 5: Accumulation (Exact PyTorch)
+- Use index_add_ with FP32 accumulator
+- Convert to BF16 only at final return
+
+**Validity Mechanism:**
+
+1. Stage-by-stage oracle comparison:
+   - After GEMM1: Compare against exact dequant for sample rows
+   - After SwiGLU: Validate activation range and NaN check
+   - After GEMM2: Validate output range per expert
+   
+2. Exact dequantization helpers:
+   - _dequant_hidden_rows(X, S_x, token_ids):
+     * Extract X[token_ids]
+     * Transpose S_x[:, token_ids] to [m, 56]
+     * Repeat_interleave(128, dim=1) to [m, 7168]
+     * Multiply: X.float() * scales
+   
+   - _dequant_w1_expert(W1[e], S_w1[e]):
+     * Expand S_w1[e] from [32, 56] to [4096, 7168]
+     * Multiply: W1[e].float() * scales
+   
+   - _dequant_w2_expert(W2[e], S_w2[e]):
+     * Expand S_w2[e] from [56, 16] to [7168, 2048]
+     * Multiply: W2[e].float() * scales
+
+3. Fallback trigger conditions:
+   - GEMM1 validation fails for any expert
+   - Any NaN or Inf detected in intermediate tensors
+   - Shape mismatch in dispatch structure
+   - Tk_total == 0 (return zeros immediately)
+
+4. Full fallback implementation:
+   - Per-expert loop with exact dequant at every stage
+   - Guaranteed mathematically correct
+   - Slow but always valid
+
+**Why this solution:**
+
+Advantages:
+- Highest probability of correctness
+- Isolates the exact stage where numerical error occurs
+- Provides diagnostic information for future iterations
+- Keeps fast GEMM1 (likely not the bug source based on analysis)
+
+Disadvantages:
+- Slower than parent due to exact GEMM2 dequantization
+- Per-expert loop in GEMM2 loses parallelism
+- May not achieve score >= 1.0 if too slow
+
+Expected performance:
+- Speedup: 2-3x (similar to parent's 2.39x)
+- Correctness: Very high probability of eliminating 4096.0 error
+- Target score: 0.4-0.6 (correct but not fast enough)
+
+**Key Insight:**
+This plan prioritizes fault isolation over speed. If it succeeds in eliminating the error, the diagnostic information will guide the next iteration to a fast+correct solution.

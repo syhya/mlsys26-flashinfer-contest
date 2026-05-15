@@ -1,0 +1,5 @@
+Plan 2: Reducer-native O_tmp layout transpose [T,16,P,512] instead of [T,P,16,512].
+- Variables: O_tmp tensor layout permutation.
+- Solver: Reorder workspace dimensions so reducer reads contiguous chunks per (t,h).
+- Risks: Indexing rewrite is large; touches both kernels; risk of correctness regression.
+- Why: Higher reward potential but more code surface than Plan 1.

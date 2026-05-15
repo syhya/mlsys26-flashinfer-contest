@@ -1,0 +1,18 @@
+**1. Executive Summary:**
+This iteration was a major performance breakthrough because its vectorized GPU dispatch and Triton Grouped GEMM kernels eliminated serial overhead, performing as the sole genesis solution.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   `**Sibling Rank:**` 1 out of 1 children. Top sibling score: 83.48%.
+*   `**Score Delta:**` From parent (0.00%) to child (83.48%).
+*   `**Key Change:**` Replaced the serial PyTorch expert loop with vectorized GPU dispatch and custom Triton Grouped GEMM kernels with fused FP8 block-scale dequantization.
+*   `**Core Metrics:**` Kernel latency 3.024ms vs reference 18.614ms (8.35x speedup); max absolute error of 8192.0 despite passing the correctness check.
+
+**3. Strategic Analysis (The "So What?"):**
+*   `**Root Cause:**` The performance gain stems from the quality of the execution plan, specifically the elimination of CPU-GPU syncs via vectorized routing (`torch.bincount`, `torch.cumsum`) and the use of Triton kernels for expert parallelism. However, the execution quality suffered numerically, causing the exceptionally high absolute error.
+*   `**Key Insight:**` Fusing FP8 block-scale dequantization *after* the `tl.dot` in GEMM1 is highly effective for reducing memory bandwidth and leveraging FP8 Tensor Cores.
+*   `**Identified Risk:**` In `grouped_gemm2_kernel`, the intermediate activation `c` is in FP32, and the kernel performs an FP32 `tl.dot(c, w_f32)`. This bypasses FP8 Tensor Cores entirely for the second GEMM, leaving significant performance on the table. Additionally, the large max absolute error (8192.0) strongly suggests an `int32` pointer arithmetic overflow or an out-of-bounds memory access.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   `Recommend Exploration:` Investigate and fix the source of the 8192.0 absolute error. Ensure that all pointer arithmetic involving large tensor strides explicitly casts variables to `tl.int64` before multiplication to avoid `int32` overflow (especially for expert weight tensors).
+*   `Recommend Fusion:` Quantize the intermediate SwiGLU output (`c`) back to FP8 dynamically within the kernel or between kernels, so that `grouped_gemm2_kernel` can also utilize FP8 Tensor Cores via `tl.dot(c_fp8, w_fp8)` and apply block scales post-accumulation.
+*   `Recommend Exploration:` If custom Triton FP8 GEMMs continue to exhibit numerical instability or precision loss, explore utilizing PyTorch's native `torch._scaled_mm` combined with the vectorized dispatch. This could offer a more robust path to maximizing Tensor Core utilization while preserving exact correctness.

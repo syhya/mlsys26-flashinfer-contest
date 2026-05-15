@@ -1,0 +1,35 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized, memory-efficient CUDA kernel for Batched Native Sparse Attention (DSA) that strictly matches PyTorch numerical semantics while maximizing HBM bandwidth and SIMD core utilization.
+
+**Selected Outline:** Outline 1: Standard FlashAttention-like Tiling with Online Softmax
+
+**Rationale for Selection:**
+1. Mathematically guarantees numerical correctness (Score >= 1.0) by matching exact FP32 accumulations and base-2 LSE logic.
+2. Avoids the exponential memory complexity of materializing full attention matrices by decoupling the matrix multiplication into register-blocked tiles.
+3. Completely deterministic execution; no reliance on non-convex heuristics or luck.
+
+**Best Plan:**
+1.  **Phase 1: Mathematical Definition & Hardware Mapping**
+    * **Inputs**: Query tensors $Q_{nope}$ (16x512) and $Q_{pe}$ (16x64), KV cache $K$ (64x512) and $K_{pe}$ (64x64), and sparse indices.
+    * **Variables (Hardware Structure)**: $T_k = 64$ (Tile size), Block dimensions of $(32, 16)$ equating to 512 threads (16 warps) per token.
+    * **Objective**: Compute $O = \text{softmax}((Q_{nope}K^T + Q_{pe}K_{pe}^T) \times s) V$ using single-pass FlashAttention online softmax logic.
+    * **Constraints**: Shared memory strictly bounded $\le 75$ KB, exact FP32 precision for intermediate sums, and mathematically correct LSE base-2 calculation.
+
+2.  **Phase 2: The Optimization Loop (Tiled Execution)**
+    * **Algorithm**: Shared-Memory Tiling with Warp Reduction.
+    * **Step 1 (Structure Mapping)**: Map 1 Token to 1 Block. Map 16 Query Heads to 16 Warps. Pre-load $Q$ entirely into thread-local registers (using `__nv_bfloat162`) to eliminate redundant memory accesses.
+    * **Step 2 (Memory Loop)**: Iterate over the dynamically gathered $K$ cache in tiles of $T_k=64$.
+    * **Step 3 (Vectorized Solver)**: Use 128-bit vectorized `float4` instructions to cooperatively load $K\_tile$ into dynamic shared memory. By dividing 512 threads into structured groups, achieve perfectly coalesced, bank-conflict-free memory access.
+    * **Step 4 (Compute)**: Perform dense matrix multiplication using fast parallel `__shfl_down_sync` warp reductions across the 32 threads.
+
+3.  **Phase 3: The "Safety Valve" (CRITICAL)**
+    * **Padding & NaN Guard (Mathematical Repair)**: If `sparse_indices == -1`, mathematically force `logit = -INFINITY`. To prevent catastrophic `NaN` generation from $-\infty - (-\infty)$, strictly enforce the projection: `exp_diff = (m_val == -INFINITY) ? 0.0f : expf(m_val - m_new)`.
+    * **All-Padding Fallback**: If a token contains 100% padding (d_val == 0.0f), the safety valve zeroes out the output registers and explicitly sets $LSE = -\infty$ to perfectly match PyTorch's `.zero_()` fallback.
+    * **LSE Exact Correction**: Run a final deterministic mathematical correction step to convert base-e online softmax maxes to exact base-2 LSE: $LSE = m_{val} \times 1.44269504f + \log_2(d_{val})$.
+
+4.  **Phase 4: Implementation Details**
+    * **Dependencies**: Utilize standard CUDA libraries (`<cuda_bf16.h>`, `<cuda_fp16.h>`, `<torch/extension.h>`). No obscure packages.
+    * **Memory Allocation**: Use `extern __shared__ int8_t smem[]` and strictly enforce valid launch parameters via `cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 74048)`.
+    * **Multi-Start Check**: N/A for deterministic GPU hardware execution. Randomness is eliminated by explicitly defining the static block/grid topology.
+    * **Code-Ready Format**: The plan dictates specific intrinsic usage (`__shfl_down_sync`, `__floats2bfloat162_rn`, `make_float4`) and precise FP32 upcasting (`__bfloat1622float2`) to ensure immediate compilability and correctness for Phase 2 Executor.

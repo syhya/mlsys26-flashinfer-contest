@@ -1,0 +1,250 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Produce a child `kernel.cu` that preserves the parent's score>=1.0 correctness and ~126x speedup while reducing split-K reducer latency through a **reducer-native workspace layout change**. Keep all math and kernel launch structure identical to the parent; only change the flattening order of `O_tmp` so that the reducer's innermost loop over `s` becomes contiguous instead of stride-32KB.
+
+**Selected Outline:** Plan 2 — Reducer-Native Workspace Layout (pure layout change, exact math preserved).
+
+**Rationale for Selection:**
+1. Mathematically identical to parent → correctness trivially preserved (score 1.0 guaranteed, max_abs_error stays at bf16 quantization floor).
+2. Directly targets the exact bottleneck named in the parent summary: "re-layout `O_tmp` to be reducer-native float4 contiguous in the reduction traversal order" which is listed as the highest-leverage unresolved concept.
+3. The parent reducer's hot loop `for s in 0..64: read O_tmp[t, s, h, d_idx]` strides by `16*512*4 bytes = 32KB` per step → catastrophic for L2 locality. Making `s` the innermost iterated dim fixes this with zero algorithmic risk.
+4. No new kernels, no new synchronization, no new math — the only code diff is index formulas in producer and consumer plus tensor-shape allocation.
+5. Avoids the repeated failure mode observed in the lineage: planner proposes a large structural redesign, executor reverts to conservative exploitation. Here, the plan IS the exploitation step — compact, code-ready, unambiguous.
+
+---
+
+## Phase 1: Mathematical Definition
+
+### 1.1 Operator (unchanged from parent)
+For each `(t,h)` with `t ∈ [0,T), h ∈ [0,16)`:
+- logit `z_j = sm_scale * (q_nope[t,h] · k_nope(raw_j) + q_pe[t,h] · k_pe(raw_j))` for each valid sparse slot j.
+- `out[t,h] = Σ_valid exp(z_j) * k_nope(raw_j) / Σ_valid exp(z_j)`
+- `lse[t,h] = log2(Σ_valid exp(z_j))` (base 2).
+- `raw_j == -1` → neutral (no contribution, no cache read).
+
+### 1.2 Split-K decomposition (unchanged)
+Partition the 2048 slots into S=64 partitions of 32 slots. Each partition p computes sufficient statistics `(m_p, l_p, O_p)` in FP32.
+
+Exact merge:
+- `m = max_p m_p`
+- `scale_p = 0 if m_p==-INF else exp(m_p - m)`
+- `l = Σ l_p * scale_p`
+- `O = Σ O_p * scale_p`
+- `out = O / l` if `l>0` else 0
+- `lse = m * log2(e) + log2(l)` if `l>0` else -INF
+
+### 1.3 Variables, Constraints, Objective
+**Variables X:**
+- `L`: layout of `O_tmp`. Parent uses `[T, S=64, 16, 512]` (flat index `t*64*16*512 + s*16*512 + h*512 + d`). New layout: `[T, 16, S, 512]` (flat index `t*16*S*512 + h*S*512 + s*512 + d`).
+- Layouts of `m_tmp`, `l_tmp` remain `[T,16,S]` — already reducer-native in parent.
+
+**Constraints C:**
+1. Producer `split_k_compute_kernel` write index must match consumer `split_k_reduce_kernel` read index exactly.
+2. Exact -1 masking preserved.
+3. All accumulation FP32; only final output store in BF16.
+4. LSE in base 2 via `m*1.4426950408889634f + __log2f(l)`.
+5. Fused large-token kernel (`num_tokens>=128`) untouched byte-for-byte.
+6. Explicit BF16 intrinsics only.
+7. ABI unchanged; `PYBIND11_MODULE` footer preserved.
+
+**Objective f(X):** minimize reducer latency by maximizing contiguous `float4` reads for the 64-partition sum at fixed `(t,h,d_idx)`.
+
+---
+
+## Phase 2: The "Optimization Loop" (Deterministic Layout Choice)
+
+This is a finite deterministic design decision — no randomness, no multi-start.
+
+### 2.1 Layout analysis
+Parent reducer inner loop (fixed `t,h,d_idx`, iterating s):
+- Stride between consecutive s: `16*512*4 = 32768 bytes` → each load pulls a fresh cache line, zero reuse across s.
+
+New layout `[T,16,S,512]`:
+- Stride between consecutive s at fixed `(t,h,d_idx)`: `512*4 = 2048 bytes` → 16x tighter. Consecutive s values reside in nearby cache lines, greatly improving L2 hit rate and memory throughput.
+
+Further, for a fixed `(t,h,s)` the 512-dim is fully contiguous, so the producer still writes in naturally coalesced fashion per warp.
+
+### 2.2 Producer write index (new)
+In `split_k_compute_kernel`:
+- Previously: `base_idx = t*64*16*512 + s*16*512 + h*512 + j*64 + lane*2;`
+- New: `base_idx = t*16*64*512 + h*64*512 + s*512 + j*64 + lane*2;`
+
+This preserves per-warp coalescing since lanes within a warp still stride by 2 bf16 = 4 bytes along the 512-dim.
+
+### 2.3 Consumer read index (new)
+In `split_k_reduce_kernel`, inner `for s` loop at fixed `(t,h,d_idx)`:
+- Previously: `base_idx = t*64*16*512 + s*16*512 + h*512 + d_idx;`
+- New: `base_idx = t*16*64*512 + h*64*512 + s*512 + d_idx;`
+
+The only changing term in the loop is `+ s*512`, a tiny stride enabling hardware prefetcher to work effectively.
+
+### 2.4 Tensor allocation change
+Parent: `torch::empty({num_tokens, S, 16, 512}, float32)` where `S=64`.
+New: `torch::empty({num_tokens, 16, S, 512}, float32)`.
+
+Total size identical: `T * 64 * 16 * 512 * 4` bytes. Only shape/stride metadata changes.
+
+### 2.5 Everything else verbatim from parent (94736692)
+- `dsa_forward_kernel` (large path, `num_tokens>=128`): unchanged, including the `tile_has_valid` flag.
+- `split_k_compute_kernel` body: unchanged except the final store index formula (Phase 2.2).
+- `split_k_reduce_kernel` body: unchanged except the read index formula (Phase 2.3). Keep the exact same shared memory layout, the lane-0 scale_smem computation, and the `#pragma unroll 16 for s` loop.
+- Dispatch threshold `num_tokens < 128`: unchanged.
+- `warp_reduce_sum` template: unchanged.
+
+---
+
+## Phase 3: Safety Valve (Correctness Guarantees)
+
+### 3.1 Mathematical invariance proof
+Let `f_parent(t,s,h,d) = t*64*16*512 + s*16*512 + h*512 + d` be parent's flat index.
+Let `f_child(t,s,h,d) = t*16*64*512 + h*64*512 + s*512 + d` be child's flat index.
+
+Both are bijections from `(t,h,s,d) ∈ [0,T)×[0,16)×[0,64)×[0,512)` to `[0, T*16*64*512)`. The producer writes `O_tmp[f(t,s,h,d)] = O_reg_value(t,s,h,d)` and the consumer reads `O_tmp[f(t,s,h,d)]`. Since both sides of the equation use the *same* `f_child`, the stored/loaded value for any `(t,s,h,d)` is identical to the parent's. Therefore the final output and lse are bit-identical in exact arithmetic, and differ only by memory-subsystem-induced stable FP32 ordering (none, since each location is written once and read once).
+
+### 3.2 -1 masking (unchanged)
+Producer skips cache loads when `idx_shared[i]==-1`, writes `m=-INF, l=0, O=0` implicitly (initial state untouched for that i). Reducer uses `m_s_smem[lane]!=-INFINITY` guard and `l_sum<=0.0f` fallback to emit zero output + `-INF` lse. Preserved verbatim.
+
+### 3.3 Empty-token fallback
+`if (num_tokens == 0) return {output, lse};` — preserved verbatim.
+
+### 3.4 Large-path fallback (unchanged)
+For `num_tokens >= 128`, dispatch to `dsa_forward_kernel` which never touches `O_tmp`. Layout change has zero effect on this path.
+
+### 3.5 Build-environment compliance (unchanged)
+- `#include <torch/extension.h>`, `#include <cuda_bf16.h>`, `#include <tuple>` at top.
+- Explicit `__bfloat1622float2`, `__floats2bfloat162_rn` — all preserved.
+- `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("dsa_forward", &dsa_forward, "DSA Forward"); }` at end.
+
+### 3.6 Conservative regression guard
+If executor finds the layout edit introduces any compile or alignment issue (it should not, since 512*4=2048 bytes is `float4`-aligned), fall back to parent layout. The change is so localized that this rollback is trivial.
+
+---
+
+## Phase 4: Implementation Details (Code-Ready)
+
+### 4.1 Exact diff from parent (94736692)
+
+**Diff 1: Workspace allocation in `dsa_forward`**
+```cpp
+// BEFORE:
+auto O_tmp = torch::empty({num_tokens, S, 16, 512}, torch::dtype(torch::kFloat32).device(q_nope.device()));
+// AFTER:
+auto O_tmp = torch::empty({num_tokens, 16, S, 512}, torch::dtype(torch::kFloat32).device(q_nope.device()));
+```
+
+**Diff 2: Producer write in `split_k_compute_kernel` final store loop**
+```cpp
+// BEFORE:
+for (int j = 0; j < 8; ++j) {
+    int base_idx = t * 64 * 16 * 512 + s * 16 * 512 + h * 512 + j * 64 + lane * 2;
+    *reinterpret_cast<float2*>(&O_tmp[base_idx]) = make_float2(O_reg[j].x, O_reg[j].y);
+}
+// AFTER:
+for (int j = 0; j < 8; ++j) {
+    int base_idx = t * 16 * 64 * 512 + h * 64 * 512 + s * 512 + j * 64 + lane * 2;
+    *reinterpret_cast<float2*>(&O_tmp[base_idx]) = make_float2(O_reg[j].x, O_reg[j].y);
+}
+```
+
+**Diff 3: Consumer read in `split_k_reduce_kernel` accumulation loop**
+```cpp
+// BEFORE:
+for (int s = 0; s < 64; ++s) {
+    float coeff = scale_smem[s] * inv_l;
+    if (coeff > 0.0f) {
+        int base_idx = t * 64 * 16 * 512 + s * 16 * 512 + h * 512 + d_idx;
+        float4 val = *reinterpret_cast<const float4*>(&O_tmp[base_idx]);
+        ...
+    }
+}
+// AFTER:
+for (int s = 0; s < 64; ++s) {
+    float coeff = scale_smem[s] * inv_l;
+    if (coeff > 0.0f) {
+        int base_idx = t * 16 * 64 * 512 + h * 64 * 512 + s * 512 + d_idx;
+        float4 val = *reinterpret_cast<const float4*>(&O_tmp[base_idx]);
+        ...
+    }
+}
+```
+
+### 4.2 Strictly preserved from parent
+- `warp_reduce_sum` template.
+- Entire `dsa_forward_kernel` (large-token fused path) body — do NOT touch.
+- `split_k_compute_kernel` loading of q_nope/q_pe into registers, shared-memory staging of Kc/Kp via float4, inner online-softmax update loop.
+- `split_k_reduce_kernel` shared-memory declarations (`m_global`, `l_global`, `m_s_smem[64]`, `scale_smem[64]`), lane-0 reduction of m_max/l_sum/scale_smem, the base-2 lse formula `fmaf(m_max, 1.4426950408889634f, __log2f(l_sum))`, the BF16 store via `__floats2bfloat162_rn` + `uint2` packing.
+- `dsa_forward` dispatch logic (`num_tokens==0` early return, `num_tokens<128` split-K branch, `else` fused branch), kernel launch configs (`compute_grid(S, num_tokens, 1)`, `compute_block(32, 16, 1)`, `reduce_grid(num_tokens, 16, 1)`, `reduce_block(128, 1, 1)`, large-path `grid(num_tokens)`, `block(32, 16)`).
+- All `reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>())` patterns.
+- `PYBIND11_MODULE` footer.
+
+### 4.3 File structure
+```
+#include <torch/extension.h>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+#include <tuple>
+#include <math.h>
+
+// warp_reduce_sum (verbatim)
+
+__global__ void dsa_forward_kernel(...) { /* VERBATIM from parent */ }
+
+__global__ void split_k_compute_kernel(...) {
+    /* VERBATIM from parent EXCEPT the final store loop uses new index:
+       base_idx = t * 16 * 64 * 512 + h * 64 * 512 + s * 512 + j * 64 + lane * 2 */
+}
+
+__global__ void split_k_reduce_kernel(...) {
+    /* VERBATIM from parent EXCEPT the float4 read uses new index:
+       base_idx = t * 16 * 64 * 512 + h * 64 * 512 + s * 512 + d_idx */
+}
+
+std::tuple<torch::Tensor, torch::Tensor> dsa_forward(...) {
+    /* VERBATIM EXCEPT O_tmp allocated as {num_tokens, 16, S, 512} */
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("dsa_forward", &dsa_forward, "DSA Forward");
+}
+```
+
+### 4.4 Numerical rules (unchanged)
+1. `sm_scale` applied before online-softmax update.
+2. `__expf` for all exponentials.
+3. `__log2f` for final lse.
+4. FP32 accumulators (`m`, `l`, `O_reg`).
+5. BF16 only at final store.
+
+---
+
+## Review Checklist
+
+### Math vs luck?
+Math. The bijection proof in Phase 3.1 shows that parent and child compute bit-identical outputs in exact arithmetic. Correctness is guaranteed.
+
+### Library check?
+Only standard CUDA intrinsics + torch/extension. No obscure libraries.
+
+### Randomness check?
+None. No multi-start needed.
+
+### Implementable?
+Yes. The entire change is three index-formula edits and one tensor-shape edit. Total diff ~6 lines of code. Every other byte of the file is copied verbatim from the parent.
+
+### Risk assessment?
+Near-zero. Layout changes preserve exact values; `float4` alignment is guaranteed because 512 floats = 2048 bytes is 128-byte aligned for every (t,h,s) tuple.
+
+---
+
+## Expected Performance Improvement
+- Reducer kernel L2 hit rate improves dramatically (stride 2KB vs 32KB for the inner s-loop over 64 iterations). This should reduce reducer latency by 20-50% on small-token workloads.
+- Overall end-to-end score expected to improve from ~12.6 toward ~13-14x baseline since the reducer is a meaningful fraction of small-token latency.
+- Correctness: bit-identical to parent → score >= 1.0 guaranteed.
+
+## Final Executor Instructions
+1. Copy the parent solution (94736692) byte-for-byte.
+2. Apply exactly the three diffs in Phase 4.1: (a) allocate `O_tmp` as `{num_tokens, 16, S, 512}`, (b) producer write index `t*16*64*512 + h*64*512 + s*512 + j*64 + lane*2`, (c) consumer read index `t*16*64*512 + h*64*512 + s*512 + d_idx`.
+3. Do NOT touch the large fused kernel, the reducer's lane-0 softmax setup, the shared-memory declarations, the lse formula, or the dispatch threshold.
+4. Do NOT introduce any new kernels, no `cp.async`, no WMMA, no partition redesign, no head-group restructuring.
+5. Verify the `PYBIND11_MODULE` footer is intact.
+6. Compile-safety verification: confirm that every multiplication in the new index formulas fits in int32 (`T_max * 16 * 64 * 512 ≤ 2^31` → T_max ≤ ~4096, which is fine; use `int64_t` casts only if a workload exceeds this).

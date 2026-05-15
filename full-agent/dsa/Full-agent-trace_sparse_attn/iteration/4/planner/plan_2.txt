@@ -1,0 +1,22 @@
+### Outline 2: Tensor Core Migration for Dense Dot-Products (MMA.SYNC)
+
+**Objective:** Reduce register pressure and increase theoretical occupancy by migrating the inner loop dot-products to hardware Tensor Cores.
+
+**Mathematical Formulation:**
+*   **Variables ($X$):** Use of `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` (or similar PTX primitives) instead of scalar/vectorized `fmaf`.
+*   **Constraints ($C$):**
+    *   $C_1$: Computations must remain mathematically exact (FP32 accumulation).
+    *   $C_2$: Shared memory layouts must be swizzled to avoid bank conflicts during `ldmatrix`.
+*   **Objective ($f(X)$):** Maximize achieved occupancy (currently ~25%) and SM utilization by lowering register per thread count below 50.
+
+**Solver Strategy:**
+*   Redesign the shared memory load phase to utilize `cp.async` (if SM80+) or vectorized loads into swizzled layouts.
+*   Use `ldmatrix` to load Query and Key tiles into registers.
+*   Execute `mma.sync` to compute the $16 \times 16$ or $16 \times 8$ attention logits.
+
+**Validity Mechanism:**
+*   **Safety Valve:** The fallback is the current FMA-optimized scalar kernel. The Tensor Core path will be isolated to a specific dispatch condition (e.g., specific hardware architectures if queried, or wrapped in conditional compilation).
+
+**Why this solution?**
+*   **Advantages:** Directly targets the register pressure bottleneck identified in the profiling data. Utilizes the highest-throughput compute units on modern GPUs.
+*   **Disadvantages:** Exceptionally complex to implement correctly due to specific data layout requirements for `ldmatrix` and `mma.sync`. Requires careful handling of the sparse indices and padding within the Tensor Core tiles.

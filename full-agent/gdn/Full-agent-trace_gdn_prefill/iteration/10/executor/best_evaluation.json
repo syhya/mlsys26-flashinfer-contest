@@ -1,0 +1,28 @@
+{
+  "status": "success",
+  "summary": "Optimization successful! Speedup: 888.46x (ref: 1236.742ms, kernel: 0.702ms)",
+  "score": 88.84606570702655,
+  "metrics": {
+    "correctness": 1.0,
+    "speedup": 888.4606570702655,
+    "exec_time_ms": 0.7019629233333333,
+    "baseline_time_ms": 1236.74245138,
+    "compile_time": 0.0,
+    "eval_time": 1281.4239461421967
+  },
+  "artifacts": {
+    "eval_backend": "modal+flashinfer-bench",
+    "task_id": "gdn_prefill_qk4_v8_d128_k_last",
+    "execution_time": "1281.42s",
+    "kernel_latency_ms": "0.702ms",
+    "reference_latency_ms": "1236.742ms",
+    "speedup": "888.46x",
+    "bench_stats": {
+      "reference_latency_ms": 1236.74245138,
+      "max_relative_error": 25.737361907958984,
+      "max_absolute_error": 0.00031280517578125,
+      "total_workloads": 100
+    },
+    "correctness_check": "Passed"
+  }
+}

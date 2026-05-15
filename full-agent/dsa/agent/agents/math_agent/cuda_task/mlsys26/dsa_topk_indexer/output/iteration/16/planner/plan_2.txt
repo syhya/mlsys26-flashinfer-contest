@@ -1,0 +1,13 @@
+PLAN 2: Simple Strip — Revert to parent `dc51d5fc` exactly (LOW-RISK BASELINE RESTORATION)
+
+Variables/Constraints/Objective: same as plan 1.
+
+Strategy:
+- Emit kernel.cu exactly matching solution_id `dc51d5fc` (3-tier: S, M, L). No TIER-L2.
+- This restores the 9.564 score that was regressed by the current parent (9.364).
+
+Validity: Trivially correct (proven by dc51d5fc's 9.564 score, correctness=1.0).
+Advantages: Zero risk; +0.2 score guaranteed vs current parent.
+Disadvantages: Only +2% improvement; wastes iteration.
+
+Expected: 9.364 -> 9.564 (+2.1%). Guaranteed floor.

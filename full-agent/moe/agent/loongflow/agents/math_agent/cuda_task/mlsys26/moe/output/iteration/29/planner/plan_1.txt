@@ -1,0 +1,61 @@
+## Plan 1: Combine FP8 TC GEMM2 + tl.range() Pipelining + Expanded Autotune (Best-of-Both Fusion)
+
+### Mathematical Formulation
+
+**Variables (X):**
+- GEMM1: FP8 TC path unchanged from b550fc5e (proven best)
+- GEMM2: Introduce per-tile scalar FP8 quantization of SwiGLU activations (from ff4217c7)
+  + combine with tl.range() software pipelining (from b550fc5e)
+  + keep 10+ autotune configs with MAX_TK key
+- c_scale = scalar maximum per [BLOCK_M, BLOCK_K] tile = tl.max(tl.abs(c)) / 448.0
+- c_fp8 = (c / c_scale).to(tl.float8_e4m3fn) -- per-tile FP8 quantization
+- acc += tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32) * c_scale * w2_scale
+
+**Constraints (C):**
+- BLOCK_K = 128 strictly (aligns with FP8 block-scale granularity)
+- BLOCK_N = 128 for GEMM2 (enables n_block_idx = pid_n optimization)
+- All expert pointer arithmetic uses int64
+- c_scale = tl.maximum(tl.max(tl.abs(c)), 1e-12) / 448.0 (prevents div-by-zero)
+
+**Objective f(X):**
+- Minimize GEMM2 latency by ~1.5-2x vs FP32 path (FP8 TC throughput advantage)
+- Combined with tl.range() pipelining already proven in b550fc5e
+- Target: ~13-14x speedup overall, score ~1.30+
+
+### Solver Strategy
+
+1. Copy GEMM1 exactly from b550fc5e (proven best)
+2. Replace GEMM2 kernel body:
+   - Use tl.range() with num_stages from autotune (proven from b550fc5e)
+   - Inside K-loop: compute SwiGLU in float32, then quantize to FP8 per-tile with SCALAR max
+   - Call tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32)
+   - Apply c_scale * w2_scale after dot
+3. Autotune configs: 9 configs all with BLOCK_N=128 (enforces n_block_idx=pid_n shortcut)
+4. n_block_idx = pid_n (optimization, ONLY valid when all configs have BLOCK_N=128)
+
+### Validity Mechanism
+
+- FP8 cast is saturating in Triton (no NaN/Inf from overflow)
+- c_scale = tl.maximum(c_abs_max / 448.0, 1e-12) prevents division-by-zero
+- SCALAR c_scale (not per-row) ensures exact post-dot dequantization:
+  sum_k(c[m,k]*W2[k,n]) = dot(c_fp8*c_scale, W2) = dot(c_fp8, W2) * c_scale * w2_scale
+- All BLOCK_N=128 configs enforced by autotune config list (no BLOCK_N=64 variants)
+- torch.zeros for G1, O ensures masked tiles contribute 0
+
+### Why This Solution?
+
+**Expected Performance:**
+- b550fc5e: 12.01x (FP32 dequant + tl.range pipelining)
+- ff4217c7: 10.25x (FP8 TCs but no tl.range pipelining)
+- This plan: BOTH FP8 TCs + tl.range() → expected 13-14x
+
+**Advantages:**
+1. Synergistic combination of the two best proven techniques
+2. Mathematically exact: scalar per-tile scale is provably correct
+3. ff4217c7 proved FP8 TCs work in this environment (tl.float8_e4m3fn is available)
+4. No routing or GEMM1 changes (lowest risk area)
+
+**Disadvantages:**
+1. Per-tile scalar tl.max() adds a small reduction overhead in GEMM2 K-loop
+2. Slightly more complex GEMM2 kernel than b550fc5e
+3. ~0.4% additional precision loss from FP8 quantization of activations (bounded)

@@ -1,0 +1,25 @@
+PLAN 1: Strip TIER-L2 + Fuse scores into TIER-M block sort (HIGH-VALUE, MODERATE-RISK)
+
+Variables: per-batch L=seq_lens[b]. Tiers S (L<=2048), M (2048<L<=6144), L (L>6144).
+Constraints: exact top-K set; correctness=1.0.
+Objective: minimize kernel latency.
+
+Strategy:
+- STRIP TIER-L2 entirely (proven-regressed). Threshold back to L_MED_MAX=6144.
+- FUSE: In TIER-M, compute scores in-kernel and sort in registers — eliminate scores_buf/indices_buf HBM roundtrip for TIER-M batches.
+  * Block 512 threads per TIER-M batch. Each block:
+    1. Load Q into smem (128x64 FP8 -> float).
+    2. Load weights into smem.
+    3. For each page p in block_table[b, 0..(L+63)/64]: load K page into smem, compute per-token scores, keep in registers.
+    4. BlockRadixSort<512, 12> = 6144 items in-place.
+    5. Write top-2048.
+- TIER-L unchanged (device-wide CUB).
+- TIER-S unchanged.
+
+Validity: BlockRadixSort is deterministic exact. Padding -1e30f for out-of-range.
+Fallback: if fused kernel fails, revert to parent `dc51d5fc` (two-kernel pipeline). Guarantees 9.564.
+
+Advantages: removes scoring HBM write+read for all TIER-M batches, large latency drop.
+Disadvantages: fused kernel is complex; larger register pressure; smem budget tight.
+Risk: HIGH — new kernel must replicate scoring math exactly.
+Expected: 9.564 -> 10.5-11.5 if works; fallback 9.564.

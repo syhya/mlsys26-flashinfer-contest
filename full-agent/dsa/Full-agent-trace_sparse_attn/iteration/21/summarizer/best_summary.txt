@@ -1,0 +1,20 @@
+**1. Executive Summary:**
+This iteration was a substantial breakthrough because the addition of an early-exit `tile_has_valid` skip and a streamlined Split-K reducer (eliminated `l_s_smem`, fused inv_l reciprocal, fused scale precomputation) lifted the score from 4.47 → 7.88 (44.72x → 78.82x speedup), nearly doubling parent performance and outranking all known siblings of this parent.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   `**Sibling Rank:**` 1 out of 2 known children of parent `4352305b`. Sibling `d098b6c0` scored 4.51 (essentially a no-op clone of the parent); current child scored 7.88.
+*   `**Score Delta:**` Parent 4.47 → Child 7.88 (+76.4% relative; +3.41 absolute).
+*   `**Key Change:**` (a) Fused-path early-exit via `__shared__ int tile_has_valid` flag that skips entire 32-key tiles when all sparse_indices are -1 (preserves `idx_shared` payload, unlike prior risky in-place mutation). (b) Reducer simplification: removed redundant `l_s_smem`, read `l_tmp` directly inside the lane-0 single-pass merge, precomputed `inv_l_global` once and stored `scale = exp(m_s - m_global) * inv_l_global` in shared memory (eliminating 64 per-lane divisions).
+*   `**Core Metrics:**` Kernel latency 0.047ms → 0.028ms (-40%); reference 2.191ms; correctness 1.0; max abs error 0.0078125 (well within 1e-2 tolerance).
+
+**3. Strategic Analysis (The "So What?"):**
+*   `**Root Cause:**` Both the plan and the execution were of high quality. The plan correctly identified two empirically validated edits drawn from top-performing siblings in the wider island (12.64x descendants on related lineages) and the executor implemented every edit faithfully — including the critical safety detail of NOT mutating `idx_shared[0]` as a flag.
+*   `**Key Insight:**` Eliminating *redundant per-lane work* in tiny grid-size reduction kernels (16 blocks × 128 threads) yields outsized gains because at this scale latency, not bandwidth, dominates. The 64 divisions per reducer block were a hidden serial bottleneck disproportionate to their apparent cost. Likewise, in the fused large-path, sparse_indices padding is structurally common, so a `tile_has_valid` short-circuit converts wasted SMEM loads into pure no-ops.
+*   `**Identified Risk:**` (1) `max_relative_error` reached 2.03 — large in relative terms though absolute error stays bounded; this signals the kernel is operating near the BF16 precision floor and any further fast-math escalation could break correctness on edge workloads. (2) The split-K compute kernel still emits `float2` stores to `O_tmp` (asymmetric with the float4 reducer loads); the parent's known asymmetry is unresolved. (3) The lane-0 serial merge in the reducer is still O(64) sequential — once the per-division was eliminated, this serial loop becomes the next bottleneck.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   `Recommend Fusion`: Combine this child's reducer simplification + tile-validity flag with the still-unrealized **`float4` O_tmp stores in `split_k_compute_kernel`**. This symmetric vectorization remains the highest-leverage low-risk win identified across two iterations.
+*   `Recommend Exploration`: Replace the lane-0 sequential merge in `split_k_reduce_kernel` with a 32-thread warp-level parallel reduction (`__shfl_xor_sync`) over the 64 chunks (2 per lane). With per-lane divisions eliminated, this serial loop is now the dominant reducer cost.
+*   `Recommend Exploration`: Investigate further reducing the dispatch threshold (`num_tokens < 128`) or introducing a third path for medium batch sizes — the fused large-path now also benefits from `tile_has_valid`, so its crossover point may have shifted.
+*   `Warn`: Do NOT enable `--use_fast_math` globally or replace `__expf` with cruder approximations; the 2.03 max relative error indicates the precision budget is largely consumed.
+*   `Warn`: Future planners must continue to mine top-performing distant cousins (e.g., the 12.64x lineage referenced in the plan) for proven micro-edits — this strategy of "harvest validated mutations from the population" was decisively successful here.

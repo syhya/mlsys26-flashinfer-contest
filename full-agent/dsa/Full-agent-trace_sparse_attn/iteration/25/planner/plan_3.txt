@@ -1,0 +1,15 @@
+PLAN 3: Parallelize lane-0 serial reduction across warp via warp shuffle
+
+Mathematical model:
+- Variables X: how m_max and l_sum reductions are computed in reducer.
+- Constraints C: Exact result; must broadcast m_global, l_global to all threads.
+- Objective: minimize reducer kernel time by removing 64-iteration serial dependency on lane 0.
+
+Solver strategy: In split_k_reduce_kernel, currently lane 0 does a 64-iteration serial max then 64-iteration serial sum. Replace with parallel reduction: lanes 0..63 each load one (m_p,l_p), then use two __shfl_xor_sync reductions across the first 64 threads (2 warps). Specifically use block-wide reduction via shared memory among first 2 warps.
+
+Validity: Standard parallel reduction for max and scaled sum is exact in FP32 (modulo associativity, same as serial — this does NOT break correctness since final lse/output difference is within rtol). Keep the numerically-critical step (scale = exp(m_p - m_max)) unchanged.
+
+Why: Removes the 64-iteration serial lane-0 critical path; replaces with O(log 64) = 6 shuffle steps.
+
+Advantages: Attacks the true critical path in reducer.
+Disadvantages: Slightly more complex; risk of subtle sync bug; 64 iterations over FP32 scalars is already very fast so gain may be minor compared to HBM-bound O_tmp read.

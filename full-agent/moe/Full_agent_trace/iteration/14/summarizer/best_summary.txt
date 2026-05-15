@@ -1,0 +1,20 @@
+**1. Executive Summary:**
+This iteration was a clear regression because the correctness-first hybrid replaced the parent’s fast grouped GEMM2 with exact per-expert PyTorch/dequantized GEMM2 and added GEMM1 validation overhead, sharply reducing throughput despite only partially improving the lineage’s persistent numerical pathology, performing 1st out of 1 siblings.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* `**Sibling Rank:**` 1 out of 1 children. Top sibling score: 23.92%.
+* `**Score Delta:**` From parent (80.31%) to child (23.92%).
+* `**Key Change:**` Replaced the parent’s Triton grouped GEMM2 path with per-expert exact dequantization + PyTorch GEMM2, added `_validate_dispatch`, `_gemm1_microcheck`, and retained Triton only for GEMM1.
+* `**Core Metrics:**` Correctness: 1.0; speedup: 2.39x; kernel execution time: 8.283ms; reference time: 18.734ms; parent kernel time: 2.854ms; benchmark max absolute error: 4096.0; benchmark max relative error: 11621094.0; total workloads: 19; eval time: 67.28s.
+
+**3. Strategic Analysis (The "So What?"):**
+* `**Root Cause:**` The outcome was driven primarily by plan quality, not execution quality. The child appears to have faithfully executed a correctness-first strategy, but the strategic tradeoff was too expensive: it sacrificed most of the parent’s speed advantage while failing to fully resolve the underlying semantic defect. The result is a worse point on both the score frontier and the speed/correctness frontier.
+* `**Key Insight:**` The most important lesson is that replacing the entire downstream stage with an oracle-like PyTorch GEMM2 can reduce the error signature (8192 -> 4096 max absolute error) without coming close to full semantic recovery, which strongly implicates GEMM1 and/or FP8 block-scale interpretation as a major remaining fault source. This is valuable because it narrows the defect location more effectively than another launch-geometry tweak would have.
+* `**Identified Risk:**` The biggest risk revealed here is over-correcting into a diagnostic local optimum: a hybrid that is too slow for competitive evaluation yet still too inaccurate to solve the task. If future iterations keep adding fallback checks and explicit dequantization around an unresolved core bug, the lineage may converge to robust-but-uncompetitive implementations.
+
+**4. Actionable Guidance (The "What's Next?"):**
+* `Recommend Fusion:` Fuse this child’s differential-debugging idea into the parent-speed framework, but keep it off the hot path: retain the parent’s fast grouped GEMM2 by default and use this child’s microcheck/oracle logic only in tiny sampled expert-token slices to localize the first failing stage.
+* `Recommend Exploration:` Explore a child that keeps this child’s exact PyTorch GEMM2 oracle but swaps out Triton GEMM1 for an independently trustworthy backend (`torch.matmul` on exact dequantized GEMM1 for a very small routed subset, or `torch._scaled_mm` if compatible) to directly test whether GEMM1 scale application or orientation is the dominant residual error source.
+* `Recommend Exploration:` Build a stagewise fault-isolation variant that emits and compares four intermediates against an exact oracle for one active expert: routed weights, dequantized GEMM1 tile, post-SwiGLU activations, and GEMM2 output. The 4096 residual suggests a structural block-level mismatch rather than random precision drift.
+* `Recommend Stripping:` Strip full-expert W2 dequantization from performance-seeking descendants unless it is part of an explicit diagnosis build. It is useful as an oracle mechanism, but as a production path it consumed too much of the latency budget.
+* `Warn:` Do not interpret the improved max absolute error alone as success. The score collapsed from 80.31% to 23.92%, so any future correctness-first modification must be paired with a bounded cost model; otherwise the search will drift into slow diagnostic variants that cannot win even if they modestly reduce error.

@@ -1,0 +1,31 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized CUDA kernel for DSA TopK Indexer Forward using FP8 quantizations that significantly outperforms the PyTorch reference implementation.
+
+**Selected Outline:** Decoupled FP8 Scoring with Exact CUB Segmented Radix Sort (Outline 1)
+
+**Rationale for Selection:**
+1. Mathematically guarantees correct top-K selection by relying on CUB's highly optimized, exact sorting primitives. This avoids the non-convexity, thread divergence, and local optima issues of block-level manual heaps.
+2. Safely handles padding and out-of-bounds constraints by relying on `-inf` score padding, ensuring invalid tokens naturally sort to the bottom.
+3. Decouples the computational "Hard Part" (FP8 tensor core / warp-level dot products and dequantization) from the "Easy Part" (global sorting and selection).
+
+**Best Plan:**
+1. **Phase 1: Mathematical Definition & Memory Layout**
+    * **Inputs**: Query $Q$ (FP8, `[B, 64, 128]`), KV Cache $K$ (deep_gemm format `[num_pages, 64, 1, 132]`), Weights $W$ (`[B, 64]`), Seq Lens $L$ (`[B]`), Block Table $BT$ (`[B, max_pages]`).
+    * **Objective**: Compute $S_{b, t} = \sum_h (W_{b, h} \times \max(0, Q_{b, h} \cdot K_{b, t}^T))$ and find the 2048 indices $t$ with the highest scores per batch.
+    * **Allocations**: Allocate flat intermediate `scores` (float32) and `indices` (int32) arrays of shape `[batch_size, max_num_pages * 64]` using `torch::empty`.
+
+2. **Phase 2: The Optimization Loop (Scoring Kernel)**
+    * **Execution**: Launch a deterministic map-reduce kernel with `gridDim = (batch_size, max_num_pages)`.
+    * **Computation**: Each block loads the FP8 query and key data. It dequantizes the key token using the appended scale factor: $K_{float} = \text{fp8\_to\_float}(K_{fp8}) \times scale$. It performs the dot product, applies ReLU, and computes the weighted sum across all 64 heads.
+    * **Parallelism**: Use warp-level primitives (`__shfl_down_sync`) to reduce the dot products efficiently.
+
+3. **Phase 3: The "Safety Valve" (Constraint Enforcement)**
+    * **Bounds Safety**: Inside the scoring kernel, explicitly verify if the token index $t \ge L[b]$. If true, enforce the constraint by setting the score to `-INFINITY` and the index to `-1`. This mathematically guarantees out-of-bounds tokens will never be selected.
+    * **Global Top-K Guarantee**: Utilize `cub::DeviceSegmentedRadixSort::SortPairsDescending`. Sort the `scores` (keys) and `indices` (values) over the segments of length `max_num_pages * 64` for each batch $b$.
+    * **Why this is safe**: CUB's radix sort is exact and fully deterministic. It strictly enforces the top-K property without relying on heuristics or approximations.
+
+4. **Phase 4: Implementation Details & Finalization**
+    * **Libraries**: Use `<cuda_fp8.h>` for `__nv_fp8_e4m3` casting, `<cub/cub.cuh>` for segmented sorting, and `<torch/extension.h>` for tensor bindings.
+    * **Truncation Kernel**: After the CUB sort completes, launch a lightweight truncation kernel `gridDim=(batch_size), blockDim=(256)` that simply copies the first `2048` elements from the sorted `indices` array into the final output tensor of shape `[batch_size, 2048]`.
+    * **Edge Case Handling**: If the sequence length is less than 2048, the `-1` indices from the `-INFINITY` scores will naturally fill the remaining slots, exactly matching the reference implementation's padding behavior.

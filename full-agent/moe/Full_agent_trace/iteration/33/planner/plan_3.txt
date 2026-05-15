@@ -1,0 +1,12 @@
+PLAN 3: Adopt 8e3c776e verbatim + replace PyTorch routing with fused Triton routing kernel.
+
+Mathematical Formulation:
+- Variables: routing logits [T,256] -> sorted_tokens, sorted_weights, expert_offsets.
+- Constraints: DeepSeek group-top2 sum -> top-4 groups -> top-8 experts; weights = sigmoid(logits)[selected]/sum * scale.
+- Objective: minimize routing latency (currently ~8 PyTorch kernel launches).
+
+Solver: Single Triton kernel performing sigmoid + group reductions + topk + scatter; CSR via bincount+cumsum on GPU.
+
+Validity: Fall back to current PyTorch routing if Triton kernel fails or T>some_threshold; preserves correctness.
+
+Why: Routing dominates small-T workloads (~15-25% of 1.523ms). However: DeepSeek topk math is fragile; high correctness risk. Expected upside 5-15% if successful, but fallback risk regresses to floor 15.40x.

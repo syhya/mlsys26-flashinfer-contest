@@ -1,0 +1,21 @@
+### Outline 2: Robust Small-Path Re-layout with Exact Split-K Merge
+
+**Mathematical Formulation**
+- **Variables (X):** small-path threshold tau_small; partition count P in {32,64}; block head-group hg in {4,8}; workspace layout L for O_tmp,m_tmp,l_tmp; reducer block size Br in {128,256}.
+- **Constraints (C):** per-(token,head) partial states are exact online-softmax summaries (m_p,l_p,O_p); merge uses exact associative softmax-state equations; FP32 accumulators only; BF16 only for input/output storage; invalid indices never read cache tensors; final lse in base 2.
+- **Objective f(X):** minimize latency for low-token workloads while keeping large-token path unchanged and correctness >= 1.0.
+
+**Solver Strategy**
+- Deterministic discrete search over a few structural choices, then fix one robust configuration in code rather than runtime autotuning.
+- Use exact algebraic reduction as the solver for the hard validity part: structure finding (partitioned work decomposition) is separated from parameter tuning (exact merge of sufficient statistics).
+
+**Validity Mechanism**
+- Partial kernels never normalize; they store only exact FP32 states.
+- Reducer recomputes final state by m=max(m_p), l=sum(l_p*exp(m_p-m)), O=sum(O_p*exp(m_p-m)), then output=O/l.
+- Empty partitions use neutral state (m=-INF,l=0,O=0); empty rows return zero output and -INF lse.
+- Large path remains the known-good parent kernel as fallback.
+
+**Why this solution?**
+- **Expected improvement:** better GPU saturation for tiny num_tokens without disturbing the proven large path.
+- **Advantages:** mathematically exact; isolates risk to the weak regime; layout cleanup may reduce workspace traffic and indexing overhead.
+- **Disadvantages:** requires extra workspace; more code than Outline 1; speedup may depend on benchmark distribution.

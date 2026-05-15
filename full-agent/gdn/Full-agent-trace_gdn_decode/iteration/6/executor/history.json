@@ -1,0 +1,27 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_23b",
+        "solution_file_path": "output/143ca838-57da-43dd-a37a-46059a200ede/6/executor/0_0/solution_23b.py",
+        "evaluation_file_path": "output/143ca838-57da-43dd-a37a-46059a200ede/6/executor/0_0/evaluation_23b.json",
+        "score": 696.8726720480568,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 6968.73x (ref: 110.547ms, kernel: 0.010ms)\",\n  \"score\": 696.8726720480568,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 6968.726720480567,\n    \"exec_time_ms\": 0.009596435185185185,\n    \"baseline_time_ms\": 110.54673812037036,\n    \"compile_time\": 0.0,\n    \"eval_time\": 584.6697034835815\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_decode_qk4_v8_d128_k_last\",\n    \"execution_time\": \"584.67s\",\n    \"kernel_latency_ms\": \"0.010ms\",\n    \"reference_latency_ms\": \"110.547ms\",\n    \"speedup\": \"6968.73x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 110.54673812037036,\n      \"max_relative_error\": 0.37495818734169006,\n      \"max_absolute_error\": 6.103515625e-05,\n      \"total_workloads\": 54\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_b0c",
+        "solution_file_path": "output/143ca838-57da-43dd-a37a-46059a200ede/6/executor/0_0/solution_b0c.py",
+        "evaluation_file_path": "output/143ca838-57da-43dd-a37a-46059a200ede/6/executor/0_0/evaluation_b0c.json",
+        "score": 827.2096784136489,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 8272.10x (ref: 115.790ms, kernel: 0.008ms)\",\n  \"score\": 827.2096784136489,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 8272.096784136489,\n    \"exec_time_ms\": 0.008389515432098767,\n    \"baseline_time_ms\": 115.78990712345679,\n    \"compile_time\": 0.0,\n    \"eval_time\": 473.41329312324524\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"gdn_decode_qk4_v8_d128_k_last\",\n    \"execution_time\": \"473.41s\",\n    \"kernel_latency_ms\": \"0.008ms\",\n    \"reference_latency_ms\": \"115.790ms\",\n    \"speedup\": \"8272.10x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 115.78990712345679,\n      \"max_relative_error\": 0.37495818734169006,\n      \"max_absolute_error\": 6.103515625e-05,\n      \"total_workloads\": 54\n    },\n    \"correctness_check\": \"Passed\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

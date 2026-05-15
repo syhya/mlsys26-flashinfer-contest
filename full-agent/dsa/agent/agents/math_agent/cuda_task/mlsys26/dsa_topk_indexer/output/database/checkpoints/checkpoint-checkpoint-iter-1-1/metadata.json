@@ -1,0 +1,22 @@
+{
+  "total_generated_solutions": 1,
+  "total_valid_solutions": 0,
+  "island_feature_map": [
+    {}
+  ],
+  "islands": [
+    []
+  ],
+  "elites": [],
+  "best_solution_id": "",
+  "island_best_solution": [
+    null
+  ],
+  "last_iteration": 1,
+  "current_island": 0,
+  "island_capacity": [
+    0
+  ],
+  "last_migration_generation": 0,
+  "feature_stats": {}
+}

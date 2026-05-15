@@ -1,0 +1,34 @@
+### Outline 1: Correctness-First PyTorch Native FP8 MoE via Exact Dispatch and Per-Expert torch._scaled_mm
+
+**Mathematical Formulation**
+- **Variables (X):**
+  - Routing selection tensors: group indices, top-k expert indices, normalized routing weights.
+  - Dispatch tensors: sorted token ids `tok`, sorted local expert ids `exp`, CSR offsets `offs`.
+  - Per-expert intermediate matrices `G1_e` and `Y_e`.
+- **Constraints (C):**
+  - Routing must exactly implement DeepSeek no-aux topology: sigmoid -> group top2-sum -> top4 groups -> global top8 experts.
+  - GEMM1 and GEMM2 must accumulate in FP32.
+  - FP8 dequantization must follow block-scale law `val ~= fp8 * scale` using original token ids for activation scales.
+  - Final output shape `[T, 7168]`, dtype `bfloat16`.
+  - No CPU-GPU synchronization inside hot path except fixed-count loop over 32 experts.
+- **Objective (f(X)):**
+  - Maximize evaluation score by first driving correctness to pass all workloads, then minimizing latency.
+
+**Solver Strategy**
+- Use a deterministic decomposition strategy rather than a stochastic search:
+  1. Solve routing exactly with vectorized PyTorch tensor ops.
+  2. Solve dispatch exactly with stable sort + CSR construction (`argsort`, `bincount`, `cumsum`).
+  3. Solve each expert GEMM by calling `torch._scaled_mm` when supported for FP8 inputs and FP32 accumulation; otherwise use safe BF16/FP32 fallback.
+  4. Apply SwiGLU in PyTorch, then GEMM2 similarly.
+- This is effectively a block-coordinate deterministic solver where structure finding (routing/dispatch) is decoupled from parameter execution (matmul backend).
+
+**Validity Mechanism**
+- Build an explicit exact dequantization fallback for both GEMMs using blockwise scales expanded by `repeat_interleave(128, dim=...)` only for the current expert slice, never for all experts globally.
+- Use token-local gathered activation scales from original global token indices.
+- After each backend call, validate tensor shape/dtype and, if unsupported, switch to fallback path.
+- Final safety valve: always accumulate expert contributions with `index_add_` into FP32 output, then cast once to BF16.
+
+**Why this solution?**
+- **Expected performance improvement:** likely slower than best Triton, but much more likely to eliminate the persistent 8192 absolute error and reach score >= 1.0 if the hidden bug is in the Triton kernel.
+- **Advantages:** lowest implementation risk; uses vendor/native kernels; very robust numerically; easy to debug; avoids custom pointer arithmetic bugs.
+- **Disadvantages:** fixed loop over 32 experts may lose some peak performance; expanded dequant fallback can be memory heavy if triggered frequently.

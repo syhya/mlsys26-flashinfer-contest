@@ -1,0 +1,32 @@
+### Outline 1: Two-pass score/value separation with exact softmax merge
+
+**Mathematical Formulation**
+- **Variables (X):**
+  1. Tile size over sparse positions `Bk in {16,32,64}`.
+  2. Per-(token, head, tile) partial score statistics `(m_s, l_s)` where `m_s` is tile max logit and `l_s = sum_i exp(logit_i - m_s)`.
+  3. Per-(token, head) global statistics `(m, l)`.
+  4. Per-(token, head, dim-block) output accumulator `O` in FP32.
+- **Constraints (C):**
+  1. For valid sparse index `idx >= 0`, `page = idx >> 6`, `offset = idx & 63`, row = `page*64 + offset`.
+  2. If `idx == -1`, contribution is exactly zero to logits, normalization, and output.
+  3. Dot-product accumulation is FP32 over 576 dims; output accumulation is FP32 over 512 dims.
+  4. `lse = log2(sum_j exp(logit_j))) = m * log2(e) + log2(l)`.
+  5. Final store only converts FP32 -> BF16.
+- **Objective f(X):** Minimize runtime by decoupling expensive output accumulation from score statistics while preserving exact softmax equivalence.
+
+**Solver Strategy**
+- Deterministic dynamic programming / reduction formulation.
+- Pass 1 computes exact online-softmax-compatible per-tile stats `(m_s, l_s)`.
+- Host/kernel reduction merges tile stats exactly using associative softmax-merge equations.
+- Pass 2 recomputes tile logits and accumulates values using fixed global `(m, l)`.
+
+**Validity Mechanism**
+- Exact softmax merge identities guarantee equivalence to full softmax.
+- All-invalid rows detected via valid-count; output zero and `lse=-INF`.
+- Shape/dtype/contiguity enforced with `TORCH_CHECK`.
+- No atomics for floating reductions across blocks; reduction topology fixed and deterministic.
+
+**Why this solution?**
+- **Expected improvement:** Reduces register pressure in the hottest kernel by removing online output rescaling from score pass; may improve occupancy.
+- **Advantages:** Mathematically exact, deterministic, easier to reason about numerical stability.
+- **Disadvantages:** Requires recomputing logits in second pass and adds an extra kernel launch; likely not faster than the already excellent parent unless occupancy gains are large.

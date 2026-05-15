@@ -1,0 +1,63 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Maximize the performance of the GDN prefill forward pass kernel by eliminating unnecessary shared memory traffic for thread-independent variables (`v`, `a`, `b`) and utilizing register-level double buffering alongside explicit warp-level shuffle instructions (`__shfl_sync`).
+
+**Selected Outline:** Register-Level Prefetching & Warp-Shuffle Broadcast
+
+**Rationale for Selection:**
+1.  **Mathematical Optimization:** Thread-local variables (`v[tid]`) do not require cross-thread communication. Block-uniform scalars (`a`, `b`) can be broadcast at the warp level. Staging them in shared memory adds $O(N)$ unnecessary memory latency and barrier synchronization overhead. Migrating them to registers mathematically reduces the critical path latency $T_{exec}$.
+2.  **Resource Efficiency:** Removing `v`, `a`, and `b` from the `SharedMem` struct reduces shared memory footprint by over 1 KB per block and entirely avoids L1 shared memory bank conflicts on scalar reads, directly following the parent summary's guidance.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Definition & Memory Model Refinement**
+    *   **Variables**: Retain thread block size $N=128$. Let $V=128$ be the head dimension.
+    *   **Memory Model Refinement**:
+        *   **Shared Memory**: Strictly reserve shared memory ONLY for cross-thread broadcast variables (`q` and `k`), which are accessed by all threads during the dot-product reductions.
+            ```cpp
+            union SharedMem {
+                float state_transpose[128][33]; // Padded for init
+                struct alignas(16) {
+                    alignas(16) float q[2][128];
+                    alignas(16) float k[2][128];
+                } tokens;
+            };
+            ```
+        *   **Register Memory**: Introduce thread-local registers for double-buffering `v`, `a`, and `b`:
+            ```cpp
+            float v_val, next_v_val;
+            float a_val, next_a_val;
+            float b_val, next_b_val;
+            ```
+
+2.  **Phase 2: The Optimization Loop (Hybrid Register/Shared Pipelining)**
+    *   **Initialization**: Retain the exact same cooperative `float4` state matrix load into `state_reg_f4[32]`.
+    *   **Prologue ($t = seq\_start$)**:
+        *   Load `q` and `k` into `smem.tokens.q[0]` and `smem.tokens.k[0]` via `float4` cooperative fetches.
+        *   Load `v_val = __bfloat162float(v[v_idx]);` directly into the thread-local register.
+        *   **Warp-Shuffle Broadcast**: Instead of thread 0 loading `a` and `b` into shared memory, have the warp leader (lane 0) load them from global memory and broadcast via `__shfl_sync`:
+            ```cpp
+            if (tid % 32 == 0) {
+                size_t ab_idx = (size_t)t * 8 + h;
+                a_val = __bfloat162float(a[ab_idx]);
+                b_val = __bfloat162float(b[ab_idx]);
+            }
+            a_val = __shfl_sync(0xffffffff, a_val, 0);
+            b_val = __shfl_sync(0xffffffff, b_val, 0);
+            ```
+    *   **Steady-State Loop (`for t = seq_start; t < seq_end; t++`)**:
+        *   **Prefetch Phase**: If $t+1 < seq\_end$, prefetch `q` and `k` into `smem.tokens` buffer $1$. Prefetch `next_v_val` directly into a register. Prefetch `next_a_val` and `next_b_val` using the warp-shuffle pattern for token $t+1$.
+        *   **Compute Phase**: Compute gates $x, g, \beta$ using the current `a_val`, `b_val`. Apply the strict stable projection: `sp_x = (x > 20.0f) ? x : log1pf(__expf(x))`.
+        *   **Reduction Phase**: Loop `k_idx` from 0 to 31. Perform FMA operations between `smem.tokens.k` and `state_reg_f4`.
+        *   **Update Phase**: Compute $new\_v$, $delta\_v$ using `v_val`. Loop `k_idx` from 0 to 31 to update `state_reg_f4` and compute output.
+        *   **Advance Phase**: Write scaled output. Swap shared memory buffer index. Shift registers: `v_val = next_v_val; a_val = next_a_val; b_val = next_b_val;`. Issue `__syncthreads()`.
+
+3.  **Phase 3: The "Safety Valve" (CRITICAL Correction/Refinement)**
+    *   **Alignment Guarantee**: Enforce `.contiguous()` checks on all inputs in the C++ wrapper to ensure 16-byte alignment for `float4` memory instructions.
+    *   **Scale Fallback**: Inject deterministic repair: `if (scale == 0.0f) { scale = 1.0f / std::sqrt(128.0f); }`.
+    *   **Boundary Enforcement**: Check `num_seqs <= 0` and skip execution to prevent illegal memory faults. Ensure `__shfl_sync` uses the full mask `0xffffffff` inside unconditional execution paths.
+
+4.  **Phase 4: Implementation Details**
+    *   **Framework Tools**: Utilize `<torch/extension.h>`, `<cuda_bf16.h>`, and standard `__launch_bounds__(128)` to explicitly guide the PTX compiler.
+    *   **Math Intrinsics**: Strictly use `__expf`, `fmaf`, and `__bfloat162float` on the hot path to ensure optimal hardware execution.
+    *   **Code-Ready Shift**: By storing `v`, `a`, and `b` in registers instead of shared memory, we eliminate the `__syncthreads()` write-read dependency for these variables, shortening the critical path length inside the software pipeline.

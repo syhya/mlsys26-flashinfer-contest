@@ -1,0 +1,36 @@
+### Outline 1 — Two-Path Deterministic Dispatch with Native `_scaled_mm` GEMM2 and Torch Scatter
+
+**Mathematical Formulation**
+- **Variables ($X$):**
+  - Routing tensors: selected local expert ids `sorted_experts`, global token ids `sorted_tokens`, routing weights `sorted_weights`, CSR offsets `expert_offsets`.
+  - Per-expert packed activation blocks `A_e \in R^{T_e \times H}` gathered from FP8 hidden states.
+  - GEMM1 output `G1_e \in R^{T_e \times 2I}` in FP32.
+  - SwiGLU activation `S_e = silu(G1_e[:, I:]) * G1_e[:, :I] \in R^{T_e \times I}`.
+  - GEMM2 output `Y_e \in R^{T_e \times H}` in FP32.
+- **Constraints ($C$):**
+  1. Routing must exactly match DeepSeek routing: sigmoid -> group top2 sum -> top4 groups -> top8 experts.
+  2. GEMM accumulation must be FP32.
+  3. Final output must be `[T, 7168]` BF16.
+  4. FP8 block scales must be applied per 128-wide block: `dequant(x_block) = fp8_block * scale_block`.
+  5. No atomics in GEMM2 epilogue; accumulation into final output must be deterministic and shape-valid.
+- **Objective ($f(X)$):** minimize end-to-end latency while preserving exact tensor shapes and required numerical tolerance.
+
+**Solver Strategy**
+- Deterministic piecewise optimization, not stochastic search.
+- Use a **two-path solver** over sequence regime:
+  1. For small/medium `T` or sparse expert occupancy, use current grouped Triton GEMM1 and expert-wise GEMM2 via `torch.mm`/`torch._scaled_mm` on compact per-expert batches.
+  2. For larger `T`, still use grouped Triton GEMM1, but do GEMM2 with native `_scaled_mm` or `torch.mm` after dequantized/quantized staging chosen by a deterministic threshold on `max_count` and `Tk_total`.
+- This is effectively a branch-and-bound over a tiny discrete policy space `{path_small, path_large}` with analytically chosen thresholds.
+
+**Validity Mechanism**
+- Hard constraints are enforced by construction:
+  - Reuse the parent’s routing exactly.
+  - Keep parent GEMM1 kernel structure and scales.
+  - Replace risky atomic scatter with `output.index_add_` or `scatter_add_` on FP32 output.
+  - Add a deterministic fallback: if `_scaled_mm` path is unsupported for a given shape/dtype combo, fall back to FP32 dequant + `torch.mm`.
+- Final projection step: always cast only the final accumulated FP32 output to BF16.
+
+**Why this solution?**
+- **Expected improvement:** reduce Triton complexity and potential underperformance of GEMM2 by leveraging highly tuned vendor-native matmul kernels, especially when batch per expert is not tiny.
+- **Advantages:** very robust; low implementation risk; easy fallback path; no atomic contention.
+- **Disadvantages:** may leave some performance on the table versus a perfect custom Triton GEMM2; may incur temporary dequant buffers.

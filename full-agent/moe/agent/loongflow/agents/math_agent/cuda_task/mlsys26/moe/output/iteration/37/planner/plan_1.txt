@@ -1,0 +1,6 @@
+Plan 1: Base on 302d2eb3 (best=1.5517) verbatim. Add a small, safe set of new autotune configs targeted at small-T decode shapes: BLOCK_M=8 with num_warps=4/num_stages=4-5 for GEMM1 (currently smallest is BLOCK_M=16). Also add a num_stages=3 BLOCK_M=128 variant if missing. Floor guaranteed by superset property of autotune.
+
+Math: identical to parent. Just new (BLOCK_M, warps, stages) tuples appended to autotune lists.
+
+Risk: low. Triton silently drops failing configs.
+Upside: small (eval shows +1-2% from autotune expansion is typical).

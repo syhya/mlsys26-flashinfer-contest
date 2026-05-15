@@ -1,0 +1,26 @@
+Outline 3: Full fusion attempt with persistent grouped kernels and split-K search
+
+Mathematical Formulation
+- Variables (X):
+  - Routing/dispatch variables as before.
+  - Persistent-kernel schedule variables: per-SM expert work queues, split-K factor, BM/BN tile sizes.
+  - Fused intermediate register fragments for SwiGLU and weighted accumulation.
+- Constraints (C):
+  - Exact routing semantics.
+  - Exact block-scale dequant semantics.
+  - Split-K partial sums require deterministic reduction in fp32.
+  - Must handle arbitrary T and sparse per-expert Tk.
+- Objective f(X): minimize latency by maximizing occupancy and minimizing HBM traffic via kernel fusion.
+
+Solver Strategy
+- Discrete configuration search over persistent kernel parameters; equivalent to finite combinational optimization over schedules.
+- If any randomness is used for candidate ordering, run multi-start with N=20 and keep best config.
+
+Validity Mechanism
+- Repair step: if fused path cannot satisfy exact semantics or compile, fall back to Outline 2 conservative path.
+- Use temporary fp32 accumulation buffers and deterministic final reduction.
+
+Why this solution?
+- Expected performance improvement: potentially highest.
+- Advantages: best upside.
+- Disadvantages: highest implementation risk, most likely to crash or fail correctness; not ideal given current parent already has huge hidden numerical error.

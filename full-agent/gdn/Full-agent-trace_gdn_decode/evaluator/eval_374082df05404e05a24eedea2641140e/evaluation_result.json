@@ -1,0 +1,19 @@
+{
+  "status": "execution_failed",
+  "summary": "Compilation failed: Shard 1 failed: Function call failed: workspace billing cycle spend limit reached",
+  "score": 0.0,
+  "metrics": {
+    "correctness": 0.0,
+    "speedup": 0.0,
+    "exec_time_ms": 0.0,
+    "baseline_time_ms": 0.0,
+    "compile_time": 0.0,
+    "eval_time": 1.3795464038848877
+  },
+  "artifacts": {
+    "eval_backend": "modal+flashinfer-bench",
+    "task_id": "gdn_decode_qk4_v8_d128_k_last",
+    "execution_time": "1.38s",
+    "error": "Shard 1 failed: Function call failed: workspace billing cycle spend limit reached"
+  }
+}

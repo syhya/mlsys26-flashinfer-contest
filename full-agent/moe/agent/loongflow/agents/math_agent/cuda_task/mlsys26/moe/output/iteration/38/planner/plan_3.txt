@@ -1,0 +1,5 @@
+Plan 3: TMA via tl.make_block_ptr for weight loads in GEMM1.
+- Variables: replace pointer arithmetic with block_ptr.
+- Risk: high — block_ptr semantics fragile with FP8; many lineage attempts have failed.
+- Expected gain: 5-10% if it works; 0% (or crash) if not.
+- Lower priority than the safe fusion of Plan 1.

@@ -1,0 +1,34 @@
+### Outline 1: Correctness-First Hybrid with PyTorch Native FP8 GEMM and Exact GPU Dispatch
+
+**Mathematical Formulation**
+- **Variables (X):**
+  - Routing selection tensors `topk_idx[T,8]`, normalized routing weights `w[T,8]`.
+  - Dispatch permutation `perm[Tk_total]`, expert counts `cnt[E_local]`, CSR offsets `ofs[E_local+1]`.
+  - Per-expert gathered token matrices `A_e[Tk,H]` and outputs `Y_e[Tk,H]` represented implicitly by grouped buffers.
+- **Constraints (C):**
+  - Routing must exactly implement DeepSeek no-aux rule: sigmoid -> group top2 sum -> top4 groups -> global top8 experts.
+  - GEMM1 and GEMM2 accumulations must be FP32.
+  - FP8 dequantization must use block-size 128 scales with original token index lookup for `hidden_states_scale[:, token]`.
+  - Output must equal weighted scatter-add over local experts and final dtype must be BF16.
+- **Objective (f(X))**
+  - Minimize latency subject to correctness tolerance by using vendor/native FP8 matmul where possible and avoiding full dequant materialization.
+
+**Solver Strategy**
+- Use a **deterministic decomposition strategy** rather than stochastic search:
+  1. Solve routing and dispatch with vectorized PyTorch tensor operations.
+  2. Solve GEMM1/GEMM2 via `torch._scaled_mm` if shape/layout permits, otherwise exact blockwise dequant + `torch.mm` fallback.
+  3. Use per-expert batching with bucketing to amortize launches.
+- This is a standard decomposition / exact evaluation approach, not a heuristic.
+
+**Validity Mechanism**
+- Hard fallback chain:
+  1. Primary path: `torch._scaled_mm` with mathematically exact scale handling.
+  2. Repair path: if `_scaled_mm` cannot represent per-token/per-block scale layout directly, dequantize only the needed gathered tiles/expert weights into FP32 and call `torch.mm`.
+  3. Final safety path: if any shape edge case appears (`Tk=0`, tiny batches), return zeros or process via dense safe PyTorch reference logic.
+- Guarantee correctness by never using dynamic re-quantization of activations for GEMM2.
+- Guarantee validity by asserting shapes and using contiguous copies before matmul.
+
+**Why this solution?**
+- **Expected improvement:** likely restores numerical robustness and may still be fast due to cuBLAS FP8 path.
+- **Advantages:** very low crash risk, easy correctness reasoning, avoids Triton pointer/launch bugs.
+- **Disadvantages:** `_scaled_mm` may not match block-scale layout efficiently; fallback dequant may reduce speed and may not beat baseline enough.

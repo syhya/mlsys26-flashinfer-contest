@@ -1,0 +1,7 @@
+Mathematical Formulation:
+- Variables (X): Number of warps, elements per thread.
+- Objective (f(X)): Maximize FP8 Tensor Core throughput.
+- Constraints (C): Output length exactly 2048, out-of-bounds tokens map to -1.
+Solver Strategy: Two-stage kernel. Stage 1: Compute scores using CuTe FP8 MMA, apply ReLU & weights, and write to HBM. Stage 2: CUB Radix Sort to find Top-K.
+Validity Mechanism: Stage 1 ensures padded/invalid tokens receive a score of -inf. Radix sort inherently handles the sorting, and we take the top 2048.
+Why this solution?: Decouples matmul from sorting. Highly robust and leverages optimized CUB library. Downsides: HBM traffic between Stage 1 and Stage 2.

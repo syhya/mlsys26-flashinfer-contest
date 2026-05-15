@@ -1,0 +1,56 @@
+### Plan 1: Exact Reference-Matching Implementation with torch._scaled_mm
+
+**Mathematical Formulation:**
+
+Variables:
+- X[T, H]: hidden states (fp8)
+- X_scale[H//128, T]: per-block scales (transposed layout)
+- W1[E, 2I, H]: GEMM1 weights (fp8)
+- W1_scale[E, 2I//128, H//128]: per-block scales
+- W2[E, H, I]: GEMM2 weights (fp8)
+- W2_scale[E, H//128, I//128]: per-block scales
+- R[T, E]: routing weights (normalized)
+
+Constraints:
+- All GEMM accumulation in FP32
+- FP8 dequantization: float_val = fp8_val * scale[block_idx]
+- Output dtype: bfloat16
+- Output shape: [T, H]
+
+Objective:
+- Minimize |output - reference_output| subject to constraints
+- Maximize speedup while maintaining correctness
+
+**Solver Strategy:**
+
+Use PyTorch native operations exclusively:
+1. torch._scaled_mm for FP8 GEMM with exact block-scale semantics
+2. torch.nn.functional.silu for SwiGLU
+3. torch.index_add_ for scatter accumulation
+
+Key insight: torch._scaled_mm is cuBLAS-backed and handles FP8 block-scales correctly by design. Avoid custom Triton kernels that may have layout mismatches.
+
+**Validity Mechanism:**
+
+1. Exact scale tensor reshaping to match torch._scaled_mm expectations
+2. Explicit transpose operations to match cuBLAS layout conventions
+3. Per-expert processing with deterministic accumulation order
+4. Validation: compare intermediate outputs against reference implementation
+
+**Why this solution:**
+
+Advantages:
+- Eliminates custom kernel bugs by using battle-tested cuBLAS
+- torch._scaled_mm handles FP8 block-scales correctly
+- Simpler code = fewer bugs
+- Should achieve correctness first
+
+Disadvantages:
+- May be slower than optimized Triton kernels
+- Less control over fusion opportunities
+- Requires understanding torch._scaled_mm API exactly
+
+Expected Performance:
+- Correctness: HIGH (using reference-quality ops)
+- Speed: MEDIUM (cuBLAS is fast but less fused)
+- Score target: 1.0+ (correctness guaranteed, reasonable speed)

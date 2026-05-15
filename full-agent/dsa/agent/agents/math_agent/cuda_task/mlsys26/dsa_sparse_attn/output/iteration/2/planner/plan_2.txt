@@ -1,0 +1,21 @@
+### Outline 2: Dynamic Multi-path Dispatch (Sequence-Level Parallelism)
+**Mathematical Formulation:**
+* **Variables:** Dispatch threshold $T_{thresh} = 128$. Split factor $S$.
+* **Constraints:** $S$ must evenly divide the top-k dimension 2048. For small $N$, $S=16$ or $S=32$ to fill the GPU.
+* **Objective:** Minimize kernel latency by maximizing SM utilization $U = \min(1.0, \frac{N \times S}{SM_{count}})$.
+
+**Solver Strategy:**
+* **Algorithm:** Multi-path Kernel Launch.
+* **Path A (Large Workload):** If $N \ge 128$, launch the existing highly-optimized Tiled Kernel (1 block per token, 1 warp per head).
+* **Path B (Small Workload):** If $N < 128$, dispatch to a Split-K Kernel.
+    * **Step 1:** Allocate intermediate buffers `O_tmp` ($N \times S \times 16 \times 512$) and `lse_tmp` ($N \times S \times 16$).
+    * **Step 2:** Launch Split-K compute kernel. Grid = $(N, S, 1)$. Each block computes its chunk of 2048 keys (e.g., $2048/32 = 64$ keys).
+    * **Step 3:** Launch a Reduction kernel. Grid = $(N, 16, 1)$. Each block reads the $S$ intermediate chunks for its specific head, performs the online softmax reduction mathematically: $m_{global} = \max(m_s)$, $O = \sum O_s \exp(m_s - m_{global}) / \dots$, and writes the final output.
+
+**Validity Mechanism:**
+* **Exact FP32 Reductions:** The reduction step strictly adheres to the associative properties of the online softmax algorithm in FP32, guaranteeing identical numerical results to Path A.
+* **Padding Guard:** The reduction kernel handles $-\infty$ properly for padded elements to prevent NaNs.
+
+**Why this solution?:**
+* **Advantages:** Solves the primary bottleneck identified in the profiler: 1 token = 1 block = 99% of SMs idle. Split-K distributes a single token's work across up to 32 SMs.
+* **Disadvantages:** Workspace allocation overhead (though small for tiny $N$).

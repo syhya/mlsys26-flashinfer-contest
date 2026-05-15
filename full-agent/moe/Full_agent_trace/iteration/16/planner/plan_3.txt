@@ -1,0 +1,25 @@
+Outline 3: Segmented grouped Triton with blockwise semantic validator
+
+Mathematical Formulation
+Variables (X): exact routing selection S; CSR dispatch D = {sorted_tokens, sorted_experts, expert_offsets}; grouped GEMM1 output G1; grouped GEMM2/scatter output O; validation residuals r1, r2 on sampled tiles.
+Constraints (C): exact routing topology; grouped kernel indices map each row j to token t_j and expert e_j; FP8 tensor-core dot uses fp8 inputs with post-dot block-scale multiply; int64 pointer arithmetic; all partial tiles masked; final accumulation in FP32.
+Objective f(X): minimize latency of grouped kernels subject to validator residuals r1 <= eps1 and r2 <= eps2 and final correctness tolerance.
+
+Solver Strategy
+Use deterministic finite configuration search plus validator:
+- Triton autotune over a fixed small config set for GEMM1 and GEMM2.
+- Launch grouped kernels over expert dimension and max_count M tiles.
+- Run a deterministic semantic validator on a tiny subset: compare a few chosen rows/blocks from Triton outputs against exact PyTorch block computations.
+- If validator fails, switch one stage at a time to safe implementation (first GEMM2, then GEMM1).
+
+Validity Mechanism
+Hard safety valve:
+- Pre-launch checks on monotone offsets and bounds.
+- In-kernel masks on M and N for every load/store.
+- Post-kernel validator against exact blockwise oracle.
+- Fallback cascade ensures valid output even if fast path fails.
+
+Why this solution?
+Expected improvement: preserves high speed while systematically attacking hidden semantic bugs in scales, orientation, or scatter.
+Advantages: most balanced between speed and correctness; deterministic diagnosis and fallback; directly addresses plateau.
+Disadvantages: more implementation complexity; validator must be carefully lightweight.

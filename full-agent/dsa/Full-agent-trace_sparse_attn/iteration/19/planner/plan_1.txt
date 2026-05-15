@@ -1,0 +1,34 @@
+Outline 1: Conservative exploitation branch — preserve incumbent two-path algorithm, apply only byte-local safety/perf cleanups.
+
+Mathematical Formulation
+- Variables X:
+  1. Dispatch threshold tau between split-K small path and fused large path.
+  2. Tile-validity encoding method v in {shared-flag, shared-index-mutation}.
+  3. Small-path workspace layout L for O_tmp, m_tmp, l_tmp, constrained to keep current reduction algebra unchanged.
+  4. Minor loop/control-flow simplifications s that do not alter online-softmax recurrence.
+- Constraints C:
+  1. Exact operator semantics: masked sparse_indices == -1 contribute zero.
+  2. All dot products, recurrence states (m,l,O), and reductions in FP32.
+  3. Output shape [T,16,512] bf16, lse [T,16] fp32.
+  4. Base-2 lse exactly: m*log2(e)+log2(l) when l>0 else -INF.
+  5. Exact ABI/signature/module binding preserved.
+  6. Explicit BF16 intrinsics only.
+  7. Keep asymptotic structure unchanged.
+- Objective f(X): minimize kernel latency under exact correctness by reducing control-flow fragility, avoiding unnecessary invalid-tile work, and preserving the proven best architecture.
+
+Solver Strategy
+- Deterministic finite search over a tiny candidate set, not random search:
+  1. tau in {96, 128}
+  2. validity method fixed to separate shared flag
+  3. workspace layout candidates limited to existing contiguous layouts compatible with current reducer
+- Select the lexicographically safest candidate: correctness-preserving first, then lowest expected overhead.
+
+Validity Mechanism
+- Safety comes from not changing the mathematical recurrence at all.
+- Neutral-state repair for empty rows: if l<=0 or no valid entries, force zero output and -INF lse.
+- Keep split-K merge algebra exactly unchanged.
+- If any micro-optimization threatens indexing/alignment clarity, revert to parent code path.
+
+Why this solution?
+- Advantages: highest probability of compiling and preserving >11 score; directly aligned with top island trend of conservative refinement.
+- Disadvantages: likely only marginal gains; may stagnate if local optimum already saturated.

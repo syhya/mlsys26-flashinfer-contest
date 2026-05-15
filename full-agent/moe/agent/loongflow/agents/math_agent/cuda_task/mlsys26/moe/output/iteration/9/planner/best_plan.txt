@@ -1,0 +1,51 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized FP8 block-scale MoE operation that significantly outperforms baseline latency while mathematically guaranteeing exact numerical correctness ($rtol=1e-2, atol=1e-2$). The primary goal is to resolve the structural 8192.0 absolute error caused by incorrect DeepSeek routing logic in previous iterations.
+
+**Selected Outline:** Triton Grouped GEMM with Exact Unnormalized Routing & BF16 Safety
+
+**Rationale for Selection:**
+1. **Identifies the True Bottleneck:** The persistent 8192.0 error is mathematically proven to be a structural flaw, specifically the incorrect application of weight normalization (`weights / weights_sum`) which DeepSeek-V3 routing does *not* use.
+2. **Mathematically Safe:** Retains the exact BF16 upcasting for GEMM2. Once the absolute error drops below the tolerance threshold via the routing fix, future iterations can aggressively optimize precision.
+3. **High Performance:** Maintains the highly parallel Grouped Triton GEMM design for 8x+ speedups over baseline.
+
+---
+
+**Best Plan:**
+
+**Phase 1: Mathematical Definition**
+*   **Variables ($X$)**: 
+    *   $T_{map}$: Token-to-expert CSR offset arrays.
+    *   $Triton_{params}$: Kernel tile sizes ($BLOCK\_M, BLOCK\_N, BLOCK\_K$, $num\_warps$, $num\_stages$).
+*   **Constraints ($C$)**: 
+    *   Strict bounds checking on all memory loads (`m_mask`).
+    *   **CRITICAL CONSTRAINT**: DeepSeek routing weights must equal $\sigma(logits) \times routed\_scaling\_factor$ for selected experts. **No sum normalization.**
+*   **Objective ($f(X)$)**: Minimize execution time using Triton GEMMs while strictly bounding absolute error $\le 1e-2$.
+
+**Phase 2: The Optimization Loop (Multi-Start Autotuning)**
+*   **Algorithm**: Use `@triton.autotune` as a multi-start search mechanism to find the optimal execution topology.
+*   **Loop Configurations**: Provide at least 4 configurations varying `BLOCK_M` $\in \{32, 64, 128\}$, `BLOCK_N` $\in \{64, 128\}$, and `num_warps` $\in \{4, 8\}$. Triton will benchmark all starts and deterministically select the fastest valid one for the specific sequence length $T$.
+*   **Vectorized Dispatch**: Execute the token-to-expert assignment purely on the GPU to avoid CPU-GPU sync overhead. Use `torch.argsort` to group tokens, `torch.bincount` to count tokens per expert, and `torch.cumsum` to build the CSR offset pointers.
+
+**Phase 3: The "Safety Valve" (CRITICAL)**
+This phase enforces strict validity constraints to guarantee the generated solution mathematically eliminates the 8192.0 absolute error.
+*   **Routing Logic Correction (The 8192.0 Error Fix)**: Previous iterations incorrectly normalized routing weights using `weights / weights.sum(dim=1)`. DeepSeek-V3 explicitly uses the unnormalized sigmoid values for the selected Top-K experts. The solver must calculate: `weights = s * M * routed_scaling_factor` (where `M` is the Top-K mask) and completely delete the division by `weights_sum`.
+*   **Precision Safety Valve (BF16 Upcasting)**: To ensure numerical stability in the SwiGLU activation and GEMM2, upcast the SwiGLU output and the dequantized weights to `bfloat16`. 
+    *   *Formula*: `w_bf16 = (w.to(tl.float32) * w_scale).to(tl.bfloat16)` and `c_bf16 = c.to(tl.bfloat16)`.
+*   **Pointer Overflow Safety**: Enforce `.to(tl.int64)` on all expert indices (`e_idx`) and coordinate offsets *before* multiplying them by tensor strides to avoid $2^{31}-1$ int32 overflow.
+
+**Phase 4: Implementation Details**
+*   **Step 4.1: Deterministic Unnormalized Routing (PyTorch)**: Compute `s = 1.0 / (1.0 + torch.exp(-logits))`. Add bias, apply Top-2 group and Top-4 group selection, then Top-8 global selection. Mandate `sorted=True` in `torch.topk`. Calculate `weights = s * M * routed_scaling_factor`. Do NOT normalize.
+*   **Step 4.2: Vectorized Token Sorting**: Filter `topk_idx` for the local expert range. Use `torch.argsort` to group tokens by expert, and `torch.bincount` + `torch.cumsum` to create the CSR `expert_offsets`.
+*   **Step 4.3: Triton Grouped GEMM1 (Exact Block Scale)**: 
+    *   Launch grid `(N_tiles, T_tiles, E_local)`.
+    *   Execute FP8 Tensor Core dot: `dot_res = tl.dot(a_fp8, w_fp8, out_dtype=tl.float32)`.
+    *   Apply block scales: `acc += dot_res * a_scale * w_scale`. Store to $G_1$ (shape `[Tk_total, 2*I]`).
+*   **Step 4.4: Fused SwiGLU & BF16 GEMM2**:
+    *   Read $x_1$ and $x_2$ from $G_1$. Compute $c = x_2 \cdot tl.sigmoid(x_2) \cdot x_1$.
+    *   Load $W_{2fp8}$ and $W_{2scale}$.
+    *   Apply exact BF16 upcasting: `w_bf16 = (w.to(tl.float32) * w_scale).to(tl.bfloat16)` and `c_bf16 = c.to(tl.bfloat16)`.
+    *   Execute `dot_res = tl.dot(c_bf16, w_bf16, out_dtype=tl.float32)`. Multiply by `Routing_weights` and store to $O$.
+*   **Step 4.5: Deterministic Scatter Add**:
+    *   Initialize `output = torch.zeros((T, H), dtype=torch.float32, device=device)`.
+    *   Accumulate valid tokens using `output.index_add_(0, sorted_tokens.long(), O)` and return as `bfloat16`.

@@ -1,0 +1,13 @@
+**Mathematical Formulation**:
+Variables $X$: Pre-scaled math base ($e$ vs $2$).
+Constraints $C$: Numerical tolerance `rtol=1e-2`.
+Objective $f(X)$: Minimize ALU instruction count.
+
+**Solver Strategy**:
+Symbolic algebraic substitution (conceptually via `sympy`). Transform $e^x$ to $2^{x \cdot \log_2(e)}$. 
+
+**Validity Mechanism**:
+Post-processing safety valve: mathematically prove that $\log_2(\sum 2^{x}) + m_{base2} == \log_2(\sum e^{x \cdot \ln(2)})$, guaranteeing exact equivalence.
+
+**Why this solution?**:
+Replaces `__expf` with native `__exp2f`, saving multiple cycles per iteration. Extremely safe due to mathematical identity.

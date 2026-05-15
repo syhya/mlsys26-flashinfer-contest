@@ -1,0 +1,231 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Lift the parent's score from 4.51 (45x speedup) toward the best-in-database score 12.63 (126x) by cherry-picking the proven refinements that have already been validated in sibling solutions, applied directly to this parent solution. The plan must guarantee correctness=1.0.
+
+**Selected Outline:** Plan 3 — "Validated Refinement Transfer". Apply the *proven* deltas from the lineage's top sibling (`solution_id=94736692`, score 12.63) onto the current parent (`d098b6c0`, score 4.51), keeping the mathematical model identical.
+
+**Rationale for Selection:**
+1. **Math-not-luck:** Each delta is a pure refactor of the exact online-softmax algebra; correctness is preserved by construction. No new heuristic.
+2. **Validated by data:** The lineage's top sibling (12.63) and a sister sibling (11.69) both succeed with the same set of micro-changes. Sibling A/B evidence already exists.
+3. **Decouples structure from parameters:** Structure (split-K + fused dispatch) stays identical; we only tune *control-flow* and *reduction expression*.
+4. **No risky kernel rewrites:** Avoids `cp.async`, WMMA, persistent kernels, layout transposes — all of which previously regressed in this lineage per summaries.
+
+---
+
+## Phase 1: Mathematical Definition (UNCHANGED from parent)
+
+For each token `t`, head `h`:
+- Logit: `z_j = sm_scale * (q_nope[t,h] · k_nope(idx_j) + q_pe[t,h] · k_pe(idx_j))` for valid `idx_j != -1`.
+- Online softmax state per head: `(m, l, O)` in FP32.
+- Update for one valid key (logit `z`, value `v`):
+  - `m' = max(m, z)`
+  - `α = (m == -INF) ? 0 : exp(m - m')`
+  - `β = exp(z - m')`
+  - `l' = l*α + β`
+  - `O' = O*α + β*v`
+- Final: `out = O/l`, `lse = m * log2(e) + log2(l)` if `l>0` else `-INF`.
+- Merge of two partial states A,B: `m=max(m_A,m_B); s_A=exp(m_A-m); s_B=exp(m_B-m); l = l_A s_A + l_B s_B; O = O_A s_A + O_B s_B`.
+
+These equations are *invariant* across the proposed refactor.
+
+---
+
+## Phase 2: The Optimization Loop (Deterministic Refinement Application)
+
+This is a finite list of *byte-level deltas* to apply to the parent. No randomness, no multi-start needed.
+
+### Delta D1 — Fused-path tile early-skip via separate flag
+In `dsa_forward_kernel` (the large path, used when `num_tokens >= 128`):
+- Add a shared variable `__shared__ int tile_has_valid;`
+- After loading `idx_shared[32]` and syncing, let `tid==0` compute:
+  ```
+  int any_valid = 0;
+  #pragma unroll
+  for (int i=0;i<32;++i) any_valid |= (idx_shared[i] != -1);
+  tile_has_valid = any_valid;
+  ```
+- After `__syncthreads()`, `if (!tile_has_valid) { __syncthreads(); continue; }`
+- This skips both BF16 K loads and 32 inner iterations for fully-padded tiles, which is common for short sequences.
+- Add `#pragma unroll 1` on the outer `for (int tile=0; tile<64; ++tile)` to control register pressure.
+
+### Delta D2 — Reducer simplification (eliminate `l_s_smem`)
+In `split_k_reduce_kernel`:
+- **Remove** `__shared__ float l_s_smem[64];`
+- Lane-0 loop becomes:
+  ```
+  float m_max = -INFINITY;
+  for (int i=0;i<64;++i) m_max = fmaxf(m_max, m_s_smem[i]);
+  float l_sum = 0.0f;
+  for (int i=0;i<64;++i) {
+      if (m_s_smem[i] != -INFINITY) {
+          float scale = __expf(m_s_smem[i] - m_max);
+          scale_smem[i] = scale;
+          l_sum = fmaf(l_tmp[t*16*64 + h*64 + i], scale, l_sum);
+      } else {
+          scale_smem[i] = 0.0f;
+      }
+  }
+  m_global = m_max; l_global = l_sum;
+  lse_ptr[t*16+h] = (m_max == -INFINITY || l_sum <= 0.0f) ? -INFINITY
+                                                          : fmaf(m_max, 1.4426950408889634f, __log2f(l_sum));
+  ```
+  Note: `scale_smem[i]` here holds `exp(m_i - m_global)`, NOT yet divided by `l_global`.
+
+### Delta D3 — Combine `1/l_global` into the per-tile coefficient inside the d_idx loop
+In the d_idx>=0 loop:
+- Compute `float inv_l = __fdividef(1.0f, l_global);` once outside the inner loop.
+- Inside, `float coeff = scale_smem[s] * inv_l;` and use `coeff` in the four `fmaf` calls instead of multiplying by `scale` then later dividing.
+- This both simplifies arithmetic and matches the validated top sibling.
+
+### Delta D4 — Safety LSE branch in fused path
+In `dsa_forward_kernel` final section, replace existing lane==0 store with the same safety pattern: `lse_val = (l > 0.0f) ? fmaf(m, 1.4426950408889634f, __log2f(l)) : -INFINITY;` (already similar in parent — confirm it matches exactly).
+
+### Delta D5 — Use `__nv_bfloat162` reads consistently for q_pe (already done; verify)
+No-op verification.
+
+### Delta D6 — Keep dispatch threshold at 128 (parent value), keep split-K compute kernel byte-identical
+The split-K compute kernel is *already correct and fast*; do NOT modify its float2 stores in this iteration (changing layout was previously shown to regress per the top sibling's plan summary). The reducer simplification (D2+D3) is what actually delivers the win.
+
+---
+
+## Phase 3: The "Safety Valve" (CRITICAL — Correctness Guarantee)
+
+### S1 — Mask invalidation
+Every `idx == -1` is masked at three levels:
+1. **Load level:** `if (idx != -1) { float4 load... }` — already present in both load loops (CKV and KPE).
+2. **Compute level:** `if (idx_shared[i] == -1) continue;` inside the 32-key inner loop — already present.
+3. **Tile level (NEW via D1):** entire 32-key tile skipped if all -1, and online state remains unchanged (neutral).
+
+### S2 — Empty-row detection in reducer
+The expression `(m_max == -INFINITY || l_sum <= 0.0f) ? -INFINITY : ...` (D2) explicitly handles the empty-row case. Output uses `if (m_global != -INFINITY && l_global > 0.0f) { ... }` guard, leaving the four float accumulators at 0. Result: zero output, `-INF` lse.
+
+### S3 — FP32 throughout
+All `m`, `l`, `O_reg`, dot products, `scale_smem`, `inv_l` are float32. BF16 is used ONLY at:
+- Input loads (`__bfloat1622float2`)
+- Final output store (`__floats2bfloat162_rn`)
+
+### S4 — Build environment compliance
+- Keep `#include <torch/extension.h>` and `#include <cuda_bf16.h>`.
+- Use `__bfloat1622float2` / `__floats2bfloat162_rn` exclusively.
+- No implicit BF16↔float casts.
+- Preserve `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("dsa_forward", &dsa_forward, "DSA Forward"); }`.
+
+### S5 — Fallback
+If any new branch causes compile error, the executor must fall back to the parent verbatim plus only D2+D3 (reducer changes), since those are the highest-leverage and lowest-risk.
+
+---
+
+## Phase 4: Implementation Details
+
+### File layout (single `kernel.cu`)
+1. Headers: `<torch/extension.h>`, `<cuda_bf16.h>`, `<cuda_fp16.h>`, `<tuple>`, `<math.h>`.
+2. Helper: `template<typename T> __device__ __forceinline__ T warp_reduce_sum(T val)` using `__shfl_down_sync(0xffffffff, val, offset)` for `offset = 16,8,4,2,1`.
+3. Three kernels:
+   - `__global__ void dsa_forward_kernel(...)` — fused large path with D1, D4 applied.
+   - `__global__ void split_k_compute_kernel(...)` — UNCHANGED from parent.
+   - `__global__ void split_k_reduce_kernel(...)` — D2 + D3 applied.
+4. Entry point `dsa_forward(...)` — UNCHANGED dispatch logic from parent (`< 128 → split-K, else → fused`).
+5. `PYBIND11_MODULE` footer — UNCHANGED.
+
+### Concrete code snippets the executor MUST produce
+
+**Reducer (D2+D3 — the highest-value change):**
+```cpp
+__global__ void split_k_reduce_kernel(
+    const float* __restrict__ O_tmp,
+    const float* __restrict__ m_tmp,
+    const float* __restrict__ l_tmp,
+    __nv_bfloat16* __restrict__ output_ptr,
+    float* __restrict__ lse_ptr) {
+    int t = blockIdx.x; int h = blockIdx.y; int lane = threadIdx.x;
+    __shared__ float m_global, l_global;
+    __shared__ float m_s_smem[64];
+    __shared__ float scale_smem[64];
+
+    if (lane < 64) m_s_smem[lane] = m_tmp[t*16*64 + h*64 + lane];
+    __syncthreads();
+
+    if (lane == 0) {
+        float m_max = -INFINITY;
+        #pragma unroll
+        for (int i=0;i<64;++i) m_max = fmaxf(m_max, m_s_smem[i]);
+        float l_sum = 0.0f;
+        #pragma unroll
+        for (int i=0;i<64;++i) {
+            if (m_s_smem[i] != -INFINITY) {
+                float sc = __expf(m_s_smem[i] - m_max);
+                scale_smem[i] = sc;
+                l_sum = fmaf(l_tmp[t*16*64 + h*64 + i], sc, l_sum);
+            } else {
+                scale_smem[i] = 0.0f;
+            }
+        }
+        m_global = m_max; l_global = l_sum;
+        lse_ptr[t*16 + h] = (m_max == -INFINITY || l_sum <= 0.0f)
+            ? -INFINITY
+            : fmaf(m_max, 1.4426950408889634f, __log2f(l_sum));
+    }
+    __syncthreads();
+
+    int d_idx = lane * 4;
+    if (d_idx < 512) {
+        float out0=0.f, out1=0.f, out2=0.f, out3=0.f;
+        if (m_global != -INFINITY && l_global > 0.0f) {
+            float inv_l = __fdividef(1.0f, l_global);
+            #pragma unroll 16
+            for (int s=0; s<64; ++s) {
+                float coeff = scale_smem[s] * inv_l;
+                if (coeff > 0.0f) {
+                    int base = t*64*16*512 + s*16*512 + h*512 + d_idx;
+                    float4 val = *reinterpret_cast<const float4*>(&O_tmp[base]);
+                    out0 = fmaf(val.x, coeff, out0);
+                    out1 = fmaf(val.y, coeff, out1);
+                    out2 = fmaf(val.z, coeff, out2);
+                    out3 = fmaf(val.w, coeff, out3);
+                }
+            }
+        }
+        __nv_bfloat162 b0 = __floats2bfloat162_rn(out0, out1);
+        __nv_bfloat162 b1 = __floats2bfloat162_rn(out2, out3);
+        uint32_t v0 = *reinterpret_cast<uint32_t*>(&b0);
+        uint32_t v1 = *reinterpret_cast<uint32_t*>(&b1);
+        uint2 ov = make_uint2(v0, v1);
+        *reinterpret_cast<uint2*>(&output_ptr[t*16*512 + h*512 + d_idx]) = ov;
+    }
+}
+```
+
+**Fused-path tile early-skip (D1):**
+Inside the `for (int tile=0; tile<64; ++tile)` of `dsa_forward_kernel`, after loading `idx_shared`:
+```cpp
+__shared__ int tile_has_valid;
+// ... load idx_shared ...
+__syncthreads();
+if (tid == 0) {
+    int any = 0;
+    #pragma unroll
+    for (int i=0;i<32;++i) any |= (idx_shared[i] != -1);
+    tile_has_valid = any;
+}
+__syncthreads();
+if (!tile_has_valid) { __syncthreads(); continue; }
+// ... existing K loads + compute ...
+```
+
+### Validation checklist before returning the kernel
+1. ✅ Output dtype bfloat16, shape `[T,16,512]`.
+2. ✅ LSE dtype float32, shape `[T,16]`, base-2.
+3. ✅ All `-1` indices masked at 3 levels.
+4. ✅ FP32 accumulation throughout.
+5. ✅ Explicit BF16 intrinsics only.
+6. ✅ `PYBIND11_MODULE` present.
+7. ✅ Empty-row → zero output + `-INF` LSE.
+8. ✅ Dispatch unchanged.
+
+---
+
+## Expected Performance Improvement
+- Parent score: 4.51 (45x).
+- Sibling with these exact deltas: 12.63 (126x), correctness 1.0 verified.
+- Expected child score: ≥ 11.0, with high probability ≈12.6 since the deltas are byte-replicated from a verified-passing sibling.
+- Score ≥ 1.0 guaranteed because all changes preserve the exact mathematical operator and all `-1` masking semantics.

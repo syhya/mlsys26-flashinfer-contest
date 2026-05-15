@@ -1,0 +1,8 @@
+**Outline 3: PTX Inline Assembly and CUB Warp Reductions**
+* **Mathematical Formulation**:
+  - Variables ($X$): Register allocations, warp shuffle masks.
+  - Constraints ($C$): Data must reside in registers for PTX `fma` and `shfl` operations.
+  - Objective ($f(X)$): Minimize instruction count at the PTX level.
+* **Solver Strategy**: Low-level instruction scheduling using `cub::WarpReduce` and manual PTX.
+* **Validity Mechanism**: The generic fallback kernel handles any dimension where `cub::WarpReduce` block sizes do not perfectly align.
+* **Why this solution?**: Could theoretically shave off a few clock cycles, but highly complex and prone to compiler register spilling.

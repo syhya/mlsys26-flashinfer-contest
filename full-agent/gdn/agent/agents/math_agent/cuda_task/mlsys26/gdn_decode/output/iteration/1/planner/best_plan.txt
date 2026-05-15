@@ -1,0 +1,45 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized CUDA kernel for the Gated Delta Net (GDN) decode step that significantly outperforms the PyTorch reference while maintaining strict numerical correctness (r_tol=1e-2, a_tol=1e-2) and handling the optional `state` tensor.
+
+**Selected Outline:** Fully Parallelized V-Dimension Mapping with Exact Algebraic Reordering
+
+**Rationale for Selection:**
+1. **Mathematical Equivalence:** The plan uses exact algebraic transformations to decouple the inner loop dependencies, reducing an $O(V \times K)$ sequential matrix dependency to $V$ completely independent parallel operations of size $O(K)$.
+2. **Memory Bandwidth Optimal:** By mapping thread lanes to the $K$ dimension (`tid = k`), all memory accesses to the large `[B, HV, V, K]` state tensor become perfectly coalesced using `float4` vectorized loads/stores.
+3. **Register Caching:** The vector slices for `q` and `k` are loaded once into fast registers at the start of the block and reused across all $V$ iterations, eliminating massive redundant global memory reads.
+4. **Synchronization-Free Scaling:** Since each warp processes different $V$ rows independently, no `__syncthreads()` block-level synchronizations are required in the hot inner loop, maximizing warp scheduling efficiency.
+
+**Best Plan:**
+
+1. **Phase 1: Mathematical Definition & Algebraic Simplification**
+    * **State Layout**: The state is in `k-last` layout `[B, HV, V, K]` where $V=128$, $K=128$.
+    * **Decoupling Formula**: Algebraically simplify the sequence of updates to process each $v \in [0, V-1]$ independently:
+        * $qh_v = \sum_{k} q_k \cdot state_{v,k}$
+        * $kh_v = \sum_{k} k_k \cdot state_{v,k}$
+        * $old\_v_v = g \cdot kh_v$
+        * $dv_v = \beta \cdot (v_h[v] - old\_v_v)$
+        * $output_v = scale \cdot (g \cdot qh_v + (q \cdot k) \cdot dv_v)$
+        * $new\_state_{v,k} = g \cdot state_{v,k} + k_k \cdot dv_v$
+    * **Validity Mechanism**: This algebraic formulation mathematically guarantees identical outputs to the sequential matrix-based PyTorch reference while removing all cross-row dependencies.
+
+2. **Phase 2: Thread Block & Warp Mapping (The Parallelization Architecture)**
+    * **Grid Setup**: Launch exactly $B \times HV$ blocks. Each block handles one `(batch, head)` independently.
+    * **Block Setup**: Use 128 threads per block, which neatly translates to 4 warps. Use `__launch_bounds__(128)` to help the compiler optimize register allocation.
+    * **Warp Responsibility**: Assign each warp to process interleaved rows of the $V$ dimension. For example, Warp $w$ loops over rows $v = w, w+4, w+8, \dots, 127$. This fully parallelizes the V-dimension loop.
+    * **Lane Mapping**: Assign thread lanes to process 4 consecutive elements of the $K$ dimension. `lane_id` handles elements `[lane_id * 4, lane_id * 4 + 3]`.
+
+3. **Phase 3: Memory Access & Register Hoisting (The "Safety Valve")**
+    * **Scalar Hoisting**: Compute the per-head scalars ($g$, $\beta$, $q \cdot k$) exactly once at the start of the block. Use warp-level reduction (`__shfl_down_sync`) to compute the $q \cdot k$ dot product and broadcast it to all threads.
+    * **Register Pinning**: Load the relevant 4 elements of `q_h` and `k_h` into local thread registers at the beginning using standard pointer casting. Keep them pinned in registers for the entire $V$-loop.
+    * **Coalesced State I/O**: Inside the loop over $v$, read `state[v, lane_id * 4]` using `float4`. **Crucial Safety Check**: Check if the `state` tensor is defined (PyTorch optional tensor). If it is `None`, bypass the read and assume `state_f` vector is strictly `{0.0f, 0.0f, 0.0f, 0.0f}`. Write the updated state back to a pre-allocated `new_state` tensor using `float4` to guarantee maximum 128-byte bus utilization.
+    * **Output Store**: Let lane 0 of the warp write the computed $output_v$ scalar back to the global output tensor.
+
+4. **Phase 4: Implementation Details & Standard Libraries**
+    * **Libraries**: Use standard `<cuda_bf16.h>` intrinsics (e.g., `__bfloat1622float2` via `int2` aligned casting, `__float2bfloat16`) to safely convert between high-precision inner accumulation (FP32) and storage format (BF16).
+    * **Warp Primitives**: Use `__shfl_down_sync` with `0xffffffff` mask for fast intra-warp reductions instead of shared memory. This eliminates synchronization overhead.
+    * **PyTorch Binding**: Define the C++ extension wrapper `gdn_forward` that:
+        1. Validates tensor shapes and devices.
+        2. Initializes the `new_state` tensor using `torch::zeros({B, num_v_heads, 128, 128}, torch::kFloat32)`.
+        3. Initializes `output` as `torch::empty({B, 1, num_v_heads, 128}, torch::kBFloat16)`.
+        4. Invokes the optimized kernel.

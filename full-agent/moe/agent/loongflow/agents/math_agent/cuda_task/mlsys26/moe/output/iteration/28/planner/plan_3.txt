@@ -1,0 +1,102 @@
+## Plan 3: GEMM2 Optimization via BF16 TCs + Deeper Pipelining (a8623435 Lineage)
+
+### Mathematical Formulation
+
+**Variables (X):**
+- `BLOCK_M` ∈ {16, 32, 64, 128}: token tile size, autotuned
+- `BLOCK_N` = 128: output tile size
+- `BLOCK_K` = 128: K-tile size (fixed)
+- `num_stages` ∈ {3, 4, 5, 6}: software pipeline depth, autotuned  
+- `num_warps` ∈ {4, 8, 16}: warp count, autotuned
+- Autotuning key: `MAX_TK`
+
+**Core Mathematical Operations:**
+GEMM2 (with SwiGLU fusion, BF16 path):
+```
+c[m,k] = x1[m,k] * silu(x2[m,k])  # float32 intermediate
+c_bf16 = c.to(bfloat16)             # cast to BF16 for TC throughput
+w2_bf16 = (w2_fp8.to(float32) * w2_scale).to(bfloat16)  # dequant + cast
+acc[m,n] += dot(c_bf16, w2_bf16)    # BF16 TC dot product
+```
+
+GEMM1 (FP8 path, proven):
+```
+G1[m,n] += dot(a_fp8, w1_fp8) * a_scale[m,k_block] * w1_scale[e,n_block,k_block]
+```
+
+**Constraints (C):**
+- BLOCK_K = 128 (scale alignment)
+- All autotuning configs have BLOCK_N = 128
+- Pointer arithmetic: all uses .to(tl.int64) before stride multiply
+- Correctness: rtol=1e-2, atol=1e-2
+
+**Objective f(X):**
+Maximize throughput by:
+1. Using BF16 TCs for GEMM2 (larger and more robust than FP8 activation quantization)
+2. Deeper software pipelining (num_stages=5,6) for K-loops
+3. Additional num_warps=16 for BLOCK_M=128 large tiles
+
+### Solver Strategy
+
+Starting from a8623435 (the CURRENT best at 10.60x), improve further:
+
+1. **Add deeper pipelining configs**: 
+   - GEMM1: Add `num_stages=6` configs (beyond a8623435's max of 5)
+   - GEMM2: Add `num_stages=6` configs
+   
+2. **Add wider warp configs for large tiles**:
+   - `triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=16, num_stages=3)`
+   - `triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=16, num_stages=4)`
+   
+3. **Add BLOCK_N=64 config for GEMM1** (already exists in a8623435 for GEMM1 but not for GEMM2):
+   - Smaller N tiles may enable better register reuse for small Tk
+
+4. **Use tl.range with explicit num_stages parameter**:
+   - a8623435 uses `tl.range(0, H, BLOCK_K)` without explicit num_stages
+   - Triton's `tl.range` accepts `num_stages` as a hint: `tl.range(0, H, BLOCK_K, num_stages=4)`
+   - This enables software pipelining of memory loads with computation
+   - NOTE: The actual num_stages from @triton.autotune takes precedence, but tl.range's
+     num_stages can be set as a default
+
+### Validity Mechanism
+1. Start from a8623435 verbatim as baseline — it's proven correct at 1.0596
+2. Only ADD configs to autotune, never remove — regression impossible from existing configs
+3. n_block_idx = n_offs // 128 in GEMM2 (safer than pid_n, handles any BLOCK_N)
+4. torch.zeros for G1 and O — no garbage values
+5. Edge case guards identical to a8623435
+
+### Why This Solution?
+
+**Expected Performance Improvement:**
+- Starting from 10.60x (2.419ms), target 11.0-11.5x (2.2-2.3ms)
+- Deeper pipelining (num_stages=6) can hide additional HBM latency cycles
+- For GEMM1 with K=7168 (56 K-iterations), deeper pipelining provides more opportunity
+- num_warps=16 might help on large BLOCK_M=128 tiles on B200's massive SM count
+
+**Advantages:**
+1. Very low risk — only adds configs to existing proven solution
+2. No mathematical changes — correctness guaranteed by inheritance
+3. num_stages=6 is a valid Triton parameter not previously explored
+4. Could find a better config in the expanded search space
+5. a8623435 already shows BF16 path works well — this continues that lineage
+
+**Disadvantages:**
+1. Incremental improvement — may only gain 0.5-3% over a8623435
+2. More autotune configs = longer first-call compilation time
+3. num_stages=6 may not be beneficial if the K-loop has only 16 iterations (GEMM2: I=2048, K/128=16)
+4. num_warps=16 may cause register pressure issues on some tile sizes
+5. The BF16 path is theoretically SLOWER than FP8 for GEMM2 — so this is a ceiling of a8623435
+
+**Risk Assessment: LOW**
+This is the safest plan — it's a pure additive extension of the current best solution.
+The worst case is it matches a8623435's score. But the improvement potential is limited
+because BF16 TCs are fundamentally slower than FP8 TCs on B200.
+
+**CRITICAL NOTE:** 
+Plan 1 (FP8 TCs + expanded configs) should theoretically outperform Plan 3 because:
+- FP8 TCs offer ~4x throughput vs FP32, and ~2x vs BF16 on B200
+- The per-tile scalar quantization approach is proven correct at 10.25x (ff4217c7)
+- Combining FP8 TCs + 10-config search space has NEVER been tested
+- If it works, it should beat both ff4217c7 (10.25x) and a8623435 (10.60x)
+
+Plan 3 is the conservative fallback if Plan 1 has unexpected issues.

@@ -1,0 +1,30 @@
+### Outline 3: Routing/Dispatch Fusion with Proven GEMMs + Deterministic Repair Fallback
+
+Mathematical Formulation
+- Variables X:
+  - Per-token routing scores R[t, e]
+  - Group scores G[t, g]
+  - Selected local assignments A = {(token, local_expert, weight)}
+  - CSR offsets P and sorted tokens S
+  - GEMM outputs G1, O, Y
+- Constraints C:
+  - Exact no-aux routing semantics preserved.
+  - Local expert filtering uses [offset, offset + E_local).
+  - CSR offsets are monotone with P[0]=0, P[E_local]=|A|.
+  - GEMM kernels remain unchanged and correctness-preserving.
+- Objective f(X): minimize front-end overhead (routing + nonzero + argsort + bincount + cumsum) while keeping back-end GEMMs intact.
+
+Solver Strategy
+- Use Triton kernels to fuse score transform, top-group pruning, local assignment extraction, and histogram accumulation.
+- Then run proven GEMM kernels from frontier lineage.
+- This is a deterministic finite pipeline, not stochastic search.
+
+Validity Mechanism
+- Deterministic repair fallback: if fused routing path cannot guarantee exact CSR construction, immediately fall back to existing PyTorch _route_tokens implementation.
+- Monotonic offsets verified by construction using histogram + prefix sum.
+- GEMM code untouched.
+
+Why this solution?
+- Expected improvement: high for small T where Python/PyTorch launch overhead dominates.
+- Advantages: attacks the remaining non-GEMM bottleneck directly.
+- Disadvantages: highest implementation risk; exact topk semantics and stable assignment extraction in Triton are easy to get wrong.

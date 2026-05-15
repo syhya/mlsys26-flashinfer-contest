@@ -1,0 +1,42 @@
+{
+  "status": "success",
+  "summary": "Optimization successful! Speedup: 8.10x (ref: 18.345ms, kernel: 3.024ms)",
+  "score": 0.8104761304221162,
+  "metrics": {
+    "correctness": 1.0,
+    "speedup": 8.104761304221162,
+    "exec_time_ms": 3.0243479912280704,
+    "baseline_time_ms": 18.34469589473684,
+    "compile_time": 0.0,
+    "eval_time": 62.89734196662903
+  },
+  "artifacts": {
+    "eval_backend": "modal+flashinfer-bench",
+    "task_id": "moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048",
+    "execution_time": "62.90s",
+    "kernel_latency_ms": "3.024ms",
+    "reference_latency_ms": "18.345ms",
+    "speedup": "8.10x",
+    "bench_stats": {
+      "reference_latency_ms": 18.34469589473684,
+      "max_relative_error": 47400001536.0,
+      "max_absolute_error": 8192.0,
+      "total_workloads": 19
+    },
+    "correctness_check": "Passed",
+    "ncu_profile": {
+      "ncu_set": "full",
+      "ncu_page": "details",
+      "ncu_kernel_name": null,
+      "rows": [
+        {
+          "workload_uuid": "b8f4f012-a32e-4356-b4e1-7665b3d598af",
+          "axes": {
+            "seq_len": 7
+          },
+          "output": "[NCU timeout after 900s]"
+        }
+      ]
+    }
+  }
+}

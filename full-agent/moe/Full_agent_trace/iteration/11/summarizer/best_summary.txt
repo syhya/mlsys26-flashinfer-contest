@@ -1,0 +1,20 @@
+**1. Executive Summary:**
+This iteration was a correctness-first regression because it replaced the high-throughput grouped Triton FP8/BF16 path with exact per-expert FP32 dequantization and matmul loops, performing 1st out of 1 siblings but far below the parent on fitness.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* `**Sibling Rank:**` 1 out of 1 children. Top sibling score: 15.22%.
+* `**Score Delta:**` From parent (81.29%) to child (15.22%).
+* `**Key Change:**` Replaced custom grouped Triton GEMM kernels with a pure PyTorch per-expert execution path that explicitly dequantizes hidden-state rows and both expert weight matrices to FP32 before GEMM, with a Python loop over all local experts.
+* `**Core Metrics:**` Correctness: 1.0; speedup: 1.52x; kernel execution time: 14.543ms; reference time: 18.403ms; parent kernel time: 3.022ms; eval time: 154.64s; benchmark max absolute error: 2048.0; benchmark max relative error: 0.3999998867511749; total workloads: 19.
+
+**3. Strategic Analysis (The "So What?"):**
+* `**Root Cause:**` The outcome was driven primarily by plan quality, with execution faithfully implementing the intended correctness-first fallback. The plan deliberately abandoned the parent’s fused/grouped GPU compute structure in favor of exactness-oriented full dequantization and serial per-expert matmuls, which predictably preserved validity but destroyed throughput.
+* `**Key Insight:**` The most important lesson is that structural simplification can preserve evaluation correctness without solving the underlying numerical discrepancy enough to justify the speed loss. This child demonstrates that exact per-expert blockwise dequantization is a viable repair oracle and debugging baseline, but it is not a competitive final architecture for this task.
+* `**Identified Risk:**` The biggest trap is getting stuck in a safe but low-performance local optimum: repeated use of full FP32 materialization (`hidden_deq`, `w1`, `w2`) and Python-side expert iteration scales poorly and prevents recovery of the large performance advantage already demonstrated by the parent lineage.
+
+**4. Actionable Guidance (The "What's Next?"):**
+* `Recommend Fusion:` Use this child as a correctness oracle, not as a deployment path. Reintroduce the parent’s grouped Triton execution structure, but validate each stage against this child at expert-batch granularity to isolate where the large discrepancies emerge.
+* `Recommend Exploration:` Explore a hybrid architecture where routing/dispatch remains in PyTorch, GEMM1 stays grouped FP8 Triton, and only the suspected faulty stage is temporarily swapped for a safer backend. This will localize the defect while retaining most of the 8x-class speedup.
+* `Recommend Fusion:` Preserve the child’s `unique_tokens` activation dequant cache idea and integrate it into a fast path, since reusing gathered/dequantized token rows across repeated expert assignments is structurally valuable even though the full FP32 implementation is too slow.
+* `Recommend Stripping:` Strip out full weight materialization to dense FP32 matrices as a core strategy. Future variants should dequantize per tile or per chunk inside the compute kernel/backend rather than expanding `[4096,7168]` and `[7168,2048]` expert weights in eager PyTorch.
+* `Warn:` Do not interpret the evaluator’s `correctness: 1.0` field as evidence that the implementation has solved the numerical issue end-to-end; the artifact still reports a large max absolute error (2048.0), so this path should be treated as a diagnostic baseline, not a solved solution.

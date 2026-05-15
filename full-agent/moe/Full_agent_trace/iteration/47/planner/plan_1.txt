@@ -1,0 +1,35 @@
+Outline 1: Hybrid native-op + Triton MoE with dense grouped GEMM fallback
+
+Mathematical Formulation
+Variables (X):
+- Routing assignment tensors topk_idx[t, r], route_w[t, r] for token t and rank r.
+- Compact routed row list J = {(tok_j, exp_j, w_j)} after local expert filtering.
+- Intermediate G1_j in R^(2I), C_j in R^I, O_j in R^H.
+- Final output Y in R^(T x H).
+Constraints (C):
+- C1: Routing must exactly implement sigmoid -> group top-2 sum -> top-4 groups -> global top-8 experts.
+- C2: GEMM accumulations are FP32.
+- C3: hidden_states_scale lookup uses original token index tok_j.
+- C4: Output shape is [T, 7168], dtype bf16.
+- C5: All per-block scales are applied according to 128-element block partition.
+- C6: Pointer arithmetic in Triton must use int64 where offsets can exceed int32.
+Objective f(X):
+- Minimize total latency L = L_route + L_dispatch + L_gemm1 + L_swiglu + L_gemm2 + L_scatter subject to C1-C6.
+
+Solver Strategy
+- Structure finding: choose between two deterministic execution graphs:
+  1) Native dense path using torch._scaled_mm / torch.mm for expert subproblems after materializing only active expert-token slices.
+  2) Existing Triton grouped GEMM kernels as fallback.
+- Parameter tuning: use deterministic threshold-based selection on routed workload statistics (Tk_total, max_count, number of active experts).
+- This is a discrete optimization / shortest-path style decision over a tiny set of candidate pipelines rather than random search.
+
+Validity Mechanism
+- Always compute routing with exact PyTorch semantics first.
+- If native op path cannot satisfy tensor layout / dtype assumptions, project to valid fallback by using the proven Triton grouped kernels.
+- Final validity repair: always scatter-add into FP32 output then cast once to bf16.
+- If no routed local tokens, return zeros.
+
+Why this solution?
+- Expected performance improvement: native kernels may outperform custom Triton on some B200 regimes, especially GEMM2 or medium/large T.
+- Advantages: low implementation risk because fallback path is parent code; deterministic path selection.
+- Disadvantages: torch._scaled_mm interface/version sensitivity may make the fast path brittle; integration with block scales is awkward.

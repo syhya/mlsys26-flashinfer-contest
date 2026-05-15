@@ -1,0 +1,24 @@
+Outline 1: Differential oracle-guided hybrid MoE
+
+Mathematical Formulation
+Variables (X): routing tensors R = {topk_idx, weights, sorted_tokens, expert_offsets}; grouped intermediate G1 in R^{Tk x 4096}; per-expert outputs O in R^{Tk x 7168}. Backend choice variable b_e in {fast_triton, safe_torch} for GEMM2 by expert or globally.
+Constraints (C): exact DeepSeek routing semantics; FP8 block-scale dequant rule val = fp8 * scale; FP32 accumulation for both GEMMs; final output Y in bf16 with shape [T,7168]; all dispatch offsets monotone and consistent; token-scale lookup uses original token id.
+Objective f(X): maximize score by minimizing runtime subject to numerical agreement. Operationally: minimize total latency L = L_route + L_gemm1 + L_gemm2 + L_scatter with hard constraint err <= tolerance.
+
+Solver Strategy
+Use deterministic staged solver selection, not stochastic search:
+1. Solve routing/dispatch exactly with vectorized PyTorch.
+2. Use Triton grouped GEMM1 as fixed fast solver.
+3. Use oracle-comparison solver for GEMM2 backend: construct a small deterministic diagnostic comparing fast GEMM2 against exact torch for a sampled prefix of experts/tokens from current batch; if mismatch exceeds threshold, select safe torch GEMM2 for full run, else fast Triton GEMM2.
+This is a constrained model-selection procedure rather than random tuning.
+
+Validity Mechanism
+A deterministic safety projection enforces validity:
+- Recompute CSR counts from sorted_experts and assert equality with expert_offsets differences.
+- On any mismatch or diagnostic error, project to exact path: dequantized torch matmul per expert + index_add_.
+- Final dtype cast to bf16 only once.
+
+Why this solution?
+Expected improvement: likely fixes the persistent 8192 error by localizing defect to GEMM2/scatter while preserving fast grouped GEMM1 and routing.
+Advantages: robust, debuggable, low crash risk, reuses strong parent speed path.
+Disadvantages: may sacrifice some speed if safe GEMM2 is selected; diagnostic adds overhead.

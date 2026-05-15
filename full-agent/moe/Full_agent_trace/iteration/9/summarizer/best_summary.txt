@@ -1,0 +1,18 @@
+**1. Executive Summary:**
+This iteration was a catastrophic regression because the removal of routing weight normalization and the introduction of uninitialized memory buffers completely broke numerical correctness, performing 1st out of 1 siblings.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* `**Sibling Rank:**` 1 out of 1 children. Top sibling score: 0.0%.
+* `**Score Delta:**` From parent (81.28%) to child (0.0%).
+* `**Key Change:**` Removed routing weight normalization (`weights / weights_sum`) and replaced safe `torch.zeros` initializations with `torch.empty` for intermediate tensors `G1` and `O`.
+* `**Core Metrics:**` Correctness dropped from 1.0 to 0.0 (status: `INCORRECT_NUMERICAL`), resulting in 0.0ms execution time and 0.0x speedup.
+
+**3. Strategic Analysis (The "So What?"):**
+* `**Root Cause:**` The execution plan relied on a flawed assumption that the reference task expected unnormalized routing weights based on theoretical architecture details. Modifying this core algorithmic math, combined with the unsafe introduction of uninitialized memory via `torch.empty`, caused a total deviation from the reference outputs.
+* `**Key Insight:**` The parent's persistent 8192.0 absolute error was definitively not caused by weight normalization. Attempting to resolve error bounds by overriding the reference logic's mathematical definitions is a destructive approach that guarantees validation failure.
+* `**Identified Risk:**` Blindly applying external architectural assumptions that contradict the specific task's reference implementation is a critical trap. Furthermore, using `torch.empty` for intermediate buffers in masked Triton tile operations risks reading and propagating uninitialized NaN values.
+
+**4. Actionable Guidance (The "What's Next?"):**
+* `Recommend Stripping:` Immediately revert the routing math back to the parent's normalized implementation (`weights = (weights / weights_sum) * routed_scaling_factor`). Revert the initializations for `G1` and `O` back to `torch.zeros` to guarantee memory safety.
+* `Recommend Exploration:` To resolve the underlying 8192.0 absolute error, investigate the Triton kernels rather than the PyTorch routing. Examine the block scaling logic (`dot_res * a_scale * w_scale`) in GEMM1 for precision loss, and verify that the deterministic scatter-add accumulation is not inducing BF16 rounding errors at scale.
+* `Warn:` Do not alter the high-level PyTorch routing math again. The reference implementation defines the absolute ground truth. Focus all future debugging strictly on the Triton kernel's memory boundaries, masking logic, and type casting precision.

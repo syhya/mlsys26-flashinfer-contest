@@ -1,0 +1,48 @@
+Plan 1: FP8 Tensor Core with Corrected Block-Scale Indexing
+
+**Mathematical Formulation:**
+
+Variables:
+- X = {center positions for GEMM tiles, FP8 scale lookup indices}
+- For each routed token j with global token id t and expert e:
+  - G1[j,n] = Σ_k (A[t,k] * W[e,n,k] * A_scale[k//128, t] * W_scale[e, n//128, k//128])
+  - C[j,i] = silu(G1[j,I+i]) * G1[j,i]
+  - O[j,h] = routing_weight[j] * Σ_i (C[j,i] * W2[e,h,i] * W2_scale[e, h//128, i//128])
+  - Y[t,h] = Σ_{j: token[j]=t} O[j,h]
+
+Constraints:
+- All GEMM accumulation in FP32
+- FP8 operands kept in native dtype for tl.dot
+- Scale indexing must use ORIGINAL global token id, not grouped row index
+- Block alignment: BLOCK_K=128 aligns exactly with scale blocks
+- Output dtype: bfloat16
+
+Objective:
+- Maximize speedup while maintaining correctness=1.0 and reducing max_abs_error < 100
+
+**Solver Strategy:**
+Return to the best-performing architecture (iteration 3, score 0.8626) which uses:
+1. FP8 tensor core dot operations (NOT eager dequant)
+2. Dynamic block-wise FP8 quantization in GEMM2 for SwiGLU output
+3. Grouped kernel dispatch for both GEMM1 and GEMM2
+
+Then apply surgical fix to scale indexing:
+- Audit hidden_states_scale access pattern: ensure [:, token_ids] transpose is correct
+- Verify gemm1_weights_scale and gemm2_weights_scale block offset calculations
+- Add explicit bounds checking on scale tensor loads
+
+**Validity Mechanism:**
+1. Structural validation before kernel launch (CSR offsets, monotonicity)
+2. Micro-validation: compute 2 rows of first active expert via exact PyTorch oracle, compare with kernel output
+3. If micro-check fails (error > 1e-1), fall back to exact PyTorch implementation
+4. Fallback guarantees correctness=1.0 by definition
+
+**Why this solution:**
+- Advantages: Preserves the proven fast FP8 tensor core path (8x speedup in lineage), targets the specific bug (scale indexing) rather than replacing entire stages
+- Disadvantages: Requires careful debugging of Triton pointer arithmetic; if scale bug is not the root cause, may still fail
+- Expected improvement: Score 0.8+ by combining speed of parent's ancestor with corrected semantics
+
+**Implementation Libraries:**
+- torch (routing, dispatch, fallback)
+- triton, triton.language (FP8 GEMM kernels)
+- No external solvers needed

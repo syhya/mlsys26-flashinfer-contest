@@ -1,0 +1,42 @@
+Outline 1: Hybrid exact-by-construction MoE using vectorized routing + per-expert batched dequantized PyTorch GEMMs
+
+Mathematical Formulation
+- Variables X:
+  - Routing tensors q[t,e], rank scores r[t,e], selected top-k experts S_t.
+  - CSR dispatch arrays: sorted_tokens[j], sorted_experts[j], expert_offsets[e].
+  - Per-expert dequantized matrices W1_e and W2_e generated on demand from FP8 blocks and block scales.
+  - Output Y[t,h].
+- Constraints C:
+  1. DeepSeek routing semantics exactly: sigmoid -> group top-2 sum -> top-4 groups -> top-8 experts.
+  2. Final routing weights use sigmoid values only, normalized per token, then multiplied by routed_scaling_factor.
+  3. FP8 dequantization obeys value = fp8 * scale with 128-wide blocks.
+  4. GEMM accumulation is float32.
+  5. Final output shape [T,7168], dtype bfloat16.
+- Objective f(X):
+  - Primary: minimize numerical error relative to reference under rtol=1e-2, atol=1e-2.
+  - Secondary: minimize latency by batching routed rows per expert and avoiding full 32-expert full-weight materialization.
+
+Solver Strategy
+- Deterministic decomposition, not stochastic search.
+- Structure finding: exact vectorized PyTorch top-k / CSR construction.
+- Parameter evaluation: direct dense linear algebra using torch.matmul on dequantized per-expert blocks.
+- Performance optimization: dequantize only touched experts and only once per expert; use batched contiguous gathers; use index_add_ for exact segmented reduction.
+
+Validity Mechanism
+- Hard constraints are guaranteed by construction:
+  1. Routing is implemented only with exact tensor ops matching the reference topology.
+  2. Dequantization uses repeat_interleave(128) or reshape/broadcast to align scales to blocks exactly.
+  3. All accumulations are float32 and final cast to bfloat16 is performed once.
+  4. If any expert has zero routed rows, skip safely.
+  5. Final scatter uses index_add_ on original token ids.
+- Fallback: if a fast batched path hits shape/contiguity issues, use a simpler per-expert exact PyTorch path.
+
+Why this solution?
+- Expected performance improvement: likely stronger correctness than the parent lineage because it removes Triton semantic risk while still exploiting GPU matmul throughput and sparse per-expert batching.
+- Advantages:
+  - Lowest semantic risk.
+  - Easy to make exactly correct.
+  - Avoids full-weight fp32 materialization across all experts at once.
+- Disadvantages:
+  - May not beat the strongest Triton kernels on large T.
+  - Repeated per-expert dequantization costs bandwidth.

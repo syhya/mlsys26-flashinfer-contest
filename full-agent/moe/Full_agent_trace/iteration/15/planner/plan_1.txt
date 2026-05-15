@@ -1,0 +1,33 @@
+Outline 1: Hybrid native-FP8 + safe fallback MoE
+
+Mathematical Formulation
+Variables (X):
+- R in Z^{T x 8}: selected global experts per token.
+- W in R^{T x 8}: normalized routing weights.
+- P = {(t,j)} dispatched token-slot pairs routed to local experts.
+- CSR offsets O in Z^{33}: per-local-expert segment boundaries.
+- Output Y in R^{T x 7168}.
+Constraints (C):
+- Routing exactly matches DeepSeek topology: sigmoid -> group top2 sum -> top4 groups -> top8 experts.
+- Local dispatch only includes experts in [local_expert_offset, local_expert_offset+32).
+- FP8 block scaling semantics must satisfy a_deq[t,k] = a_fp8[t,k] * s_a[k//128,t], w1_deq[e,n,k] = w1_fp8[e,n,k] * s1[e,n//128,k//128], w2_deq[e,h,i] = w2_fp8[e,h,i] * s2[e,h//128,i//128].
+- GEMM accumulation is FP32.
+- Final dtype is BF16.
+Objective f(X):
+- Lexicographic maximize: correctness first, then speed. Formally maximize Pass(X) * Speedup(X), where Pass is mandatory.
+
+Solver Strategy
+- Deterministic decomposition, not stochastic search.
+- Structure solver: vectorized PyTorch exact routing and CSR dispatch.
+- Parameter solver: per-expert backend selection using native torch._scaled_mm only when shape/layout compatibility is exact; otherwise exact chunked dequant + torch.mm.
+- Aggregation solver: index_add_ scatter accumulation in FP32.
+
+Validity Mechanism
+- Hard constraints are enforced by construction through exact tensor formulas.
+- Safety projection: if a fast backend is unsupported or ambiguous for block scales, project to exact dequantized FP32 path.
+- Final repair: cast only once to BF16 after FP32 accumulation.
+
+Why this solution?
+- Expected improvement: likely better than pure FP32 baseline while preserving correctness via exact fallback.
+- Advantages: robust, implementable, low crash risk, decouples routing/dispatch from compute backend.
+- Disadvantages: may still underperform if fast path coverage is low.

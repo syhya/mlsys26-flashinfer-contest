@@ -1,0 +1,2 @@
+Plan 2: Fuse validated wins and reduce split-K partition count S from 64 to 32 (each handling 64 slots) to halve the reducer work and halve O_tmp footprint. The compute kernel simply iterates twice as many slots per block; enough parallelism remains (T*32 blocks).
+Advantage: reducer reads only 32 partial states, halving both inner loop and bytes; larger per-block work improves arithmetic intensity. Disadvantage: occupancy at T=1 drops from 64 to 32 blocks which may underfill GPU; risk.

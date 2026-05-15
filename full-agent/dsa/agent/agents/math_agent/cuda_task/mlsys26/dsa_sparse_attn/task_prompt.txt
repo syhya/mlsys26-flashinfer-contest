@@ -1,0 +1,149 @@
+# Role
+You are a world-class expert in high-performance computing, specializing in PyTorch and CUDA C++ programming. Your expertise includes writing custom CUDA kernels, optimizing memory access patterns, and leveraging low-level hardware features for maximum performance.
+
+# Task
+You will be given with a JSON task definition describing a GPU kernel operation. Your goal is to implement a **highly optimized CUDA kernel** that significantly outperforms the provided PyTorch reference implementation while maintaining strict numerical correctness.
+
+The definition includes:
+1. **Tensor specifications**: shapes, dtypes, and descriptions for all inputs and outputs
+2. **Axes**: dimension parameters (some constant, some variable like batch_size)
+3. **Constraints**: relationships between dimensions
+4. **Reference implementation**: a correct but unoptimized Python/PyTorch `run()` function
+
+# Input Format
+The initial file is a JSON object with the following structure:
+```json
+{
+  "name": "task_identifier",
+  "description": "What this kernel does",
+  "axes": { ... },       // Dimension parameters
+  "inputs": { ... },     // Input tensor specs (shape, dtype)
+  "outputs": { ... },    // Expected output specs
+  "constraints": [...],  // Dimension constraints
+  "reference": "..."     // Reference Python implementation
+}
+```
+The `reference` field contains a Python function `run(*inputs) -> outputs` that serves as the correctness baseline.
+
+
+# Output Format
+Provide **only a single CUDA/C++ code block** -- the content of `kernel.cu`.
+
+Your `kernel.cu` MUST:
+1. Include `<torch/extension.h>` and `<cuda_bf16.h>`
+2. Expose exactly the C++ entry point below
+3. End with the `PYBIND11_MODULE(...)` binding -- this is **mandatory** or the module will fail to load
+
+```cpp
+#include <torch/extension.h>
+#include <cuda_bf16.h>
+#include <tuple>
+
+// ... your CUDA kernels and helpers ...
+
+// Entry point -- must have this exact name and signature
+std::tuple<torch::Tensor, torch::Tensor> dsa_forward(
+    torch::Tensor q_nope,         // [num_tokens, 16, 512]  bfloat16
+    torch::Tensor q_pe,           // [num_tokens, 16, 64]   bfloat16
+    torch::Tensor ckv_cache,      // [num_pages, 64, 512]   bfloat16
+    torch::Tensor kpe_cache,      // [num_pages, 64, 64]    bfloat16
+    torch::Tensor sparse_indices, // [num_tokens, 2048]     int32
+    float sm_scale                // scalar: 1/sqrt(192)
+);
+// Returns: {output [num_tokens,16,512] bfloat16, lse [num_tokens,16] float32}
+
+// MANDATORY -- without this the module will not load
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("dsa_forward", &dsa_forward, "DSA Forward");
+}
+```
+
+# Build Environment Constraints (CRITICAL)
+The build environment uses `-D__CUDA_NO_BFLOAT16_CONVERSIONS__`, which **disables implicit casts** between `__nv_bfloat16` and `float`. You MUST use explicit conversion intrinsics:
+- **BF16 to float**: `__bfloat162float(bf16_val)` -- NOT `(float)bf16_val`
+- **float to BF16**: `__float2bfloat16(float_val)` -- NOT `(__nv_bfloat16)float_val`
+- **Paired BF16**: `__bfloat162float2(bf162_val)` for `__nv_bfloat162` to `float2`
+- Always `#include <cuda_bf16.h>` at the top
+
+# Correctness Requirements
+1. Output shapes and dtypes must match the Python reference implementation exactly.
+2. Numerical tolerance: rtol=1e-2, atol=1e-2 for bfloat16 operations.
+3. All intermediate accumulation and reduction must be performed in **FP32** to ensure precision, converting back to BF16 only for the final store.
+4. All variable axes (like batch_size) must work for any valid value.
+5. `sparse_indices` values encode `(page_idx * 64 + offset)` for `page_size=64`. Values of `-1` indicate padding — **must be masked out** and must NOT contribute to the attention output.
+6. `lse` must be log-sum-exp **in BASE 2**: `lse = log2(Σ exp(logit × sm_scale))`. Do NOT use natural log.
+
+# Core Optimization Strategy
+Your solution must demonstrate a **substantial architectural or performance improvement** over a naive implementation. Superficial changes (e.g., renaming variables, simple loop reordering) are forbidden. You must innovate in at least **one** of the following dimensions:
+
+## 1. Library Usage
+You are encouraged to call third-party CUDA libraries directly from `kernel.cu` when they provide a performance advantage. Available libraries in the build environment include:
+- **CUB** (`<cub/cub.cuh>`): block-level and warp-level primitives (e.g., `cub::WarpReduce`, `cub::BlockReduce`) for dot-product reductions over the K dimension.
+- **CUTLASS / CuTe** (`<cute/tensor.hpp>` etc.): tile-level abstractions and layout utilities; less central for GDN's element-wise state update, but useful if a tiled approach is explored.
+- **Standard CUDA math** (`<cuda_bf16.h>`, `<cuda_fp16.h>`): bfloat16/fp16 arithmetic helpers already available without extra includes.
+
+## 2. Dynamic Multi-path Dispatch
+The bottlenecks of a kernel shift based on the input scale (e.g., Batch Size or Token Count $T$). Your code should implement a generalized dispatch logic:
+- **Low-latency Path (Small Workloads):** When the grid cannot fully saturate the GPU, prioritize minimizing launch overhead and hiding latency through warp-level parallelism and online logic.
+- **High-throughput Path (Large Workloads):** For compute-intensive scenarios, you must utilize **Tensor Cores** (via `mma.sync` or `wmma`) and implement sophisticated Tiling strategies.
+- **Kernel Fusion:** Consolidate the entire "Load-Compute-Activate-Store" pipeline into a single kernel launch to eliminate intermediate memory traffic to HBM (High Bandwidth Memory).
+
+## 3. Extreme Memory & Pipeline Optimization
+- **Asynchronous Data Movement (`cp.async`):** On SM80+ architectures, utilize `cp.async` to move data directly from Global Memory to Shared Memory, enabling **deep overlap between data movement and computation**.
+- **Vectorized Access:** Enforce the use of `int4` (128-bit) vectorized instructions for all `bf16/fp16` memory accesses to maximize bus utilization.
+- **Bank Conflict Elimination:** Apply **Swizzling** patterns to Shared Memory layouts to ensure conflict-free data loading (LDSM) during Tensor Core operations.
+
+## 4. Algorithmic Throughput Maximization
+- **Online Reduction:** For operations like Softmax or Norm, implement single-pass algorithms (e.g., Online Softmax used in FlashAttention) to reduce global memory sweeps.
+- **Register Blocking:** Keep frequently accessed operands—such as Query fragments and Accumulators—resident in registers to alleviate pressure on Shared Memory bandwidth.
+
+## 5. Advanced Hardware Intrinsics
+- **Warp Primitives:** Leverage `__shfl_xor_sync` and other warp-level primitives for high-speed data exchange within a warp.
+- **TMA (Tensor Memory Accelerator):** If targeting Hopper+ architectures, describe or implement the logic for TMA-based memory management.
+
+
+Below is an example. You can refer to the format in this example. Your question code is in the initial file.
+
+===== Example Start =====
+
+Given model:
+
+```json
+{
+  "name": "task_identifier",
+  "description": "What this kernel does",
+  "axes": { ... },       // Dimension parameters
+  "inputs": { ... },     // Input tensor specs (shape, dtype)
+  "outputs": { ... },    // Expected output specs
+  "constraints": [...],  // Dimension constraints
+  "reference": "..."     // Reference Python implementation
+}
+```
+
+You should respond with your final answer
+
+```cpp
+#include <torch/extension.h>
+#include <cuda_bf16.h>
+#include <tuple>
+
+// ... your CUDA kernels and helpers ...
+// Remember: use __bfloat162float() / __float2bfloat16() for bf16 conversions
+
+std::tuple<torch::Tensor, torch::Tensor> dsa_forward(
+    torch::Tensor q_nope, torch::Tensor q_pe,
+    torch::Tensor ckv_cache, torch::Tensor kpe_cache,
+    torch::Tensor sparse_indices, float sm_scale
+) {
+    // ... implementation ...
+}
+
+// MANDATORY -- without this the module will not load
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("dsa_forward", &dsa_forward, "DSA Forward");
+}
+```
+
+===== Example End =====
+
+Now, provide your answer below:

@@ -1,0 +1,37 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a latency-hiding, mathematically exact CUDA kernel for the GDN prefill forward pass that minimizes sequence loop memory stalls and maximizes global memory bandwidth utilization.
+
+**Selected Outline:** Double-Buffered Software Pipelining with Vectorized Memory (Outline 1)
+
+**Rationale for Selection:**
+1.  **Mathematical Guarantee:** Decouples memory latency from FMA execution by proving that token $t+1$ inputs ($q, k, v, a, b$) have zero data-dependency on token $t$'s computation, allowing perfect algorithmic overlapping.
+2.  **Resource Efficiency:** Uses `float4` vectorized loads/stores, reducing global memory instructions by 75% for the heavy $128 \times 128$ state tensor while remaining strictly within the 48KB shared memory hardware limit.
+
+**Best Plan:**
+1.  **Phase 1: Mathematical Definition & Memory Model**
+    *   **Variables ($X$)**: Pipeline depth $D=2$, Vectorization factor $V=4$ (`float4`).
+    *   **Shared Memory Allocation**: Define `__shared__` union containing:
+        *   `float state_transpose[128][33]`: Padded to 33 to geometrically guarantee zero bank conflicts.
+        *   `struct { float q[2][128]; float k[2][128]; } qk`: Double buffer array for $q$ and $k$ vectors.
+    *   **Constraints ($C$)**: Threads $N=128$. Thread $tid \in [0, 127]$ owns `state_reg[0..127]` corresponding uniquely to $v=tid$.
+    *   **Objective Function ($f(X)$)**: Maximize pipeline overlap such that $T_{total} = \max(T_{compute}, T_{mem\_load})$.
+
+2.  **Phase 2: The Optimization Loop (Software Pipeline)**
+    *   **Prologue (Initialization)**: If `seq_len > 0`, fetch token $t=seq\_start$ parameters ($q, k, v, a, b$) into $buffer\_idx = 0$. Apply `__syncthreads()` to ensure data visibility across the block.
+    *   **Steady-State Loop (`for t = seq_start; t < seq_end; t++`)**:
+        *   **Prefetch Step**: Evaluate validity mathematically via `if (t + 1 < seq_end)`. If valid, issue memory loads for token $t+1$ into local registers ($v, a, b$) and shared memory $next\_buffer\_idx = buffer\_idx \oplus 1$ ($q, k$).
+        *   **Compute Step**: Execute the exact formulas for $x, g, beta$ using $t$'s data. Unroll the FMA reduction loops (`#pragma unroll 16`) to compute $old\_v$ and $new\_v$ efficiently.
+        *   **State Update**: Update `state_reg` locally and calculate $o\_val$.
+        *   **Output Write**: Write $o\_val \cdot scale$ to the global `output` tensor.
+        *   **Pipeline Advance**: Update state variables to their $next$ counterparts. Execute an **unconditional** `__syncthreads()` to guarantee memory consistency before the next iteration overwrites buffers.
+
+3.  **Phase 3: The "Safety Valve" & Vectorized Transpose**
+    *   **State Alignment Guarantee**: Since PyTorch allocates tensors at 16-byte aligned addresses, explicitly cast `block_state` to `float4*` to utilize 128-bit vector memory instructions securely.
+    *   **Conflict-Free Transpose Mechanism**: To write `state_reg` back to global memory, map 128 threads to 1024 `float4` elements. Each thread computes row $r = i / 8$ and column chunk $c = i \% 8$. 
+    *   **Bank Conflict Solver**: Write vector fields to `smem.state_transpose[r][c * 4 + {0,1,2,3}]`. Because of the `[33]` padding, the 32 threads in a warp will write to exactly 32 distinct memory banks, mathematically guaranteeing a 100% bank-conflict-free transpose load/store.
+
+4.  **Phase 4: Implementation Details**
+    *   **Library Dependencies**: Use standard PyTorch C++ API (`<torch/extension.h>`) and native CUDA math intrinsics (`expf`, `log1pf`, `fmaf`).
+    *   **Fallback Mechanism**: Apply strict validation: `if (scale == 0.0f) { scale = 1.0f / std::sqrt(128.0f); }`. Check `state.defined() && state.numel() > 0` to safely branch into either cooperative vectorized loading or zero-initialization `state_reg[k] = 0.0f`.
+    *   **Compilation Constraints**: Enforce `__launch_bounds__(128)` to explicitly guide the PTX compiler to allocate maximum registers per thread without spilling, protecting the delicate thread-local state mapping.

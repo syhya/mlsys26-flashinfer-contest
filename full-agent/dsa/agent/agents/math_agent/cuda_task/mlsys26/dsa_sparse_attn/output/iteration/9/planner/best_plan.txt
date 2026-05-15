@@ -1,0 +1,40 @@
+### Final Child Solution Generation Plan
+
+**Objective:**
+Optimize Global Memory Write Bandwidth by mathematically vectorizing strided intermediate state stores into perfectly coalesced 128-bit (`float4` and `uint4`) memory transactions, eliminating the instruction overhead bottleneck.
+
+**Selected Outline:** Shared Memory Transpose for Perfect Vectorization
+
+**Rationale for Selection:**
+1. Mathematically guarantees a 50% to 75% reduction in Global Memory store instructions (from 8x 64-bit stores to 4x 128-bit stores per thread).
+2. Uses a deterministic structural transformation (Shared Memory Transpose) without relying on random parameter tuning.
+3. Requires zero additional shared memory allocation by strategically reusing the `smem_Kc` buffer after its compute lifecycle is complete.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Definition & Memory Layout Mapping**
+    *   **Current State:** Threads compute attention outputs in fragmented registers (`O_reg[8]` as `float2`). Writing these directly to global memory results in 8 separate 64-bit store instructions per thread.
+    *   **Vectorization Target:** We want to write to global memory using 128-bit instructions (`float4` for `O_tmp`, `uint4` for final `__nv_bfloat16` output). This requires 4 contiguous `float` values (or 8 contiguous `bfloat16` values) per thread.
+    *   **The Transpose Constraint:** Since a thread's registers hold strided data (e.g., indices `0, 64, 128...` for the 512 dimension), we must transpose the data across the warp before writing to High Bandwidth Memory (HBM).
+
+2.  **Phase 2: The Transpose Implementation in `split_k_compute_kernel` (The Core Loop)**
+    *   **Buffer Reuse:** After the attention compute loop (over `i < 32`), the 32 KB `smem_Kc` shared memory buffer is no longer needed for loading keys.
+    *   **Transpose Logic**:
+        1.  Insert `__syncthreads()` to ensure all warps have finished reading `smem_Kc`.
+        2.  Cast the buffer: `float* smem_O = reinterpret_cast<float*>(smem_Kc);`
+        3.  **Write to SMEM:** Each thread writes its 8 `float2` registers to `smem_O[h * 512 + j * 64 + lane * 2]`.
+        4.  Insert `__syncthreads()` to synchronize the transpose across warps.
+        5.  **Vectorized HBM Store:** Each thread reads 4 contiguous `float4` values from `smem_O[h * 512 + lane * 16 + j * 4]` (where `j` loops from 0 to 3) and writes them directly to `O_tmp[base_idx]` using a single 128-bit `float4` store instruction.
+
+3.  **Phase 3: Extending the "Safety Valve" to `dsa_forward_kernel`**
+    *   Apply the exact same mathematical transpose to the high-throughput main kernel.
+    *   After scaling `O_reg` by `inv_l`, write the `float2` values to `smem_O` using the identical strided format.
+    *   Insert the `__syncthreads()` barrier.
+    *   **Vectorized BF16 Pack:** Threads read 16 `float` values from `smem_O[h * 512 + lane * 16 + j * 8]`, use `__floats2bfloat162_rn` to convert them in pairs, and bit-cast them into `uint32_t`.
+    *   Pack 4 `uint32_t` values into a single `uint4`.
+    *   Store the final output using two 128-bit `uint4` stores per thread instead of eight 32-bit `__nv_bfloat162` stores.
+
+4.  **Phase 4: Implementation Details & Strict Validity Checks**
+    *   Ensure `__syncthreads()` is strictly placed before and after writing to `smem_O` to prevent race conditions across the 16 warps in the block.
+    *   Maintain all other algorithmic features from the parent (e.g., `warp_reduce_sum`, cooperative loading, fast math `__expf`, split-K reduction logic) as they are proven optimal.
+    *   This strictly analytical transformation enforces a mathematically perfect memory access pattern, guaranteeing improved memory throughput without altering numerical correctness.

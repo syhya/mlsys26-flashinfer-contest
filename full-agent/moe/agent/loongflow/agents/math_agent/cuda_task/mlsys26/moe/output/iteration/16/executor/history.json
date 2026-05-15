@@ -1,0 +1,77 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_86b",
+        "solution_file_path": "output/1387117c-ebe6-4123-b720-7ca74f120716/16/executor/0_0/solution_86b.py",
+        "evaluation_file_path": "output/1387117c-ebe6-4123-b720-7ca74f120716/16/executor/0_0/evaluation_86b.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: TIMEOUT: Evaluation timeout after 300 seconds for solution agent_b6c440f0\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 742.8220915794373\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"742.82s\",\n    \"error\": \"TIMEOUT: Evaluation timeout after 300 seconds for solution agent_b6c440f0\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  },
+  {
+    "round": 1,
+    "candidates": [
+      {
+        "round_idx": 1,
+        "candidate_idx": 0,
+        "random_idx": "_e59",
+        "solution_file_path": "output/1387117c-ebe6-4123-b720-7ca74f120716/16/executor/1_0/solution_e59.py",
+        "evaluation_file_path": "output/1387117c-ebe6-4123-b720-7ca74f120716/16/executor/1_0/evaluation_e59.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: TIMEOUT: Evaluation timeout after 300 seconds for solution agent_e2c1c539\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 2060.2341678142548\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"2060.23s\",\n    \"error\": \"TIMEOUT: Evaluation timeout after 300 seconds for solution agent_e2c1c539\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 1,
+        "candidate_idx": 1,
+        "random_idx": "_a4f",
+        "solution_file_path": "output/1387117c-ebe6-4123-b720-7ca74f120716/16/executor/1_1/solution_a4f.py",
+        "evaluation_file_path": "output/1387117c-ebe6-4123-b720-7ca74f120716/16/executor/1_1/evaluation_a4f.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: TIMEOUT: Evaluation timeout after 300 seconds for solution agent_eb86f671\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 1449.5191338062286\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"1449.52s\",\n    \"error\": \"TIMEOUT: Evaluation timeout after 300 seconds for solution agent_eb86f671\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  },
+  {
+    "round": 2,
+    "candidates": [
+      {
+        "round_idx": 2,
+        "candidate_idx": 0,
+        "random_idx": "_341",
+        "solution_file_path": "output/1387117c-ebe6-4123-b720-7ca74f120716/16/executor/2_0/solution_341.py",
+        "evaluation_file_path": "output/1387117c-ebe6-4123-b720-7ca74f120716/16/executor/2_0/evaluation_341.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: TIMEOUT: Evaluation timeout after 300 seconds for solution agent_50065674\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 1232.2606501579285\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"1232.26s\",\n    \"error\": \"TIMEOUT: Evaluation timeout after 300 seconds for solution agent_50065674\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 1,
+        "random_idx": "_3ec",
+        "solution_file_path": "output/1387117c-ebe6-4123-b720-7ca74f120716/16/executor/2_1/solution_3ec.py",
+        "evaluation_file_path": "output/1387117c-ebe6-4123-b720-7ca74f120716/16/executor/2_1/evaluation_3ec.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: TIMEOUT: Evaluation timeout after 300 seconds for solution agent_a44bc930\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 1869.0991933345795\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"1869.10s\",\n    \"error\": \"TIMEOUT: Evaluation timeout after 300 seconds for solution agent_a44bc930\"\n  }\n}",
+        "source": "disk"
+      },
+      {
+        "round_idx": 2,
+        "candidate_idx": 2,
+        "random_idx": "_1db",
+        "solution_file_path": "output/1387117c-ebe6-4123-b720-7ca74f120716/16/executor/2_2/solution_1db.py",
+        "evaluation_file_path": "output/1387117c-ebe6-4123-b720-7ca74f120716/16/executor/2_2/evaluation_1db.json",
+        "score": 0.0,
+        "reason": "{\n  \"status\": \"validation_failed\",\n  \"summary\": \"Validation failed: TIMEOUT: Evaluation timeout after 300 seconds for solution agent_3e89023a\",\n  \"score\": 0.0,\n  \"metrics\": {\n    \"correctness\": 0.0,\n    \"speedup\": 0.0,\n    \"exec_time_ms\": 0.0,\n    \"baseline_time_ms\": 0.0,\n    \"compile_time\": 0.0,\n    \"eval_time\": 1256.713739156723\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048\",\n    \"execution_time\": \"1256.71s\",\n    \"error\": \"TIMEOUT: Evaluation timeout after 300 seconds for solution agent_3e89023a\"\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

@@ -1,0 +1,440 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Achieve evaluator score >= 1.0 by producing a numerically correct and faster FP8 block-scale MoE implementation for DeepSeek-style routing on B200, with explicit focus on eliminating the lineage’s persistent semantic error while preserving the strong grouped-GPU performance already demonstrated.
+
+**Selected Outline:** Segmented grouped Triton with blockwise semantic validator
+
+**Rationale for Selection:**
+1. **Global perspective:** the database best score is only **0.8626**, so evolution has not solved the task yet. A purely local speed tweak is unlikely to cross 1.0.
+2. **Parent summary insight:** the parent already has strong speed (**8.03x**) and nominal evaluator correctness, yet artifacts still show a stable catastrophic error signature (`max_absolute_error = 8192`). That means the main bottleneck is a **hidden semantic mismatch**, not raw throughput.
+3. **Robustness:** among the 3 outlines, this one is the least likely to get stuck in the same incorrect local optimum because it adds a **deterministic semantic validator** and a **fallback cascade by stage**, rather than treating the whole fast path as all-or-nothing.
+4. **Task alignment:** it preserves the parent’s strongest asset — grouped Triton execution — while adding mathematical checks to isolate whether the defect is in GEMM1, SwiGLU/GEMM2, scale interpretation, orientation, or scatter-add.
+
+---
+
+## Phase 1: Mathematical Definition
+
+### 1.1 Core Variables
+Let:
+- `T` = number of tokens.
+- `E_global = 256`, `E_local = 32`.
+- `H = 7168`, `I = 2048`, `block = 128`.
+- `q[t,e] = sigmoid(routing_logits[t,e])`.
+- `b[e] = routing_bias[e]` cast to float32.
+- `r[t,e] = q[t,e] + b[e]` used **only** for ranking.
+
+Routing variables:
+- `G = 8` groups, each of size `32`.
+- `group_score[t,g] = sum(top2(r[t, experts in group g]))`.
+- `allowed[t,e] in {0,1}` indicates whether expert `e` belongs to one of the top-4 groups for token `t`.
+- `sel[t,e] in {0,1}` indicates the final top-8 selected experts among allowed experts.
+- `w[t,e] = routed_scaling_factor * q[t,e] * sel[t,e] / (sum_j q[t,j] * sel[t,j] + 1e-20)`.
+
+Local dispatch variables:
+- `P = {(t_j, e_j, w_j)}` = flattened local routed pairs where `e_j` is local expert id in `[0,31]`.
+- `sorted_tokens[j]`, `sorted_experts[j]`, `sorted_weights[j]` after sorting by local expert.
+- `expert_offsets[e]` is CSR offset array with expert `e` owning rows `[expert_offsets[e], expert_offsets[e+1])`.
+- `Tk_e = expert_offsets[e+1] - expert_offsets[e]`.
+- `Tk_total = len(sorted_tokens)`.
+
+GEMM1 variables:
+- Hidden states are FP8: `A_fp8[t,k]`.
+- Hidden state scales: `S_A[kb, t]`, where `kb = k // 128`.
+- Expert weights GEMM1 FP8: `W1_fp8[e,n,k]` with `n in [0,4096)`.
+- GEMM1 scales: `S_W1[e, nb, kb]`, where `nb = n // 128`.
+- Output:
+  \[
+  G1[j,n] = \sum_{k=0}^{H-1} A_{fp8}[t_j,k] \cdot W1_{fp8}[e_j,n,k] \cdot S_A[k//128,t_j] \cdot S_{W1}[e_j,n//128,k//128]
+  \]
+  with accumulation in FP32.
+
+SwiGLU variables:
+- `X1[j,i] = G1[j,i]`
+- `X2[j,i] = G1[j,I+i]`
+- `C[j,i] = silu(X2[j,i]) * X1[j,i]`
+
+GEMM2 variables:
+- GEMM2 FP8 weights: `W2_fp8[e,h,i]`.
+- GEMM2 scales: `S_W2[e, hb, ib]`, with `hb = h // 128`, `ib = i // 128`.
+- Output contribution:
+  \[
+  O[j,h] = w_j \cdot \sum_{i=0}^{I-1} C[j,i] \cdot W2_{fp8}[e_j,h,i] \cdot S_{W2}[e_j,h//128,i//128]
+  \]
+  with accumulation in FP32.
+
+Final output:
+\[
+Y[t,h] = \sum_{j: t_j = t} O[j,h]
+\]
+Return `Y.to(torch.bfloat16)`.
+
+### 1.2 Hard Constraints
+The child solution must satisfy all of these exactly:
+
+1. **Routing semantics constraint**
+   - Use `sigmoid(logits)` for expert weight normalization.
+   - Use `sigmoid(logits) + bias` for ranking only.
+   - Topology is fixed: group-top2-sum -> top4 groups -> top8 experts.
+
+2. **FP8 block-scale constraint**
+   - Dequant rule is multiplicative: `float ≈ fp8 * scale`.
+   - `hidden_states_scale` is indexed by `(k_block, original_token_id)`, not grouped row id.
+   - Weight scales are indexed by output-block and reduction-block.
+
+3. **Numerical constraint**
+   - All GEMM accumulation in FP32.
+   - Final output cast to BF16 only once.
+
+4. **Memory/indexing safety constraint**
+   - Triton pointer arithmetic for large expert tensors must use int64.
+   - Every partial tile load/store must be masked in M and N.
+   - Launch geometry must be valid for segmented expert rows.
+
+5. **Output constraint**
+   - Return tensor of shape `[T, 7168]`, dtype `torch.bfloat16`.
+   - Must handle arbitrary `T`.
+
+### 1.3 Objective Function
+Primary objective:
+- **Minimize semantic error** and remove the persistent 8192 absolute-error signature.
+
+Secondary objective:
+- **Minimize runtime** under the correctness constraints.
+
+Operationally:
+\[
+\min_X \; \text{latency}(X)
+\quad \text{subject to} \quad \text{all hard constraints and validator residuals below tolerance.}
+\]
+
+---
+
+## Phase 2: The Optimization Loop
+
+This loop is deterministic. It is a staged constrained solver selection process, not random trial-and-error.
+
+### Step 2.1: Solve routing and dispatch exactly in vectorized PyTorch
+This stage must be fully exact and separate from kernel optimization.
+
+Implement:
+1. `q = torch.sigmoid(routing_logits.float())`
+2. `rank_scores = q + routing_bias.float().view(1, 256)`
+3. Reshape `rank_scores` to `[T, 8, 32]`
+4. Compute `top2` within each group and sum them to get group scores
+5. Select `top4` groups using `torch.topk(..., sorted=True)`
+6. Build an `expert_allowed` mask
+7. Mask disallowed experts with `-inf`
+8. Select global `top8` experts among allowed ones
+9. Build normalized routing weights from `q`, not `rank_scores`
+10. Restrict to local experts using `local_expert_offset`
+11. Flatten local assignments with `torch.nonzero(as_tuple=True)`
+12. Sort by local expert id using `torch.argsort`
+13. Build `expert_counts = torch.bincount(...)`
+14. Build CSR offsets with `torch.cumsum`
+
+This is the exact structure-solving stage. No custom kernel is allowed to reinterpret this logic.
+
+### Step 2.2: Grouped GEMM1 as the first fast solver
+Keep the parent’s core strength: grouped Triton GEMM1 over segmented expert rows.
+
+Kernel design requirements:
+1. Grid dimensions:
+   - `grid = (ceil_div(4096, BLOCK_N), ceil_div(max_count, BLOCK_M), E_local)`
+2. Inside kernel:
+   - Read `start_idx = expert_offsets[e]`, `end_idx = expert_offsets[e+1]`
+   - Let `Tk = end_idx - start_idx`
+   - Early return if `m_idx * BLOCK_M >= Tk`
+3. Use `BLOCK_K = 128` exactly to align with scale blocks
+4. Load FP8 hidden state tile and FP8 weight tile directly
+5. Compute `dot = tl.dot(fp8_a, fp8_w, out_dtype=tl.float32)`
+6. Multiply the dot result by `a_scale * w1_scale` after each K-block
+7. Use original `token_id` to load hidden-state scale from `[56, T]`
+8. Use int64 pointer arithmetic for all expert-weight offsets
+9. Enforce `m_mask` and `n_mask` on all loads/stores
+
+Autotune only over a small fixed set:
+- `(BLOCK_M, BLOCK_N, num_warps, num_stages)` in:
+  - `(32, 128, 4, 4)`
+  - `(64, 128, 4, 3)`
+  - `(64, 64, 4, 4)`
+  - `(128, 128, 8, 3)`
+
+This is a deterministic finite configuration search.
+
+### Step 2.3: Introduce a blockwise semantic validator after GEMM1
+This is the key new idea.
+
+After GEMM1 fast path produces `G1`, run a lightweight validator on a tiny deterministic subset:
+1. Choose a fixed small subset of rows:
+   - e.g. first routed row of up to 2 non-empty experts
+   - and optionally one middle row if `Tk_total` is large
+2. Choose a fixed small subset of output blocks:
+   - e.g. `n` blocks `[0:128]` and `[2048:2176]`
+3. Recompute those blocks exactly in PyTorch:
+   - Gather the relevant original token rows
+   - Dequantize only the needed 128-wide slices of A and W1 using scale blocks
+   - Compute exact block dot in FP32
+4. Compare the Triton `G1` block against the exact block using `torch.max(torch.abs(...))`
+
+Decision rule:
+- If validator residual is below strict threshold, keep fast GEMM1 output.
+- If not, switch GEMM1 for the full run to a safe exact per-expert PyTorch path.
+
+This turns semantic uncertainty into a deterministic backend-selection problem.
+
+### Step 2.4: GEMM2 optimization with stage-wise fallback
+Do **not** assume the persistent bug is in GEMM1 only. The parent summary explicitly suggests deeper semantic mismatch.
+
+Preferred fast path:
+1. Use Triton grouped GEMM2 with fused SwiGLU:
+   - Load `x1` and `x2` from `G1`
+   - Compute `c = x1 * sigmoid(x2) * x2` or equivalently `silu(x2) * x1`
+   - Load FP8 W2 and block scales
+   - Accumulate in FP32
+   - Multiply by routing weights per row
+2. Output `O` in `[Tk_total, H]` float32
+
+But add a second validator:
+1. Choose the same deterministic routed rows as for GEMM1
+2. Choose a few `h` blocks (for example first 128 columns and one later block)
+3. Recompute exact block outputs in PyTorch from validated `G1`:
+   - Exact SwiGLU in FP32
+   - Exact dequantized W2 block matmul in FP32
+   - Multiply by routing weights
+4. Compare Triton result to exact result
+
+Decision cascade:
+- If GEMM2 validator passes, keep fast GEMM2.
+- If GEMM2 validator fails, keep fast GEMM1 but switch GEMM2 to exact per-expert PyTorch matmul.
+- If GEMM1 validator already failed, switch both GEMMs to safe exact mode.
+
+This isolates the first failing stage instead of discarding all performance.
+
+### Step 2.5: Deterministic scatter-add solver
+Do not fuse final reduction into a risky segmented kernel.
+
+Use:
+- `output = torch.zeros((T, H), dtype=torch.float32, device=device)`
+- `output.index_add_(0, sorted_tokens.long(), O)`
+
+This stage is exact, deterministic, and already efficient enough.
+
+### Step 2.6: Executor implementation order
+The executor should implement the child in this exact order:
+1. Exact routing and CSR construction.
+2. Fast grouped GEMM1 kernel.
+3. GEMM1 validator.
+4. Fast grouped GEMM2 kernel.
+5. GEMM2 validator.
+6. Stage-wise fallback logic.
+7. Final `index_add_` reduction.
+8. Final cast to BF16.
+
+This order maximizes fault isolation and minimizes wasted implementation effort.
+
+---
+
+## Phase 3: The "Safety Valve" (CRITICAL)
+
+This phase is the deterministic enforcement mechanism that guarantees validity.
+
+### Step 3.1: Pre-launch structural checks
+Before launching any Triton kernel, validate:
+1. `sorted_tokens.numel() == sorted_experts.numel() == sorted_weights.numel() == Tk_total`
+2. `expert_offsets.shape[0] == E_local + 1`
+3. `expert_offsets[0] == 0`
+4. `expert_offsets[-1] == Tk_total`
+5. `expert_offsets[1:] - expert_offsets[:-1] == torch.bincount(sorted_experts, minlength=E_local)`
+6. `expert_offsets` is monotone nondecreasing
+
+If any check fails, skip fast path and go directly to exact fallback.
+
+### Step 3.2: In-kernel validity rules
+Both Triton kernels must obey these deterministic rules:
+- `m_mask = m_offs < Tk`
+- `n_mask = n_offs < logical_output_dim`
+- Every load from token rows is masked by `m_mask`
+- Every load from output columns / weight columns is masked by `n_mask`
+- Every store uses `m_mask[:, None] & n_mask[None, :]`
+- All expert base offsets are cast to int64 before multiplication by strides
+
+These rules directly target silent corruption from out-of-bounds tiles or pointer overflow.
+
+### Step 3.3: Semantic validator as correction mechanism
+This is the required correction/refinement mechanism.
+
+After each fast stage, run deterministic exact checks on a small subset. If the fast stage violates the exact blockwise semantics, **project** execution to a safer backend:
+- Fail GEMM1 validator -> project GEMM1 and downstream to exact PyTorch path
+- Pass GEMM1 but fail GEMM2 validator -> keep fast GEMM1, project GEMM2 to exact PyTorch path
+
+This guarantees that the final returned result is generated by a backend configuration that has passed semantic checks for the current batch.
+
+### Step 3.4: Exact fallback solver
+Implement a guaranteed-correct fallback per expert:
+
+For each local expert `e`:
+1. Read token rows `tok = sorted_tokens[s:t]`
+2. Gather FP8 hidden rows for those tokens
+3. Dequantize hidden rows blockwise using `hidden_states_scale[:, tok]`
+4. Dequantize `gemm1_weights[e]` blockwise using `gemm1_weights_scale[e]`
+5. Compute `g1 = a @ w1.T` in FP32
+6. Compute `c = silu(g1[:, I:]) * g1[:, :I]`
+7. Dequantize `gemm2_weights[e]` blockwise using `gemm2_weights_scale[e]`
+8. Compute `o = c @ w2.T` in FP32
+9. Multiply by routing weights
+10. `index_add_` into final output
+
+This fallback is polynomial-time, exact by construction, and uses only standard available libraries.
+
+### Step 3.5: No randomness policy
+This plan contains **no randomization**.
+Therefore:
+- No stochastic search
+- No random init
+- No multi-start needed
+- All decisions are deterministic functions of the input and validator outputs
+
+This satisfies the robustness requirement.
+
+---
+
+## Phase 4: Implementation Details
+
+### 4.1 Allowed libraries
+Use only:
+- `torch`
+- `triton`
+- `triton.language as tl`
+
+No obscure packages. This is fully code-ready for the target environment.
+
+### 4.2 Helper functions to implement
+The executor should structure the Python file with explicit helpers:
+1. `_route_tokens(...)`
+2. `_validate_dispatch(...)`
+3. `_sample_rows_for_validation(...)`
+4. `_exact_gemm1_block_oracle(...)`
+5. `_exact_gemm2_block_oracle(...)`
+6. `_fallback_exact_run(...)`
+7. `grouped_gemm1_kernel`
+8. `grouped_gemm2_kernel`
+9. `run(...)`
+
+### 4.3 Exact routing implementation details
+Use these PyTorch ops:
+- `torch.sigmoid`
+- `torch.topk(..., sorted=True)`
+- `torch.where`
+- `scatter_`
+- `torch.nonzero(as_tuple=True)`
+- `torch.argsort`
+- `torch.bincount`
+- `torch.cumsum`
+
+Required semantics:
+- Bias affects ranking only
+- Weights come from raw sigmoid values
+- Group size is 32
+- Top-4 groups then top-8 experts globally within mask
+
+### 4.4 Validation helper details
+Implement deterministic low-overhead validators.
+
+For `_sample_rows_for_validation(...)`:
+- Find up to 2 non-empty experts from `expert_counts`
+- For each selected expert, choose first routed row
+- If `Tk_total` is large, optionally include one additional row near the midpoint
+
+For `_exact_gemm1_block_oracle(...)`:
+- Input: one routed row index `j`, one output block range `[n0:n1)`
+- Gather original token `t = sorted_tokens[j]`, expert `e = sorted_experts[j]`
+- Dequantize A row blockwise across all K blocks using `hidden_states_scale[:, t]`
+- Dequantize only the needed W1 output block `[n0:n1)` blockwise using `gemm1_weights_scale[e, nb, :]`
+- Compute exact FP32 matmul returning shape `[n1-n0]`
+
+For `_exact_gemm2_block_oracle(...)`:
+- Input: one routed row index `j`, one output block range `[h0:h1)`
+- Use validated or exact `G1[j]`
+- Compute exact `c = silu(x2) * x1`
+- Dequantize only needed W2 block `[h0:h1)`
+- Multiply by routing weight
+- Return exact FP32 block
+
+Thresholding:
+- Use a strict internal threshold tighter than evaluator tolerance, e.g. `max_abs_err <= 5e-2` on sampled blocks.
+- If exceeded, trigger fallback for that stage.
+
+### 4.5 Triton kernel details
+For `grouped_gemm1_kernel`:
+- Keep FP8 operands in native dtype for `tl.dot`
+- Use post-dot multiply by `a_scale * w_scale`
+- Use `BLOCK_K=128`
+- Use int64 pointer arithmetic for expert offsets and large-stride tensor accesses
+- Output `G1` as float32 `[Tk_total, 4096]`
+
+For `grouped_gemm2_kernel`:
+- Input `G1` float32
+- Fused SwiGLU in-kernel
+- Load W2 FP8 tile and block scales
+- Accumulate in FP32
+- Multiply by routing weights
+- Output `O` as float32 `[Tk_total, 7168]`
+
+### 4.6 Fallback dequantization details
+In fallback helpers, use exact scale expansion with PyTorch:
+- Hidden row dequantization:
+  - for each `kb`, multiply `A[:, kb*128:(kb+1)*128]` by `hidden_states_scale[kb, tok].unsqueeze(1)`
+- W1 dequantization:
+  - for each `(nb, kb)`, multiply corresponding `128x128` tile by `gemm1_weights_scale[e, nb, kb]`
+- W2 dequantization:
+  - for each `(hb, ib)`, multiply corresponding `128x128` tile by `gemm2_weights_scale[e, hb, ib]`
+
+This avoids any ambiguity in scale orientation.
+
+### 4.7 Final run() logic
+The executor should implement `run()` with this exact structure:
+1. Compute routing and CSR dispatch
+2. If no local routed pairs, return zeros BF16 `[T, H]`
+3. Validate dispatch structure
+4. Try fast GEMM1
+5. Run GEMM1 validator
+6. If GEMM1 fails, jump to full exact fallback
+7. Try fast GEMM2 using `G1`
+8. Run GEMM2 validator
+9. If GEMM2 fails, rerun only GEMM2 with exact fallback while keeping fast `G1`
+10. Final `index_add_` into `[T, H]` float32 output
+11. Return `output.to(torch.bfloat16)`
+12. On Triton compile/runtime exception, use exact fallback deterministically
+
+---
+
+## Review of the Plan
+
+### Does it rely on math rather than luck?
+Yes.
+- Exact routing is a deterministic vectorized computation.
+- Kernel backend choice is a deterministic constrained-selection process driven by exact blockwise validators.
+- Fallback is exact by construction.
+
+### Library Check
+Yes.
+- Only `torch`, `triton`, and `triton.language` are used.
+- No obscure or unavailable packages.
+
+### Randomness Check
+Yes.
+- No randomness is used.
+- Therefore no multi-start loop is required.
+
+### Is the code implementable?
+Yes.
+- The parent already contains most of the grouped kernel scaffolding.
+- The child mainly adds deterministic validators and stage-wise fallback, which are straightforward to code in one Python file.
+
+---
+
+## Expected Outcome
+
+1. **Best case:** the validator reveals that only GEMM2 or a specific semantic detail is wrong, enabling a hybrid fast path that keeps most of the parent’s speed while removing the 8192 error signature and improving score toward or above 1.0.
+2. **Safe case:** the stage-wise fallback guarantees a valid output and prevents another fast-but-wrong plateau.
+3. **Most important gain:** this plan converts the evolution problem from blind kernel tweaking into a **mathematically checked solver-selection pipeline**, which is the most robust path to finally beating the task with confidence.

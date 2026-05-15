@@ -1,0 +1,33 @@
+{
+  "status": "validation_failed",
+  "summary": "Validation failed: INCORRECT_NUMERICAL:  | max_rel_err=13945149.0, max_abs_err=1040384.0 | workload={'seq_len': 11948}",
+  "score": 0.0,
+  "metrics": {
+    "correctness": 0.0,
+    "speedup": 0.0,
+    "exec_time_ms": 0.0,
+    "baseline_time_ms": 0.0,
+    "compile_time": 0.0,
+    "eval_time": 151.98896288871765
+  },
+  "artifacts": {
+    "eval_backend": "modal+flashinfer-bench",
+    "task_id": "moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048",
+    "execution_time": "151.99s",
+    "error": "INCORRECT_NUMERICAL: ",
+    "error_detail": {
+      "status": "INCORRECT_NUMERICAL",
+      "log": "",
+      "axes": {
+        "seq_len": 11948
+      },
+      "correctness": {
+        "max_relative_error": 13945149.0,
+        "max_absolute_error": 1040384.0,
+        "extra": {
+          "matched_ratio": 0.6808092461305538
+        }
+      }
+    }
+  }
+}

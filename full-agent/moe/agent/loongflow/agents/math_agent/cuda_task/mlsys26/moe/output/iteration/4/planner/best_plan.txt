@@ -1,0 +1,50 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized FP8 block-scale MoE operation that significantly outperforms baseline latency while mathematically guaranteeing exact numerical correctness ($rtol=1e-2, atol=1e-2$), directly solving the parent's extreme 33280.0 absolute error bug.
+
+**Selected Outline:** Triton Grouped GEMM with BF16 Upcast Safety
+
+**Rationale for Selection:**
+1. **Fixes the Parent's Bottleneck:** The parent used naive dynamic FP8 quantization for SwiGLU activations, which destroyed numerical precision due to outliers. This plan utilizes exact BF16 upcasting, leveraging BF16 Tensor Cores which are fast and mathematically safe.
+2. **Maintains FP8 Speed:** GEMM1 (the larger matmul) safely retains full FP8 Tensor Core execution.
+
+---
+
+**Best Plan:**
+
+**Phase 1: Mathematical Definition**
+*   **Variables ($X$)**: 
+    *   $T_{map}$: Token-to-expert CSR offset arrays.
+    *   $Triton_{params}$: Kernel tile sizes ($BLOCK\_M, BLOCK\_N, BLOCK\_K$).
+*   **Constraints ($C$)**: 
+    *   Strict bounds checking on all memory loads. Pointer arithmetic must not exceed $2^{31}-1$.
+    *   Absolute error $\le 1e-2$.
+*   **Objective ($f(X)$)**: Minimize execution time using FP8/BF16 Tensor Cores while strictly bounding absolute error.
+*   **Routing Math**: $Scores = \sigma(logits) + bias$. Deterministically select Top-8 experts using `sorted=True` to eliminate arbitrary tie-breaking discrepancies.
+
+**Phase 2: The Optimization Loop (Vectorized Dispatch & Autotuning)**
+*   **Vectorized Dispatch**: Execute the token-to-expert assignment purely on the GPU to avoid CPU-GPU sync overhead. Use `torch.argsort` to group tokens, `torch.bincount` to count tokens per expert, and `torch.cumsum` to build the CSR offset pointers.
+*   **Multi-Start Parameter Search**: Apply `@triton.autotune` as a multi-start search over the optimal execution configuration. Provide at least 3 configs varying `BLOCK_M` $\in \{64, 128\}$, `BLOCK_N` $\in \{64, 128\}$, and `num_warps` $\in \{4, 8\}$. Triton will benchmark all starts and deterministically select the fastest valid one.
+
+**Phase 3: The "Safety Valve" (CRITICAL)**
+This phase enforces strict validity constraints to guarantee the generated solution does not produce the 33280.0 absolute error seen in the parent.
+*   **Precision Safety Valve (BF16 Upcasting)**: Instead of the parent's mathematically unstable dynamic FP8 quantization (`c / 448.0`), the kernel MUST upcast the SwiGLU output and the dequantized weights to `bfloat16`. This perfectly preserves precision while still activating the GPU's BF16 Tensor Cores. 
+    *   *Formula*: `w_bf16 = (w.to(tl.float32) * w_scale).to(tl.bfloat16)` and `c_bf16 = c.to(tl.bfloat16)`.
+*   **Memory Initialization Safety**: Retain `torch.zeros` for the intermediate $G_1$ and final $O$ tensors. This guarantees that masked-out threads or early-exiting blocks leave $0.0$ instead of random HBM garbage.
+*   **Pointer Overflow Safety**: Enforce `.to(tl.int64)` on all expert indices (`e_idx`) and coordinate offsets *before* multiplying them by tensor strides.
+
+**Phase 4: Implementation Details**
+*   **Step 4.1: Deterministic Routing (PyTorch)**: Compute `s = 1.0 / (1.0 + torch.exp(-logits))`, add bias, and apply group-limited Top-K routing. Mandate `sorted=True` in `torch.topk` calls.
+*   **Step 4.2: Triton Grouped GEMM1 (Exact Block Scale)**: 
+    *   Launch grid `(N_tiles, T_tiles, E_local)`.
+    *   Load $A_{fp8}$ and $W_{1fp8}$.
+    *   Execute `dot_res = tl.dot(A_fp8, W_1fp8, out_dtype=tl.float32)`.
+    *   Apply block scales: `acc += dot_res * a_scale * w_scale`. Store to $G_1$.
+*   **Step 4.3: Fused SwiGLU & BF16 GEMM2**:
+    *   Inside `grouped_gemm2_kernel`, read $x_1$ and $x_2$. Compute $c = x_2 \cdot tl.sigmoid(x_2) \cdot x_1$.
+    *   Load $W_{2fp8}$ and $W_{2scale}$.
+    *   *Crucial Correction:* `w_bf16 = (w.to(tl.float32) * w_scale).to(tl.bfloat16)` and `c_bf16 = c.to(tl.bfloat16)`.
+    *   Execute `dot_res = tl.dot(c_bf16, w_bf16, out_dtype=tl.float32)`.
+    *   Apply routing weights: `acc += dot_res * w_routing[:, None]`. Store to $O$.
+*   **Step 4.4: Deterministic Scatter Add**:
+    *   Accumulate the final valid tokens back into the sequence shape using `output.index_add_(0, sorted_tokens.long(), O)` and return as `bfloat16`.

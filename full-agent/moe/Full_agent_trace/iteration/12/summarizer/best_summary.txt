@@ -1,0 +1,20 @@
+**1. Executive Summary:**
+This iteration was a mild regression because the plan correctly tightened grouped-kernel bounds and added a deterministic fallback, but those structural repairs did not remove the lineage’s persistent 8192.0 absolute-error pathology, performing 1st out of 2 siblings.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* `**Sibling Rank:**` 1 out of 2 children. Top sibling score: 80.31%.
+* `**Score Delta:**` From parent (81.29%) to child (80.31%).
+* `**Key Change:**` Reworked the grouped Triton path to launch over `max_count` instead of `T`, added explicit `n_mask` handling in both GEMM kernels, factored routing/CSR construction into `_route_tokens`, and introduced a deterministic `_fallback_run` path.
+* `**Core Metrics:**` Correctness: 1.0; speedup: 8.03x; kernel execution time: 2.854ms; reference time: 18.748ms; parent kernel time: 3.022ms; benchmark max absolute error: 8192.0; benchmark max relative error: 14600000512.0; total workloads: 19; eval time: 82.23s.
+
+**3. Strategic Analysis (The "So What?"):**
+* `**Root Cause:**` The outcome was driven by both plan and execution. The plan was directionally sound in targeting grid-shape and masking risks, and execution appears faithful, but the chosen fixes addressed secondary symptoms rather than the primary defect. Performance improved slightly versus the parent, yet the unchanged 8192.0 error indicates the dominant bug survived intact.
+* `**Key Insight:**` The single most important lesson is that grouped-kernel launch geometry (`max_count` vs. `T`) and explicit N-dimension masking were not the root source of the large numerical discrepancy. That narrows the likely fault domain to deeper semantic mismatches: FP8 block-scale interpretation, tensor orientation/stride assumptions in one or both GEMMs, or accumulation/scatter semantics rather than superficial out-of-bounds tiling.
+* `**Identified Risk:**` The biggest trap is continuing to iterate on local Triton hygiene improvements while staying inside the same flawed computational formulation. This lineage is now exhibiting a stable plateau: ~8x speedup with a catastrophic but repeatable 8192.0 error. That is a classic sign of convergence to a fast incorrect local optimum.
+
+**4. Actionable Guidance (The "What's Next?"):**
+* `Recommend Fusion:` Use the slower correctness-oriented sibling (`a4064493`) as a stage-by-stage oracle and fuse its exact per-expert semantics into a differential debugging harness around this child’s fast path. Compare GEMM1 output, SwiGLU output, GEMM2 output, and final scatter independently to localize the first divergence.
+* `Recommend Exploration:` Explore a hybrid child that keeps this child’s fast grouped Triton GEMM1 and dispatch machinery, but replaces GEMM2 with a safer backend (exact PyTorch or `torch.mm` on chunk-dequantized weights) to test whether the persistent 8192.0 error originates downstream of SwiGLU.
+* `Recommend Exploration:` Build a minimal semantic-validation variant that computes only one expert and one routed token block, with direct assertions on dequantized tile values and transposition conventions. The evidence now supports investigating scale-axis interpretation and matrix orientation more than launch geometry.
+* `Recommend Stripping:` Strip the broad try/except fallback from the main fast path during diagnosis runs. Silent fallback safety is useful for robustness, but it obscures whether the Triton kernels are truly semantically correct under all workloads and can hide reproducible failure signatures.
+* `Warn:` Do not treat the evaluator’s `correctness: 1.0` field as proof of numerical resolution. Across this lineage, artifact-level max absolute errors remain orders of magnitude above tolerance, so future planners should optimize for fault isolation before pursuing additional speed tuning.

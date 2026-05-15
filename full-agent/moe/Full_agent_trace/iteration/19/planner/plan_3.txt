@@ -1,0 +1,33 @@
+### Outline 3: Selective Fusion Plan — Triton GEMM1 + Exact FP32 SwiGLU/GEMM2 Oracle Path
+
+**Mathematical Formulation**
+- **Variables (X):**
+  - Exact routing and dispatch tensors.
+  - GEMM1 output `G1` over active assignments.
+  - SwiGLU activation `C = silu(G1[:, I:]) * G1[:, :I]`.
+  - GEMM2 outputs per expert.
+  - Final accumulated output `Y`.
+- **Constraints (C):**
+  1. Routing exactness identical to reference.
+  2. GEMM1 uses FP8 operands with scale-after-dot matching block semantics.
+  3. GEMM2 uses exact FP32 input activations; no dynamic FP8 requantization allowed.
+  4. Scatter-add in FP32.
+  5. Output BF16 only at return.
+- **Objective (f(X)):** maximize speed subject to exact correctness by accelerating only the stage with the clearest safe tensor-core mapping.
+
+**Solver Strategy**
+- Use a deterministic staged solver:
+  1. PyTorch exact routing/dispatch.
+  2. Triton grouped GEMM1 for all active expert-token pairs.
+  3. PyTorch `silu` and per-expert exact GEMM2 via `torch.mm`.
+- Configuration search is limited to a small set of tile sizes for GEMM1 only.
+
+**Validity Mechanism**
+- Differential checkpointing philosophy: preserve the exact child semantics for routing, SwiGLU, GEMM2, and scatter; modify only GEMM1.
+- For unsupported shapes or small `Tk`, route directly to the exact eager per-expert path.
+- Keep all activations after GEMM1 in FP32 to eliminate the parent's numerical failure mode.
+
+**Why this solution?**
+- **Expected performance improvement:** more robust than full Triton fusion, because only one performance-critical stage is replaced, likely recovering a meaningful portion of lost speed without reintroducing dynamic requantization error.
+- **Advantages:** strongest balance of speed and safety; isolates risk to GEMM1; easy to verify stage-by-stage against the exact oracle path.
+- **Disadvantages:** GEMM2 remains costly; may still fall short of the best lineage if GEMM2 dominates runtime.

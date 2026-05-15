@@ -1,0 +1,7 @@
+Plan 2: Radix-select for long tail (TIER-L) replacing device-wide CUB sort
+- Variables: K-th score threshold tau, filter pass.
+- Objective: O(N) per batch instead of O(N log N); no device-wide CUB temp-storage allocation.
+- Solver: per-batch single-block radix-select over score buffer. Find tau such that count(scores >= tau) == K; then scan and emit indices where score > tau plus ties to fill K.
+- Validity: radix-select is mathematically exact for top-K set; tie-breaking arbitrary (spec allows). Atomic counter for emit fill. Pad with -1 if L < K (shouldn't happen in TIER-L).
+- Advantage: removes the dominant device-wide CUB launch overhead for L > 6144, which the summary flags as the current bottleneck.
+- Disadvantage: radix-select is complex to implement correctly; tie-handling subtle; potential bug surface.

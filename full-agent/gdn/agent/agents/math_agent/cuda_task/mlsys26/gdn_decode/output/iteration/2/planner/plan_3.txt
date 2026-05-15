@@ -1,0 +1,18 @@
+### Plan 3: K-Dimension Block-Level Reduction
+
+**Mathematical Formulation:**
+* **Variables:** Block dimension $B_x = 128$.
+* **Constraints:** Reduction must occur across 128 threads using shared memory or shuffle operations.
+* **Objective:** Maximize parallelism across the $K$ dimension instead of the $V$ dimension.
+
+**Solver Strategy:**
+* **K-Parallel Mapping:** Assign exactly 1 thread to 1 element of the $K$ dimension. 
+* **CUB BlockReduce:** Use `cub::BlockReduce` to compute $qh_v$ and $kh_v$ dot products across the entire block of 128 threads.
+* **Sequential V:** Process the $V$ dimension sequentially within the block.
+
+**Validity Mechanism:**
+* **Deterministic Reduction:** Standard CUB algorithms ensure deterministic floating-point accumulation order, preserving numerical stability.
+
+**Why this solution?**
+* **Advantages:** Simplifies memory access to 1 float per thread, ensuring perfect coalescing without vector casting.
+* **Disadvantages:** Fails to address the occupancy issue because we still only launch 8 blocks. Furthermore, using block-level reductions introduces significant `__syncthreads()` overhead in the hot inner loop, which will likely perform worse than the parent's warp-level reductions.

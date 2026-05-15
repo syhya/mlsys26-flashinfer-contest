@@ -1,0 +1,17 @@
+Outline 3: Block-Level Reduction and Tile-Based State Processing
+
+Mathematical Formulation:
+Variables (X): Matrix partitioning strategy for state $S$.
+Constraints (C): Block size <= 1024.
+Objective (f(X)): Minimize register pressure by distributing the state matrix $S$ across multiple warps.
+
+Solver Strategy: Block-Level Parallelism.
+- Partition the 128x128 state matrix into 2D tiles.
+- Use `cub::BlockReduce` or `__shfl_down_sync` to perform cross-thread reductions for the dot product $old\_v = S_{t-1} k_t$.
+
+Validity Mechanism:
+- Strict synchronization `__syncthreads()` between tile processing steps.
+- Ensure all partial sums are exactly accumulated in FP32 to maintain rtol=1e-2 correctness.
+
+Why this solution?
+Reduces register count per thread, allowing higher occupancy. Disadvantage: introduces cross-thread communication overhead (reductions) for every token, which can severely increase latency compared to a purely thread-local dot product.

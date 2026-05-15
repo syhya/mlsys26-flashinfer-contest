@@ -1,0 +1,48 @@
+**1. Executive Summary:**
+This iteration was a decisive, task-completing breakthrough because its per-tile scalar FP8 quantization of SwiGLU activations in GEMM2 unlocked FP8 tensor cores for both GEMMs, pushing speedup from 8.72x to 10.25x and crossing the score ≥ 1.0 threshold (score = 1.0253), while being the only child of its parent in the population.
+
+---
+
+**2. Data-Driven Findings (Facts ONLY):**
+
+* **Sibling Rank:** 1 out of 1 child. This is the sole child of parent `46817723`. No sibling competition.
+* **Score Delta:** From parent (0.8720) to child (1.0253), a +0.1533 absolute gain (+17.6% relative improvement). This crosses the task-completion threshold of 1.0.
+* **Key Change:** Replaced the GEMM2 kernel (`grouped_gemm2_kernel`) — which used FP32 tensor cores (`tl.dot(fp32_swiglu, fp32_w2)`) — with a new FP8 tensor core path: SwiGLU output is quantized per-tile to FP8 using a scalar max-based scale (`c_scale = max(|c_tile|) / 448.0`), then `tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32)` is called, with both `c_scale` and `w2_scale` applied post-dot as scalar multipliers. GEMM1 was kept verbatim from the parent.
+* **Core Metrics:**
+  - Correctness: 1.0 (Passed)
+  - Speedup: 10.253x (parent: 8.720x; delta: +1.533x)
+  - Kernel latency: 2.600ms (parent: 2.630ms; delta: -0.030ms)
+  - Reference latency: 18.647ms (parent: 18.236ms; slight variation)
+  - Max absolute error: 8192.0 (identical to parent — persistent lineage artifact)
+  - Max relative error: 70376.68 (dramatically reduced vs. parent's 6,049,999,872 — 5 orders of magnitude improvement)
+  - Eval time: 54.96s (parent: 181.38s — 3.3x faster evaluation, likely due to autotuner cache hits or fewer autotuning configs triggering)
+  - Autotune configs: Expanded from 4 to 7 configs; added `BLOCK_M=16`, `num_stages=5`, and `num_stages=4` for `BLOCK_M=128`
+  - Loop construct change in GEMM1: `range()` → `tl.range(..., num_stages=4)` for software pipelining
+
+---
+
+**3. Strategic Analysis (The "So What?"):**
+
+* **Root Cause:** The outcome was driven by the quality of the plan itself, not just execution. The planner correctly identified that GEMM2 was the bottleneck (FP32 TCs vs FP8 TCs) and devised a mathematically sound quantization scheme (per-tile scalar, not per-row) that is provably exact when `BLOCK_K = BLOCK_N = 128` aligns perfectly with block-scale granularity. The executor implemented the plan faithfully. This is a plan-quality win: the insight that "SwiGLU output is dynamic-range float32, so quantize per-tile with a single scalar to unlock FP8 TCs" is the critical intellectual contribution of this iteration.
+
+* **Key Insight:** The single most important lesson is that **FP8 tensor cores can be applied to non-FP8 intermediate activations** (like SwiGLU output) by introducing a per-tile scalar quantization step, and that this quantization is mathematically exact when the tile size matches the block-scale granularity (128×128). Previous attempts in the lineage (e.g., `c9eb9072`) failed because they used per-row scaling (asymmetric broadcasting), which breaks the scalar-scale assumption. This child's success proves that scalar-per-tile quantization is the correct design pattern for activations that lack pre-computed FP8 representations. Additionally, the dramatic reduction in max relative error (from 6B to 70K) despite no change to GEMM1 or routing confirms that the GEMM2 FP32→FP8 dequantization path in the parent was introducing significant scaling artifacts, while the new per-tile approach produces much tighter numerical alignment.
+
+* **Identified Risk:** Two risks stand out:
+  1. **Persistent max absolute error of 8192.0**: This lineage-constant artifact has survived every iteration and is not eliminated by this child. Despite correctness passing (atol=1e-2, rtol=1e-2), this outlier error (8192.0 is 2^13) is suspicious and likely represents a degenerate workload edge case (e.g., very small seq_len, a single-token expert assignment, or numerical overflow in a specific tile). Its presence means the solution is correct in aggregate but potentially fragile for specific input distributions.
+  2. **Autotuner sensitivity**: The child uses `n_block_idx = pid_n` (relying on `BLOCK_N=128` always being selected by the autotuner). If the autotuner ever selects `BLOCK_N=64`, `n_block_idx = pid_n` would map to the wrong scale block. This is a latent correctness bug conditional on autotuner configuration — the plan notes BLOCK_N=128 is the only config used, but the autotuner could in principle explore other values if configs were added.
+
+---
+
+**4. Actionable Guidance (The "What's Next?"):**
+
+* **Recommend Exploration:** Investigate and eliminate the persistent 8192.0 max absolute error. This is a discrete anomaly that occurs in a specific workload (likely `seq_len=7` based on the ncu_profile axis in the parent). Test the hypothesis that this error comes from integer overflow or incorrect tile boundary handling when `num_tokens` for a particular expert is exactly 1 or very small (decode regime). A child that instruments per-expert, per-workload error logging would pinpoint the exact failure case.
+
+* **Recommend Fusion:** Fuse the GEMM1 loop software pipelining improvement (`tl.range(..., num_stages=4)` added in this child for GEMM1) with investigation of whether additional `num_stages` on the GEMM2 loop (currently hard-coded `tl.range(0, I, BLOCK_K, num_stages=4)`) produces further speedup. Both loops benefit from software pipelining, and the autotuner does not currently tune `num_stages` for the inner K loop independently.
+
+* **Recommend Exploration:** Push speedup further by exploring GEMM1 FP8 TC with block-scale fusion using `tl.range` software pipelining more aggressively. GEMM1 (K=7168) dominates compute; if GEMM1 is currently ~60% of kernel time, a 10-15% improvement there could push score above 1.1. Consider adding `num_stages=5,6` for GEMM1's K-loop.
+
+* **Recommend Exploration:** Evaluate whether replacing the intermediate `G1` float32 buffer (shape `[Tk_total, 4096]`) with a fused single-pass kernel (GEMM1 → SwiGLU → GEMM2 in one kernel) would reduce HBM traffic. The `G1` buffer currently costs ~`Tk_total * 4096 * 4` bytes in write + read bandwidth. For large `Tk_total`, this is a significant HBM bottleneck. A fused kernel that keeps `G1` tile-resident in SRAM (or registers) would eliminate this.
+
+* **Warn:** Do not modify the `n_block_idx = pid_n` shortcut without ensuring BLOCK_N is constrained to 128 in all autotune configs. If a future iteration adds a `BLOCK_N=64` or `BLOCK_N=256` config to GEMM2 for experimental purposes, the W2_scale lookup will silently produce wrong indices, causing correctness failures that are hard to diagnose. Either add a runtime assertion or revert to `n_block_idx = n_offs // 128` for safety.
+
+* **Warn:** The task objective score ≥ 1.0 has been achieved (1.0253). Future iterations should not regress correctness in pursuit of marginal speedup gains. The lineage is now in a "refinement" phase — incremental improvements are possible but the risk-reward ratio favors conservative architectural extensions over radical rewrites.

@@ -1,0 +1,34 @@
+Outline 2: Hybrid expert-batched PyTorch scaled_mm with CSR dispatch and deterministic repair
+
+Mathematical Formulation:
+- Variables (X):
+  - idx_group, idx_topk: routing index tensors satisfying DeepSeek topology.
+  - p in R^{T x 8}: normalized routing weights for selected experts.
+  - csr_offsets in Z^{E_local+1}, token_perm in Z^{Tk_total}: GPU CSR dispatch for local experts.
+  - G1 in R^{Tk_total x 4096}, H1 in R^{Tk_total x 2048}, O in R^{Tk_total x 7168}.
+- Constraints (C):
+  - token_perm partitions all local routed token-expert pairs exactly once.
+  - expert segments [csr_offsets[e], csr_offsets[e+1]) are disjoint and cover all local pairs.
+  - hidden-state scales are looked up by original global token id, not local row id.
+  - GEMM1 and GEMM2 accumulate in FP32.
+  - Scatter-add maps each local pair contribution back to its original token.
+- Objective f(X): minimize kernel latency subject to exact routing semantics and stable numerics.
+
+Solver Strategy:
+- Deterministic decomposition into two subproblems:
+  1) Solve routing and dispatch structure exactly using vectorized sorting/bincount/cumsum.
+  2) Solve batched GEMMs using cuBLAS-backed torch._scaled_mm when shapes align; otherwise use torch.matmul on exact dequantized tiles.
+- Use piecewise algorithm selection based on per-expert token count Tk.
+
+Validity Mechanism:
+- Introduce a deterministic repair pass:
+  - verify csr_offsets[-1] == Tk_total;
+  - verify sorted_tokens and sorted_experts lengths match;
+  - verify routing weights gathered via flat_token_idx/flat_k_idx before sorting.
+- Replace custom Triton scatter/write indexing with PyTorch accumulation.
+- For GEMM kernels, avoid custom pointer arithmetic entirely in the main path.
+- Fallback hierarchy: scaled_mm -> exact dequant + matmul -> per-expert loop. Always return a valid bf16 tensor.
+
+Why this solution?
+- Advantages: likely more robust than custom Triton; uses vendor kernels for FP8/BF16 math; likely enough speed if dispatch overhead stays low.
+- Disadvantages: torch._scaled_mm API/layout details may be tricky with block scales and per-token A-scale lookup; may need partial dequantization.

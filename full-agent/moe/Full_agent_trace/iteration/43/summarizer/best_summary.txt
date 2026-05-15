@@ -1,0 +1,20 @@
+**1. Executive Summary:**
+This iteration was a strategic regression because it successfully eliminated the parent lineage’s numerical error by replacing custom grouped Triton kernels with exact per-expert FP32 dequantization and native matmuls, but did so at a major throughput cost, performing 3rd out of 4 siblings.
+
+**2. Data-Driven Findings (Facts ONLY):**
+- `**Sibling Rank:**` 3 out of 4 children of parent `0114e7fa`. Top sibling score: 105.96% (`a8623435`). Other sibling scores: 80.31% (`12a8176f`), 15.22% (`a4064493`), and this child 18.69% (`45fcea91`).
+- `**Score Delta:**` From parent `0114e7fa` (81.29%) to child `45fcea91` (18.69%).
+- `**Key Change:**` Replaced the parent’s custom Triton grouped GEMM1/GEMM2 pipeline with a PyTorch-only per-active-expert execution path that explicitly dequantizes hidden rows and both weight matrices to FP32, computes GEMM1/SwiGLU/GEMM2 with native matmul, and accumulates via `output.index_add_`.
+- `**Core Metrics:**` Correctness: 1.0; speedup: 1.87x; kernel execution time: 12.642ms; reference time: 16.638ms; parent kernel time: 3.022ms; max absolute error: 0.0; max relative error: 0.0; total workloads: 19; eval time: 65.90s.
+
+**3. Strategic Analysis (The "So What?"):**
+- `**Root Cause:**` The outcome was driven by plan quality more than execution quality. Execution faithfully implemented the intended correctness-first architecture, and the plan succeeded on its own terms: it removed the structural ambiguity of the Triton path and produced exact benchmark agreement. The low score came from the plan’s deliberate decision to abandon the high-throughput grouped kernel structure, not from a bug in implementation.
+- `**Key Insight:**` The single most important lesson is that the parent lineage’s persistent large error was in fact removable by simplifying the execution structure to exact per-expert slicing and FP32 dequantized compute. That makes this child highly valuable as a semantic oracle. The salvageable concept is not the full eager FP32 path itself, but its exact dispatch + exact block-scale dequantization discipline, especially the use of original global token ids for hidden-state scales and the expert-local exact slicing model.
+- `**Identified Risk:**` The biggest trap is overcommitting to correctness-oracle architecture as a final design. Full materialization of dequantized activations and expert weights inside a Python expert loop creates a severe performance ceiling and risks trapping future search in a safe but noncompetitive basin far below the best sibling already above 1.0.
+
+**4. Actionable Guidance (The "What's Next?"):**
+- `Recommend Fusion:` Fuse this child’s exact dequantization semantics and dispatch discipline into the top-performing sibling `a8623435`. Specifically, use this child as a stage-by-stage reference oracle for GEMM1 input dequant, GEMM1 output, SwiGLU, GEMM2 output, and final scatter, while preserving `a8623435`’s grouped Triton fast path.
+- `Recommend Fusion:` Preserve this child’s `_dequant_hidden_rows` logic and its strict use of global token ids for `hidden_states_scale` lookup. This is a high-confidence semantic component that should be treated as a locked correctness primitive for future fast kernels.
+- `Recommend Exploration:` Build a hybrid child that keeps Triton grouped GEMM1 from the best sibling, but replaces only GEMM2 with a safer chunked native backend. This isolates whether the remaining fast-path lineage error originates before or after SwiGLU while retaining most of the performance advantage.
+- `Recommend Stripping:` Strip full eager dequantization of entire expert weight matrices as a production strategy. Future variants should dequantize per tile or per chunk inside a fast backend, using this child only as the numerical reference path.
+- `Warn:` Do not interpret this child’s perfect correctness as evidence that the best evolutionary direction is toward more PyTorch eager compute. Population data shows the opposite: exactness is solved here, but competitiveness requires reintroducing fused/grouped execution without violating the semantic rules this child clarified.

@@ -1,0 +1,21 @@
+### Strategic Analysis Report
+
+**1. Executive Summary:**
+This iteration was a major breakthrough because a structural fast-path bypass for short sequences (`L ≤ topk`) eliminated all scoring and sorting work for the common case, more than doubling the score (4.24 → 8.97) and decisively outperforming its only sibling.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   **Sibling Rank:** 1 out of 2 children of parent `9c9e445c`. Sibling `e343572b` scored 4.02 (uint4 K-load micro-opt); this child scored **8.97**.
+*   **Score Delta:** Parent 4.236 → Child **8.970** (+4.73, ≈ 2.12× improvement).
+*   **Key Change:** Added `emit_short_topk_kernel` that, for any batch with `seq_lens[b] ≤ 2048`, directly emits the deterministic enumeration `block_table[b,p]*64 + t` and pads with -1, completely bypassing the scoring kernel and CUB segmented sort. The CUB offset generator was modified to mark short batches as empty segments, and `compute_scores_kernel` / `extract_topk_kernel` early-return for them.
+*   **Core Metrics:** Kernel latency 0.097ms → **0.045ms** (−54%); reference baseline 3.97ms → 2.79ms (still wins by 2.12×); correctness 1.0; max error 0; 12/12 workloads passed.
+
+**3. Strategic Analysis (The "So What?"):**
+*   **Root Cause:** Both the **plan and the execution were exceptional**. The Planner correctly identified a mathematical shortcut from the task spec ("set of indices must be correct, ordering arbitrary") that makes scoring/sorting *provably unnecessary* when `L ≤ K`. The Executor implemented it as a clean partition: each batch is handled by exactly one path, eliminating any race risk.
+*   **Key Insight:** **Reading the task specification for mathematical shortcuts beats any micro-optimization.** The previous iteration line spent generations chiseling the scoring kernel (uint4 loads, transposed Q, etc.) for ~10% gains; a single specification-driven dispatch yielded a 2× win. This validates **structure/parameter decoupling** as the dominant evolutionary axis for this task.
+*   **Identified Risk:** The win is workload-distribution-dependent — gains are large only because the benchmark contains many short-sequence batches. For workloads where all batches have `L > 2048`, this collapses to parent performance. Additionally, the long-path still pays the full O(N) CUB segmented sort cost, which is now the unambiguous bottleneck for long sequences.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   **Recommend Fusion:** Combine this child's fast-path dispatch with sibling `e343572b`'s **uint4 vectorized K-load** in the long path. The two optimizations are orthogonal (one removes work, the other accelerates remaining work) — fusion should yield additive gains.
+*   **Recommend Exploration (HIGH PRIORITY):** Generalize the fast-path principle into a **threshold/bucketed Top-K** for the long path: per `(batch, page)` block, emit only local top-K candidates (e.g., top-32 per page) into a compact buffer, then sort a buffer of size `~max_num_pages * 32` instead of `max_num_pages * 64`. This attacks the now-dominant CUB sort cost.
+*   **Recommend Exploration:** Add a third dispatch tier — for **medium sequences** (`2048 < L ≤ ~4096`), use a single-pass block-level radix select (CUB `BlockRadixSort` in shared memory) to skip the device-wide CUB call entirely.
+*   **Warn:** Do not regress this fast-path when adding further optimizations — it is the source of >50% of the current speedup. Keep the two-path partition invariant (each batch written by exactly one path) as a non-negotiable correctness guard.

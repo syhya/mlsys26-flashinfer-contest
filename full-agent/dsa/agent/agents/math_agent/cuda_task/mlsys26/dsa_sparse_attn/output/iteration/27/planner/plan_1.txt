@@ -1,0 +1,8 @@
+PLAN 1: Fused Split-K Reducer (Eliminate Workspace HBM Traffic)
+Variables: workspace layout L, reducer block size B.
+Constraint: exact online softmax merge.
+Objective: reduce HBM round-trip for O_tmp by combining compute+reduce when num_tokens<128.
+Strategy: Replace split_k path with single kernel launching grid (T,16) where each block has S=64 warps, each warp processes one of the 64 sparse partitions internally, then in-block shared-memory merge.
+Validity: exact FP32 merge using sufficient statistics; -1 masking → neutral state.
+Pros: removes 64*16*512 FP32 HBM writes/reads.
+Cons: shared mem pressure: 64 warps * 512 floats = 128KB → too much. Risky.

@@ -1,0 +1,198 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Improve small-token speedup beyond current best (12.63x → target >13x) while keeping correctness == 1.0, by fusing the two independently-validated sibling wins AND cutting split-K workspace HBM traffic in half.
+
+**Selected Outline:** Plan 1 — Fuse validated wins (tile_has_valid flag + simplified reducer) and convert split-K O_tmp workspace from FP32 to BF16.
+
+**Rationale for Selection:**
+1. Plan 1 combines two already-evaluated winning edits from sibling lineage (sibling 94736692 reducer change → 12.63x; parent bad043e5 tile_has_valid flag → 11.69x). Fusion is the explicit recommendation from the parent summary.
+2. The additional new change (BF16 workspace) is the smallest possible structural change that directly halves the dominant HBM traffic in the tiny-T regime, where `O_tmp = [T,64,16,512]` FP32 dominates memory traffic.
+3. Correctness is protected by deterministic algebra: partial per-slot accumulators O_p are bounded (renormalized online softmax, each contribution ≤ 1.0 in magnitude after rescaling by beta/l); rounding to BF16 loses ~2⁻⁷ relative precision per write, which easily fits rtol=atol=1e-2.
+4. No speculative redesign (no cp.async, no WMMA, no partition rework). Minimal compile risk.
+5. Global status shows incremental exploitation consistently wins in this lineage; best score 12.63 is the sibling whose idea we are combining.
+
+---
+
+## Phase 1: Mathematical Definition
+
+### 1.1 Operator (unchanged)
+For token t, head h:
+- logit_j = sm_scale * (⟨q_nope[t,h], k_nope(raw_j)⟩ + ⟨q_pe[t,h], k_pe(raw_j)⟩)
+- out[t,h] = Σ_valid exp(logit_j)/Z · k_nope(raw_j),  Z = Σ exp(logit_j)
+- lse[t,h] = log2(Z) if any valid else -INF
+- raw_j == -1 contributes nothing.
+
+### 1.2 Split-K sufficient statistics (unchanged)
+Partition 2048 slots into S=64 tiles of 32. Each (t,h,s) computes (m_s, l_s, O_s) in FP32 registers via online softmax.
+
+### 1.3 Merge (unchanged, exact)
+m = max_s m_s; coeff_s = exp(m_s-m)/L where L = Σ_s l_s exp(m_s-m); out = Σ_s coeff_s · O_s.
+
+### 1.4 The ONE change: storage precision
+O_s is stored in workspace as BF16 (via __floats2bfloat162_rn) instead of FP32. m_tmp, l_tmp remain FP32 (they are scalars, negligible).
+
+Variables X: dtype(O_tmp) ∈ {FP32, BF16} → pick BF16.
+Constraints C: numerical error per BF16 store ≤ 2⁻⁷ · |value|. Since each O_s entry is bounded by l_s (max exp-sum over 32 slots), and final normalization divides by L ≥ max_s l_s · exp(m_s-m), the final error stays within bf16 rtol=1e-2 atol=1e-2.
+Objective f(X): minimize reducer HBM read bytes. FP32→BF16 halves the reducer's dominant read.
+
+---
+
+## Phase 2: The Optimization Loop (deterministic, no randomness)
+
+Finite candidate set, pick one deterministically:
+- O_tmp_dtype ∈ {BF16 (chosen), FP32 (fallback)}
+- S ∈ {64 (chosen)}, hg large path unchanged
+- threshold tau_small = 128 (inherited)
+
+No multi-start needed (no stochastic component). If BF16 workspace proves numerically unsafe, fall back to FP32 (keeps parent behavior).
+
+### 2.1 Inherited unchanged code regions
+- Large fused kernel `dsa_forward_kernel`: IDENTICAL to parent bad043e5 (keeps the tile_has_valid flag win).
+- Dispatch threshold: `num_tokens < 128 → split-K path`; else large fused. Unchanged.
+
+### 2.2 Modified `split_k_compute_kernel`
+Signature change: `float* O_tmp` → `__nv_bfloat16* O_tmp`.
+Body changes (only the final store loop):
+```
+#pragma unroll
+for (int j = 0; j < 8; ++j) {
+    int base_idx = t*64*16*512 + s*16*512 + h*512 + j*64 + lane*2;
+    __nv_bfloat162 packed = __floats2bfloat162_rn(O_reg[j].x, O_reg[j].y);
+    *reinterpret_cast<__nv_bfloat162*>(&O_tmp[base_idx]) = packed;
+}
+```
+All compute remains FP32.
+
+### 2.3 Modified `split_k_reduce_kernel`
+Adopt the sibling 94736692 simplification (remove `l_s_smem[64]`; compute coeff directly using `l_tmp` inside lane-0 block) AND change O_tmp read dtype:
+- Signature: `const __nv_bfloat16* O_tmp`.
+- Inside the 64-partition output accumulation loop, each thread handles 4 consecutive output dims (d_idx = lane*4). Load 4 BF16 values as one `uint64_t` (or two `__nv_bfloat162`) from `&O_tmp[base_idx]`, convert to 2 float2 via `__bfloat1622float2`, then FMA with `coeff`:
+```
+uint2 raw = *reinterpret_cast<const uint2*>(&O_tmp[base_idx]);
+__nv_bfloat162 lo = *reinterpret_cast<__nv_bfloat162*>(&raw.x);
+__nv_bfloat162 hi = *reinterpret_cast<__nv_bfloat162*>(&raw.y);
+float2 v01 = __bfloat1622float2(lo);
+float2 v23 = __bfloat1622float2(hi);
+out0 = fmaf(v01.x, coeff, out0);
+out1 = fmaf(v01.y, coeff, out1);
+out2 = fmaf(v23.x, coeff, out2);
+out3 = fmaf(v23.y, coeff, out3);
+```
+- Accumulation remains FP32. Final BF16 pack store unchanged.
+- Inside the lane-0 scalar setup block, compute `coeff_s = exp(m_s - m_global) / l_global` directly from `l_tmp[...]` (sibling 94736692 pattern).
+
+### 2.4 Workspace allocation change in `dsa_forward`
+```
+auto O_tmp = torch::empty({num_tokens, S, 16, 512},
+                          torch::dtype(torch::kBFloat16).device(q_nope.device()));
+```
+(dtype change: kFloat32 → kBFloat16). m_tmp, l_tmp stay FP32.
+
+Reinterpret when launching:
+```
+reinterpret_cast<__nv_bfloat16*>(O_tmp.data_ptr<at::BFloat16>())
+```
+
+---
+
+## Phase 3: The "Safety Valve" (CRITICAL)
+
+### 3.1 Numerical bound guarantee
+Per-slot contribution to O_s is `beta_j · v_j` with `|beta_j| ≤ 1` after rescaling and `|v_j|` bounded by input BF16 range (≤ ~3.4e38 theoretically, realistic ≤ 1e2). After 32 slots per partition, `|O_s| ≤ 32 · max|v|`. Final store rounds to BF16 with relative error ≤ 2⁻⁷ ≈ 0.78%, well under the 1e-2 tolerance even after 64-partition accumulation (errors are incoherent, scaled by coeff_s which sums to 1).
+
+### 3.2 Neutral-state masking (unchanged)
+raw==-1 → skipped before cache load. Partitions with all-invalid slots store m=-INF, l=0, O=0 (BF16 zero = exact zero, safe under merge).
+
+### 3.3 Empty-row fallback (unchanged)
+Reducer detects `m_global == -INF || l_global <= 0` → writes zero output and -INF lse.
+
+### 3.4 Deterministic fallback
+If any compile issue with BF16 workspace reinterpret arises, the executor must revert `O_tmp` dtype to kFloat32 and restore FP32 reads in reducer. This reproduces sibling 94736692 exactly → guaranteed score 12.63.
+
+### 3.5 ABI/build safety (unchanged)
+- `#include <torch/extension.h>`, `#include <cuda_bf16.h>`, `#include <tuple>`.
+- Explicit BF16 intrinsics only: `__bfloat1622float2`, `__floats2bfloat162_rn`.
+- Mandatory `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("dsa_forward", ...); }` footer.
+- Exact C++ signature unchanged.
+
+---
+
+## Phase 4: Implementation Details
+
+### 4.1 Files
+Single `kernel.cu`.
+
+### 4.2 Kernel inventory
+1. `warp_reduce_sum` template — unchanged.
+2. `dsa_forward_kernel` (large fused path) — **copy verbatim from parent bad043e5**, including the tile_has_valid flag handling. Do not touch it.
+3. `split_k_compute_kernel` — modified signature `__nv_bfloat16* O_tmp`; modified final store (pack 2 floats → __nv_bfloat162 → 32-bit store).
+4. `split_k_reduce_kernel` — modified signature `const __nv_bfloat16* O_tmp`; adopt 94736692's reducer body (no `l_s_smem`, compute coeff in lane-0 from l_tmp directly); modified inner d_idx loop to load 8 bytes (uint2) of BF16 per partition, unpack via `__bfloat1622float2`, FMA into FP32 accumulators.
+
+### 4.3 Exact dispatch in `dsa_forward`
+```
+int num_tokens = q_nope.size(0);
+auto output = torch::empty({num_tokens, 16, 512}, q_nope.options());
+auto lse = torch::empty({num_tokens, 16}, torch::dtype(torch::kFloat32).device(q_nope.device()));
+if (num_tokens == 0) return {output, lse};
+
+if (num_tokens < 128) {
+    constexpr int S = 64;
+    auto O_tmp = torch::empty({num_tokens, S, 16, 512},
+                              torch::dtype(torch::kBFloat16).device(q_nope.device()));
+    auto m_tmp = torch::empty({num_tokens, 16, S}, torch::dtype(torch::kFloat32).device(q_nope.device()));
+    auto l_tmp = torch::empty({num_tokens, 16, S}, torch::dtype(torch::kFloat32).device(q_nope.device()));
+
+    split_k_compute_kernel<<<dim3(S,num_tokens,1), dim3(32,16,1)>>>(
+        reinterpret_cast<const __nv_bfloat16*>(q_nope.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(q_pe.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(ckv_cache.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(kpe_cache.data_ptr<at::BFloat16>()),
+        sparse_indices.data_ptr<int32_t>(),
+        sm_scale,
+        reinterpret_cast<__nv_bfloat16*>(O_tmp.data_ptr<at::BFloat16>()),
+        m_tmp.data_ptr<float>(), l_tmp.data_ptr<float>());
+
+    split_k_reduce_kernel<<<dim3(num_tokens,16,1), dim3(128,1,1)>>>(
+        reinterpret_cast<const __nv_bfloat16*>(O_tmp.data_ptr<at::BFloat16>()),
+        m_tmp.data_ptr<float>(), l_tmp.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+        lse.data_ptr<float>());
+} else {
+    dsa_forward_kernel<<<dim3(num_tokens), dim3(32,16)>>>(... unchanged ...);
+}
+return {output, lse};
+```
+
+### 4.4 Numerical rules (strict)
+- All m, l, O accumulations in FP32.
+- Multiply by sm_scale before online-softmax update.
+- `__expf` for exp, `__log2f` for base-2 lse: `lse = fmaf(m, 1.4426950408889634f, __log2f(l))`.
+- BF16 used only for: q_nope, q_pe, ckv_cache, kpe_cache loads; O_tmp workspace; final output store.
+
+### 4.5 What NOT to do
+- No cp.async, no WMMA, no inline PTX.
+- No partition count changes (keep S=64).
+- No change to large fused kernel body beyond parent.
+- No runtime autotuning, no random seeds.
+- No threshold changes (keep 128).
+
+### 4.6 Expected performance impact
+Reducer HBM read of O_tmp drops from 64·16·512·4B = 2 MB per (t) to 1 MB per (t). Compute kernel write drops similarly. Expected speedup vs 12.63x baseline: +5–15% → target 13.3–14.5x score.
+
+---
+
+## Review Checklist
+- Math over luck: Yes — exact merge algebra preserved; BF16 rounding analytically bounded under 1e-2 tolerance.
+- Library check: Only `<torch/extension.h>`, `<cuda_bf16.h>`, `<tuple>`, `<math.h>` — all standard and compile-safe.
+- Randomness: None. No multi-start needed.
+- Implementable: Yes — every change is a mechanical, localized edit to two kernel signatures plus 4 lines of store code and 6 lines of load code.
+
+## Final Executor Instructions (Code-Ready)
+1. Copy parent bad043e5's `warp_reduce_sum` and `dsa_forward_kernel` verbatim.
+2. In `split_k_compute_kernel`: change `float* __restrict__ O_tmp` to `__nv_bfloat16* __restrict__ O_tmp`. Replace the final store loop with `__floats2bfloat162_rn` packs writing as `__nv_bfloat162`.
+3. In `split_k_reduce_kernel`: change `const float* __restrict__ O_tmp` to `const __nv_bfloat16* __restrict__ O_tmp`. Remove `__shared__ float l_s_smem[64]`. In the lane-0 section, load `l_s = l_tmp[...]` scalar and compute `scale_smem[i] = __expf(m_s_smem[i]-m_max)` and accumulate `l_sum` on the fly; then after __syncthreads compute `coeff = scale_smem[lane]/l_global` (or fold division into each load). In the 512-dim accumulation loop, read 8 bytes of BF16 via `uint2`, reinterpret as two `__nv_bfloat162`, convert via `__bfloat1622float2`, FMA into FP32 `out0..out3`.
+4. In `dsa_forward`: change `O_tmp` allocation dtype from `kFloat32` to `kBFloat16`; use `reinterpret_cast<__nv_bfloat16*>(O_tmp.data_ptr<at::BFloat16>())` at both launch sites.
+5. Keep `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("dsa_forward", &dsa_forward, "DSA Forward"); }` footer.
+6. Do NOT touch the large fused path. Do NOT change threshold, S, block/grid.
+
+This plan is code-ready, mathematically exact, combines two validated wins, and adds one small, analytically safe bandwidth optimization.

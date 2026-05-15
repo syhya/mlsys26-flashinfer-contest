@@ -1,0 +1,20 @@
+**1. Executive Summary:**
+This iteration was a severe regression because its stage-wise semantic validation and exact-fallback strategy inserted massive per-batch oracle overhead and repeatedly steered execution toward expensive exact paths, performing last among siblings.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* `**Sibling Rank:**` 2 out of 2 children. Top sibling score: 23.92%.
+* `**Score Delta:**` From parent (80.31%) to child (0.00%).
+* `**Key Change:**` Added deterministic sampled GEMM1/GEMM2 block oracles, dispatch validation, small-problem fallback, and a hybrid path that validates Triton GEMM1 before executing exact per-expert GEMM2 from `G1`.
+* `**Core Metrics:**` Evaluation status: validation_failed; score: 0.0; correctness: 0.0; speedup: 0.0x; kernel execution time: 0.0ms; baseline time: 0.0ms; eval time: 742.82s; failure mode: TIMEOUT after 300 seconds. Parent score: 80.31% with 8.03x speedup and 2.854ms kernel latency. Best sibling score: 23.92% with 2.39x speedup and 8.283ms kernel latency.
+
+**3. Strategic Analysis (The "So What?"):**
+* `**Root Cause:**` The failure was primarily due to plan quality. The plan intentionally moved heavy semantic checking into the runtime path, and execution appears faithful to that design. The resulting child traded a fast-but-wrong kernel for a diagnostically rich but evaluation-infeasible pipeline. This was not a minor implementation slip; it was a strategic overinvestment in online validation.
+* `**Key Insight:**` The single most important lesson is that semantic diagnosis must be moved off the hot path. Sampled exact block oracles, expert-wise dequantization, and fallback cascades are useful for fault isolation, but embedding them in the evaluated `run()` function destroys throughput so completely that the solution cannot compete or even finish. The valuable concept to salvage is the stage-localization methodology, not the runtime structure that executes it.
+* `**Identified Risk:**` The biggest trap is conflating "self-checking" with "robust." In this task, heavy runtime validation creates a local optimum of high conceptual safety but zero practical fitness. If future descendants keep adding exact checks and fallback branches inside `run()`, the lineage will continue to fail on timeout before it can benefit from any correctness gains.
+
+**4. Actionable Guidance (The "What's Next?"):**
+* `Recommend Fusion:` Fuse this child’s fault-localization ideas with the better sibling (`c6821953`) only as offline development logic: use sampled GEMM1/GEMM2 block oracles to identify the first divergent stage, then remove those checks entirely from the production submission path.
+* `Recommend Stripping:` Strip all runtime semantic validators, per-batch oracle recomputations, and broad fallback cascades from future performance candidates. Keep only minimal structural guards that are O(1) or O(E_local), not guards that trigger extra GEMMs or full expert dequantization.
+* `Recommend Exploration:` Explore a lean ablation ladder with separate children that change exactly one semantic axis at a time: (1) GEMM1 weight orientation/stride convention, (2) hidden-state scale indexing convention, (3) GEMM2 weight orientation/scale-axis convention, (4) scatter/routing-weight application point. This is the fastest route to isolate the persistent 8192/4096 block-scale mismatch without paying diagnostic cost during evaluation.
+* `Recommend Fusion:` Combine the parent’s fast grouped Triton infrastructure with the sibling’s evidence that downstream exact GEMM2 reduced max absolute error from 8192 to 4096. That suggests a promising hybrid research direction: preserve fast dispatch/GEMM1, but redesign GEMM2 semantics or orientation using the sibling as an oracle-derived template, not as a runtime implementation.
+* `Warn:` Do not create another child whose evaluated path contains exact expert dequantization plus sampled oracle recomputation. The population data now shows a clear pattern: adding online correctness machinery collapses fitness far faster than it improves semantics.

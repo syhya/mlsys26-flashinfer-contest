@@ -1,0 +1,7 @@
+Plan 1: Restore best ancestor (score 12.635) as baseline and apply micro-refinements.
+- Variables: dispatch threshold tau, split-K partitions S, reducer block size.
+- Constraints: correctness (exact online-softmax merge), FP32 accumulation, base-2 LSE, masked -1.
+- Solver: deterministic architecture selection. Copy best-known two-path architecture from solution 94736692 (speedup 126x). Apply only low-risk cleanup.
+- Validity: exact FP32 merge equations in reducer; empty-row fallback; explicit BF16 intrinsics.
+- Why: Parent regressed to 8.46x from ancestor's 126x. Restoring the best working structure guarantees score >= 10+.
+- Advantage: Guaranteed improvement. Disadvantage: limited novelty.

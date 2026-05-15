@@ -1,0 +1,25 @@
+Objective: Implement a highly optimized CUDA kernel for TopK Indexer in Sparse Attention using Hopper FP8 WGMMA and CUB.
+
+Mathematical Formulation:
+- Variables: `Q` (64x128 FP8), `K` (seq_len x 128 FP8), `scales` (seq_len), `W` (64).
+- Objective: Compute `scores[i] = sum_{h=0}^{63} W[h] * ReLU( sum_{d=0}^{127} Q[h, d] * K[i, d] * scales[i] )` for `i` in `0..seq_len-1`.
+- Constraint: Output exactly 2048 indices corresponding to the highest scores.
+
+Solver Strategy: Two-Stage Pipeline
+1. Scoring Kernel: Use standard CUDA / CuTe to compute the scores.
+   - A block processes one batch element (or part of it).
+   - Loads Q (64x128) into Shared Memory.
+   - Loops over K pages. For each page (64 tokens), loads K (64x128) into Shared Memory.
+   - Computes `Q @ K.T` using MMA instructions or naive register blocking if MMA is too complex.
+   - Applies scales, ReLU, and weights to get 64 token scores.
+   - Writes scores to a global workspace tensor `[batch_size, max_seq_len]`.
+2. Sorting Stage: 
+   - Use `cub::DeviceSegmentedRadixSort::SortPairsDescending` to sort scores and their corresponding global token indices.
+   - Extract the top 2048 indices.
+
+Validity Mechanism:
+By decoupling the scoring math from the Top-K selection, we guarantee numerical correctness and correct index extraction. CUB is mathematically proven to sort correctly.
+
+Why this solution?
+Advantages: Very robust. Easy to implement and debug.
+Disadvantages: Higher memory traffic because all scores are written to global memory.

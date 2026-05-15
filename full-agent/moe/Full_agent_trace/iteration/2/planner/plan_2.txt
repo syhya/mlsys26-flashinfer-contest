@@ -1,0 +1,47 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized FP8 MoE by abandoning custom Triton GEMMs (which proved numerically unstable) and leveraging PyTorch's battle-tested `torch._scaled_mm` combined with vectorized dispatch.
+
+**Selected Outline:** Hybrid PyTorch `_scaled_mm` + Vectorized Dispatch
+
+**Rationale for Selection:**
+1.  **Robustness**: `torch._scaled_mm` provides highly optimized, numerically stable cuBLAS/Triton backing for FP8 matmuls, eliminating custom pointer arithmetic bugs (like the 8192.0 absolute error).
+2.  **Performance vs Safety Trade-off**: While slightly less flexible than custom Triton, it guarantees Tensor Core usage for both GEMM1 and GEMM2 while strictly adhering to FP8 standards.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Definition & Setup**
+    *   **Variables**: Expert assignments, token sorting arrays.
+    *   **Mathematical Operations**:
+        *   $G1_e = \text{scaled\_mm}(A_e, W1_e)$ for each active expert.
+        *   $C_e = \text{SwiGLU}(G1_e)$.
+        *   Quantize $C_e \rightarrow C_{fp8, e}$.
+        *   $O_e = \text{scaled\_mm}(C_{fp8, e}, W2_e)$.
+    *   **Constraints**:
+        *   Output must match strict `rtol/atol` tolerances.
+
+2.  **Phase 2: The Optimization Loop (Dynamic Expert Iteration)**
+    *   Instead of a static loop over all 32 experts, iterate *only* over the active experts identified by the vectorized dispatch.
+    *   This is not a gradient search, but rather a dynamic execution graph that skips empty computation blocks.
+
+3.  **Phase 3: The "Safety Valve" (CRITICAL)**
+    *   **Strict Tensor Formatting**: `torch._scaled_mm` requires specific memory layouts and scale tensor shapes. The plan must enforce that inputs are strictly contiguous and scales are properly broadcastable before calling the function.
+
+4.  **Phase 4: Implementation Details**
+    *   **Step 4.1: Routing & Sorting**: Use the same exact, successful vectorized PyTorch routing and offset logic from the parent.
+    *   **Step 4.2: Expert Loop Execution**:
+        *   Iterate through unique active experts.
+        *   Extract the token features for the current expert using `hidden_states[expert_tokens]`.
+    *   **Step 4.3: GEMM1 (`torch._scaled_mm`)**:
+        *   Fetch weight slice `gemm1_weights[e]`.
+        *   Fetch scales.
+        *   Call `torch._scaled_mm`.
+    *   **Step 4.4: SwiGLU & Quantize**:
+        *   Apply `torch.nn.functional.silu(G1[:, I:]) * G1[:, :I]`.
+        *   Compute block scales and cast the result to `torch.float8_e4m3fn`.
+    *   **Step 4.5: GEMM2 (`torch._scaled_mm`)**:
+        *   Fetch weight slice `gemm2_weights[e]`.
+        *   Call `torch._scaled_mm`.
+    *   **Step 4.6: Scaling & Accumulation**:
+        *   Multiply by `routing_weights[expert_tokens]`.
+        *   Scatter add to the final output buffer.

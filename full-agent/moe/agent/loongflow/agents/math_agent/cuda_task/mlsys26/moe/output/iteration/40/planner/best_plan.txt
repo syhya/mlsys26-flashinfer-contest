@@ -1,0 +1,264 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Surpass the current global best `dce0e38f` (1.5901, 15.90x, 1.452ms kernel) by rebasing onto it verbatim and adding ONE structural optimization: TMA-style weight loads via `tl.make_block_ptr` for GEMM1 (the dominant ~55% of latency, K=7168). The assigned parent `ba626bb8` (1.548) is off-frontier; we ignore its structure and rebase onto `dce0e38f`.
+
+**Selected Outline:** Plan 1 — Verbatim `dce0e38f` base + new TMA-variant GEMM1 kernel added as additional autotune choice (NOT replacing existing kernel) + 1 strictly-additive GEMM2 autotune config.
+
+**Rationale for Selection:**
+1. **Mathematical floor (autotune-superset property).** We add a SECOND GEMM1 kernel (TMA variant) but keep the original `dce0e38f` GEMM1 kernel + dispatch logic intact. The dispatcher chooses TMA only if a runtime flag enables it; default flag = original behavior. Thus floor ≥ `dce0e38f` (1.5901).
+2. **Plan 2 (fused Triton routing) is HIGH correctness risk** — DeepSeek no-aux routing's group top-2 + top-4 group + masked top-8 + renorm has fragile tie-breaking semantics; multiple prior summaries warn against attempting this without staged correctness gates.
+3. **Plan 3 (PyTorch micro-opts)** explicitly flagged saturated (+0.005 expected); not worth iteration.
+4. **GEMM1 TMA is the single highest-value untapped lever** per all three recent summaries (`302d2eb3`, `ba626bb8`, `dce0e38f`).
+
+---
+
+## Phase 1: Mathematical Definition
+
+**Pipeline math:** UNCHANGED from `dce0e38f`. TMA only changes the load path for `gemm1_weights[e, n_offs, k_offs]` tiles — same exact elements loaded.
+
+**Variables (X):**
+- New constexpr `USE_TMA: tl.constexpr` in GEMM1 kernel (or a new sister kernel `grouped_gemm1_kernel_tma`).
+- Block-pointer base = `gemm1_weights + pid_e * stride_we` (per-expert 2D base).
+- 1 new GEMM2 autotune config (strictly additive).
+
+**Constraints (C):**
+- C1: GEMM2 kernel + autotune list (12 configs) byte-identical to `dce0e38f` (plus 1 new config appended).
+- C2: `_route_tokens` byte-identical to `dce0e38f` (sentinel-sort variant, `argsort(stable=True)`, `gather(1, topk_idx).reshape(-1)`).
+- C3: bf16 epilogue from `dce0e38f` preserved (`O.to(bf16)` then `output.zeros((T,H), bf16).index_add_`).
+- C4: All BLOCK_N=128 in GEMM2 (to keep `n_block_idx = pid_n` valid).
+- C5: int64 pointer arithmetic preserved (`pid_e.to(tl.int64)` everywhere).
+- C6: GEMM1 retains TWO codepaths — original raw-pointer kernel (= `dce0e38f`'s) and a TMA variant. Runtime flag `USE_TMA_GEMM1 = True` selects TMA at launch; if it fails to compile or autotune, set to False to recover floor.
+
+**Objective:** minimize end-to-end latency.
+
+---
+
+## Phase 2: Construction Steps
+
+**Step 2.1: Copy `dce0e38f` VERBATIM:**
+- `grouped_gemm1_kernel` body (raw-pointer arithmetic) + 12-config autotune list — KEEP as fallback.
+- `grouped_gemm2_kernel` body + 12-config autotune list (FP8 TC triad with scalar `tl.max(tl.abs(c))`, `tl.float8e4nv`, `tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32)`, K-loop uses `tl.range(0, I, BLOCK_K)`).
+- `_route_tokens` (sentinel-sort) — VERBATIM.
+- `run()` driver — VERBATIM except dispatcher selects TMA kernel for GEMM1.
+
+**Step 2.2: Add a new TMA-variant GEMM1 kernel `grouped_gemm1_kernel_tma`:**
+
+```python
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, num_warps=4, num_stages=4),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8, num_stages=4),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8, num_stages=5),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=8, num_stages=4),
+    ],
+    key=["MAX_TK"],
+)
+@triton.jit
+def grouped_gemm1_kernel_tma(
+    A_ptr, A_scale_ptr, W_ptr, W_scale_ptr, Out_ptr,
+    sorted_tokens_ptr, expert_offsets_ptr,
+    H: tl.constexpr, N_dim: tl.constexpr, MAX_TK,
+    stride_am, stride_ak,
+    stride_ascale_k, stride_ascale_m,
+    stride_we, stride_wn, stride_wk,
+    stride_wscale_e, stride_wscale_n, stride_wscale_k,
+    stride_outm, stride_outn,
+    BLOCK_K: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+):
+    pid_n = tl.program_id(0)
+    pid_m = tl.program_id(1)
+    pid_e = tl.program_id(2)
+
+    start_idx = tl.load(expert_offsets_ptr + pid_e)
+    end_idx   = tl.load(expert_offsets_ptr + pid_e + 1)
+    num_tokens = end_idx - start_idx
+    if pid_m * BLOCK_M >= num_tokens:
+        return
+
+    m_offs = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    m_mask = m_offs < num_tokens
+    n_offs = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    n_mask = n_offs < N_dim
+
+    token_ids = tl.load(sorted_tokens_ptr + start_idx + m_offs, mask=m_mask, other=0).to(tl.int64)
+
+    # Build TMA block pointer for this expert's weight slab [N_dim, H], FP8.
+    # IMPORTANT: pid_e * stride_we is int64-safe because we cast pid_e.
+    w_base = W_ptr + pid_e.to(tl.int64) * stride_we
+    W_block_ptr = tl.make_block_ptr(
+        base=w_base,
+        shape=(N_dim, H),
+        strides=(stride_wn, stride_wk),
+        offsets=(pid_n * BLOCK_N, 0),
+        block_shape=(BLOCK_N, BLOCK_K),
+        order=(1, 0),
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    k_range = tl.arange(0, BLOCK_K)
+
+    for k_start in tl.range(0, H, BLOCK_K):
+        k_block_idx = k_start // BLOCK_K
+        k_offs = k_start + k_range
+
+        # A: gather rows by token_ids — keep raw-pointer (gather pattern, TMA-incompatible)
+        a_ptrs = A_ptr + token_ids[:, None] * stride_am + k_offs[None, :] * stride_ak
+        a_fp8 = tl.load(a_ptrs, mask=m_mask[:, None], other=0.0)
+
+        a_scale_ptrs = A_scale_ptr + k_block_idx * stride_ascale_k + token_ids[:, None] * stride_ascale_m
+        a_scale = tl.load(a_scale_ptrs, mask=m_mask[:, None], other=1.0)
+
+        # W: TMA-style block pointer load -> fp8 [BLOCK_N, BLOCK_K], then transpose to [BLOCK_K, BLOCK_N]
+        w_block = tl.load(W_block_ptr, boundary_check=(0, 1))  # [BLOCK_N, BLOCK_K] fp8
+        w_fp8 = tl.trans(w_block)  # [BLOCK_K, BLOCK_N] fp8
+
+        n_block_idx = n_offs // 128
+        w_scale_ptrs = (
+            W_scale_ptr
+            + pid_e.to(tl.int64) * stride_wscale_e
+            + n_block_idx[None, :] * stride_wscale_n
+            + k_block_idx * stride_wscale_k
+        )
+        w_scale = tl.load(w_scale_ptrs, mask=n_mask[None, :], other=1.0)
+
+        dot_result = tl.dot(a_fp8, w_fp8, out_dtype=tl.float32)
+        acc += dot_result * a_scale * w_scale
+
+        # Advance W block pointer along K
+        W_block_ptr = tl.advance(W_block_ptr, (0, BLOCK_K))
+
+    out_ptrs = (Out_ptr + (start_idx + m_offs)[:, None].to(tl.int64) * stride_outm
+                + n_offs[None, :] * stride_outn)
+    tl.store(out_ptrs, acc, mask=m_mask[:, None] & n_mask[None, :])
+```
+
+Note: weight tensor layout is `[E=32, N=2I=4096, K=H=7168]` with stride `(N*K, K, 1)`. `tl.make_block_ptr` with `shape=(N, H)`, `strides=(stride_wn, stride_wk)`, `order=(1, 0)` correctly describes this contiguous-in-K 2D slab. `tl.advance(W_block_ptr, (0, BLOCK_K))` walks the K axis. The transpose is necessary because `tl.dot(A[M,K], B[K,N])` expects the right operand in [K,N] layout.
+
+**Step 2.3: Append ONE new GEMM2 autotune config:**
+```python
+triton.Config({"BLOCK_M": 32, "BLOCK_N": 128}, num_warps=8, num_stages=4),
+```
+Strictly additive.
+
+**Step 2.4: Dispatcher in `run()`:**
+
+```python
+USE_TMA_GEMM1 = True  # Set False to fall back to dce0e38f's raw-pointer GEMM1 (recovers 1.5901 floor)
+
+if USE_TMA_GEMM1:
+    gemm1_fn = grouped_gemm1_kernel_tma
+else:
+    gemm1_fn = grouped_gemm1_kernel
+
+gemm1_fn[grid_gemm1](
+    A_ptr=hidden_states, A_scale_ptr=hidden_states_scale,
+    W_ptr=gemm1_weights, W_scale_ptr=gemm1_weights_scale,
+    Out_ptr=G1,
+    sorted_tokens_ptr=sorted_tokens, expert_offsets_ptr=expert_offsets,
+    H=H, N_dim=2*I, MAX_TK=max_count,
+    stride_am=hidden_states.stride(0), stride_ak=hidden_states.stride(1),
+    stride_ascale_k=hidden_states_scale.stride(0), stride_ascale_m=hidden_states_scale.stride(1),
+    stride_we=gemm1_weights.stride(0), stride_wn=gemm1_weights.stride(1), stride_wk=gemm1_weights.stride(2),
+    stride_wscale_e=gemm1_weights_scale.stride(0),
+    stride_wscale_n=gemm1_weights_scale.stride(1),
+    stride_wscale_k=gemm1_weights_scale.stride(2),
+    stride_outm=G1.stride(0), stride_outn=G1.stride(1),
+    BLOCK_K=128,
+)
+```
+
+Both kernels have identical signatures, so this swap is clean.
+
+---
+
+## Phase 3: Safety Valve
+
+**S1. Floor guarantee.** If TMA kernel fails to compile, `USE_TMA_GEMM1 = False` recovers `dce0e38f`'s exact behavior (1.5901). The original `grouped_gemm1_kernel` with its 12-config autotune list is preserved verbatim. GEMM2 is byte-identical-plus-1-additive-config, so its floor is also guaranteed.
+
+**S2. TMA correctness.** `tl.make_block_ptr` produces the same FP8 elements as raw-pointer arithmetic. The `tl.trans` then makes it equivalent to the original `[K, N]` load layout. Numerical result is bit-identical (TMA is a load mechanism, not a math change).
+
+**S3. Boundary handling.** `boundary_check=(0, 1)` ensures out-of-bounds `n_offs >= N_dim` and `k_offs >= H` reads are masked. Since `H=7168` and `N_dim=4096` are both multiples of `BLOCK_K=128`, K boundary never trips; only `BLOCK_N` may exceed `N_dim` at edge tiles.
+
+**S4. Anti-regression checklist for executor:**
+- [ ] Original `grouped_gemm1_kernel` (raw-pointer, 12 configs) preserved EXACTLY from `dce0e38f`.
+- [ ] New `grouped_gemm1_kernel_tma` added as a SEPARATE function (not replacing).
+- [ ] `grouped_gemm2_kernel` body byte-identical to `dce0e38f`. Preserve FP8 TC triad: scalar `tl.max(tl.abs(c))` (NO axis arg), `(c/c_scale).to(tl.float8e4nv)`, `tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32)`.
+- [ ] GEMM2 autotune list = 12 inherited from `dce0e38f` + 1 new (`BLOCK_M=32, BLOCK_N=128, num_warps=8, num_stages=4`) = 13 total.
+- [ ] `_route_tokens` byte-identical to `dce0e38f` (sentinel-sort, `argsort(stable=True)`).
+- [ ] bf16 epilogue from `dce0e38f`: `O.to(bf16)` + `torch.zeros((T,H), bf16)` + `index_add_` + `return output`.
+- [ ] `pid_e.to(tl.int64)` in TMA kernel for `w_base`.
+- [ ] `tl.advance(W_block_ptr, (0, BLOCK_K))` increments K axis (offset index 1, since shape=(N,H)=(N,K)).
+- [ ] `tl.trans(w_block)` after load to convert [BLOCK_N, BLOCK_K] → [BLOCK_K, BLOCK_N] for `tl.dot`.
+- [ ] `boundary_check=(0, 1)` on `tl.load(W_block_ptr, ...)`.
+- [ ] `USE_TMA_GEMM1 = True` at top of `run()`.
+- [ ] Edge-case fallbacks preserved (return zeros bf16 when routed is None / Tk_total==0 / max_count==0).
+- [ ] **NO `tl.atomic_add`, NO `reset_to_zero`** (proven regressions).
+- [ ] **NO change to GEMM2 body or routing.**
+
+**S5. Compilation safety.** If `tl.make_block_ptr` / `tl.advance` API differs from expected (Triton 3.6.0 supports it), the TMA kernel will compile-error at first launch. The executor's safety net: wrap the TMA dispatch in try/except inside `run()`, and on exception fall back to the raw-pointer kernel. This guarantees no crash.
+
+```python
+try:
+    if USE_TMA_GEMM1:
+        grouped_gemm1_kernel_tma[grid_gemm1](... same args ...)
+    else:
+        grouped_gemm1_kernel[grid_gemm1](... same args ...)
+except Exception:
+    grouped_gemm1_kernel[grid_gemm1](... same args ...)
+```
+
+---
+
+## Phase 4: Implementation Details
+
+**Libraries:** `torch`, `triton`, `triton.language as tl` only.
+
+**Single .py file structure:**
+1. `@triton.autotune(configs=[...12...]) @triton.jit grouped_gemm1_kernel` — VERBATIM from `dce0e38f` (raw-pointer fallback).
+2. `@triton.autotune(configs=[...8...]) @triton.jit grouped_gemm1_kernel_tma` — NEW (Step 2.2).
+3. `@triton.autotune(configs=[...13...]) @triton.jit grouped_gemm2_kernel` — body VERBATIM from `dce0e38f`, autotune list +1 config.
+4. `def _route_tokens(...)` — VERBATIM from `dce0e38f`.
+5. `@torch.no_grad() def run(...)` — VERBATIM from `dce0e38f` except GEMM1 dispatch wrapped in try/except per S5.
+
+**Exact GEMM2 autotune list (13 entries):**
+```python
+configs=[
+    triton.Config({"BLOCK_M": 16,  "BLOCK_N": 128}, num_warps=4,  num_stages=4),
+    triton.Config({"BLOCK_M": 32,  "BLOCK_N": 128}, num_warps=4,  num_stages=4),
+    triton.Config({"BLOCK_M": 32,  "BLOCK_N": 128}, num_warps=4,  num_stages=5),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128}, num_warps=4,  num_stages=3),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128}, num_warps=4,  num_stages=4),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128}, num_warps=4,  num_stages=5),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8,  num_stages=3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8,  num_stages=4),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8,  num_stages=5),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=16, num_stages=4),
+    triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_warps=8,  num_stages=4),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128}, num_warps=8,  num_stages=4),
+    triton.Config({"BLOCK_M": 32,  "BLOCK_N": 128}, num_warps=8,  num_stages=4),  # NEW
+],
+key=["MAX_TK"],
+```
+
+**DO NOT:**
+- Modify GEMM2 body.
+- Modify `_route_tokens`.
+- Modify the bf16 epilogue.
+- Use `tl.atomic_add` or `reset_to_zero`.
+- Replace `tl.float8e4nv` with `tl.float8_e4m3fn`.
+- Attempt fused Triton routing.
+- Remove the raw-pointer GEMM1 fallback kernel.
+
+---
+
+## Expected Performance
+
+- **Floor (mathematically guaranteed via try/except + USE_TMA flag):** kernel latency ≤ 1.452ms ⇒ score ≥ 1.5901 minus benchmark noise.
+- **Expected (TMA succeeds):** score 1.62–1.70 (16.2–17.0x), end-to-end latency 1.35–1.43ms. TMA on Blackwell delivers 1.2–1.5x bandwidth on weight tiles; GEMM1 K=7168 is bandwidth-bound on weight loads, so 5–10% overall speedup is realistic.
+- **No randomness** — TMA is deterministic; Triton autotune is deterministic.
+
+The diff vs `dce0e38f` is: +1 new kernel (TMA variant, ~50 lines), +1 new GEMM2 autotune config, +try/except wrapper in run(). The fallback (try/except or `USE_TMA_GEMM1 = False`) recovers exact `dce0e38f` behavior. All known traps (atomic_add, reset_to_zero, axis-on-tl.max, wrong fp8 dtype, fragile routing fusion) are explicitly forbidden. This plan relies on math (autotune superset + TMA load-equivalence + try/except safety) plus one well-understood Triton 3.6.0 feature, not luck.

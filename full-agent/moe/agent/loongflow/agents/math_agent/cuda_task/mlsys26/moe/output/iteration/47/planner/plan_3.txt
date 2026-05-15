@@ -1,0 +1,33 @@
+Outline 3: Two-stage activation quantization with split-K small-batch GEMM2 and fallback repair
+
+Mathematical Formulation
+Variables (X):
+- Exact routing and local assignment arrays.
+- GEMM1 output G1 split into x1, x2.
+- Quantized activation blocks Q[j, kb] with per-row or per-tile scales sC.
+- Split-K partial outputs P[s, j, h] across K partitions for GEMM2.
+- Final accumulated O[j, h], then scattered Y[t, h].
+Constraints (C):
+- C1: Same routing semantics as reference.
+- C2: FP32 accumulation for both GEMM stages and split-K reduction.
+- C3: 128-aligned block scale application for fp8 weights and hidden states.
+- C4: Split-K reduction must exactly sum all K partitions before weighting/scatter.
+- C5: Output bf16 [T,7168].
+Objective f(X):
+- Minimize latency for small-T workloads by maximizing SM occupancy using split-K over the reduction dimension I in GEMM2.
+
+Solver Strategy
+- Deterministic piecewise optimization:
+  - For very small Tk_total, solve occupancy deficit by choosing K_SPLIT in {2,4,8} with a fixed cost model based on available row tiles.
+  - For larger Tk_total, use standard grouped GEMM2.
+- This is a finite discrete optimization over a tiny candidate set, evaluated from problem size metrics.
+
+Validity Mechanism
+- Reduce split-K partials into FP32 scratch tensor or via atomics.
+- If split-K scratch allocation or atomic path is invalid/too complex, fallback to parent grouped GEMM2.
+- Final exact scatter-add in FP32 and cast to bf16.
+
+Why this solution?
+- Expected performance improvement: decode/small batch regimes can gain substantially from extra parallelism.
+- Advantages: directly targets one of the task’s listed optimization directions.
+- Disadvantages: highest correctness and implementation risk among the three due to split-K reduction complexity and atomic behavior; gains may not help benchmark mix dominated by larger T.

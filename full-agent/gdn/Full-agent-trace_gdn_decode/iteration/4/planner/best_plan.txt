@@ -1,0 +1,39 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a highly optimized CUDA kernel for the GDN decode step that maximizes GPU SM occupancy by mapping 1 thread per K-dimension element, effectively hiding L1TEX memory latencies and outperforming the 970x baseline.
+
+**Selected Outline:** Max-Occupancy 1D Block Mapping (1 Block per V-Row, 128 Threads per Block)
+
+**Rationale for Selection:**
+1.  **Data-Driven Resolution:** The parent's NCU profiling explicitly identified that while occupancy improved to 11.8%, 40-49% of cycles were still stalled on L1TEX memory dependencies.
+2.  **Mathematical Guarantee:** By expanding the thread-mapping from 4 K-elements per thread to 1 K-element per thread, we increase the active warps from 1024 to 4096 (27.6 warps/SM). This mathematically guarantees sufficient active warps to hide memory latency while maintaining perfectly coalesced 128-byte memory transactions.
+
+**Best Plan:**
+
+1.  **Phase 1: Mathematical Definition & Algebraic Model**
+    *   **Variables:** Define Grid configuration $G = (B, HV, V)$ and Block configuration $B_{dim} = (K)$. Since $K=128$ and $V=128$, the Grid is $(B, 8, 128)$ and Block is $(128)$.
+    *   **Objective Function:** Maximize SM occupancy $\mathcal{O}(G) \approx 43\%$ (4096 active warps) to minimize global memory fetch latency stall time.
+    *   **Constraints:** Thread mapping must satisfy $T_x = 128$ (4 warps) perfectly mapping to $K=128$ via scalar `float` memory loads.
+    *   **Mathematical State Update:** Retain the mathematically proven decoupled equations:
+        *   $qh_v = \sum (q \cdot state_v)$, $kh_v = \sum (k \cdot state_v)$
+        *   $dv_v = \beta \cdot (v_v - g \cdot kh_v)$
+        *   $new\_state_v = g \cdot state_v + dv_v \cdot k$
+
+2.  **Phase 2: The Optimization Loop (Kernel Execution Strategy)**
+    *   **Grid Expansion (Multi-Start Analogue):** Launch `dim3 grid(B, 8, 128)`. This spawns independent blocks for every single V-row, allowing the hardware scheduler maximal flexibility to interleave memory stalls across 148 SMs.
+    *   **Thread Execution:** Within each block, launch `dim3 block(128)`. Each thread processes exactly ONE element of $K$ (index `tx`). 
+    *   **Coalesced Memory Access:** Threads read `state` using a standard `float` load (`state_base[v_idx * 128 + tx]`). Since 32 threads in a warp read 32 contiguous floats, this mathematically perfectly matches a 128-byte L1 cache line transaction.
+    *   **Two-Stage Reduction:** 
+        *   Intra-warp: Sum $qk$, $qh$, $kh$ using `__shfl_down_sync` loop (offset 16 down to 1).
+        *   Inter-warp: The 4 warp leaders (`tx % 32 == 0`) write to a tiny 56-byte `__shared__` memory array. 
+        *   Barrier: A single `__syncthreads()` guarantees synchronization before thread 0 (or all threads) sum the 4 warp results.
+
+3.  **Phase 3: The "Safety Valve" (CRITICAL)**
+    *   **Deterministic State Initialization:** The PyTorch `state` tensor is optional. The C++ wrapper MUST enforce a deterministic validity check: `if (state.defined() && state.numel() > 0)`. If false, pass `nullptr`.
+    *   **Kernel-Level Fallback:** Inside the CUDA kernel, implement a strict conditional safety valve: `float st = 0.0f; if (state_base != nullptr) { st = state_base[v_idx * 128 + tx]; }`. This guarantees the kernel will never segfault on undefined memory and mathematically correctly defaults to a zero-state.
+    *   **Contiguity Enforcement:** The C++ wrapper MUST call `.contiguous()` on all input tensors before extracting data pointers to prevent silent memory offset corruption.
+
+4.  **Phase 4: Implementation Details**
+    *   **Libraries:** Strictly use `<cuda_bf16.h>` for hardware-accelerated types (`__nv_bfloat16`, `__bfloat162float`, `__float2bfloat16`) and `<torch/extension.h>` for the binding.
+    *   **Broadcast Optimization:** Instead of passing $v\_val$ through shared memory, have all 128 threads execute `v_val = __bfloat162float(v[...])`. The L1 cache will automatically broadcast this single address to all warps in 1 cycle, saving synchronization overhead.
+    *   **Output Write:** Restrict the final output write to `if (tx == 0) { output[...] = ... }` to prevent race conditions or redundant global memory writes.

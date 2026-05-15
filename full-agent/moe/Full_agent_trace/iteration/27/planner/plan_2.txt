@@ -1,0 +1,57 @@
+## Plan 2: Adopt Best Solution (ff4217c7) + Push Further With Aggressive GEMM1 Optimization
+
+**Objective:** Take the proven best solution (ff4217c7, score=1.0253, 2.600ms) as the base and push GEMM1 performance further since GEMM1 (K=7168) dominates compute time.
+
+### Mathematical Formulation
+
+**Variables (X):**
+- BLOCK_M, BLOCK_N ∈ {16, 32, 64, 128}: tile sizes
+- num_stages ∈ {3, 4, 5, 6}: software pipeline depth for GEMM1 K-loop
+- num_warps ∈ {4, 8}: warp count
+
+**Constraints (C):**
+- BLOCK_K = 128 (fixed for FP8 block-scale alignment)
+- All pointer arithmetic in int64
+- GEMM2 uses per-tile scalar FP8 quantization (proven correct in ff4217c7)
+- n_block_idx = pid_n only valid when BLOCK_N = 128 (must restrict configs)
+
+**Objective f(X):**
+- Minimize t_GEMM1 + t_GEMM2
+- GEMM1 is ~60% of kernel time (H=7168 >> I=2048)
+- Target: 10-15% improvement in GEMM1 via aggressive pipelining
+
+### Solver Strategy: Autotuning + Software Pipelining Expansion
+
+1. **Key Change 1: Expand autotune configs for GEMM1**
+   - Add `num_stages=5, 6` for aggressive software pipelining
+   - Add `num_warps=16` for high-occupancy large-tile configs
+   - Keep `key=['MAX_TK']` for workload-aware selection
+   
+2. **Key Change 2: Use `tl.range()` with explicit `num_stages` for GEMM1 K-loop**
+   - Change inner loop from `range(0, H, BLOCK_K)` to `tl.range(0, H, BLOCK_K, num_stages=META['num_stages'])`
+   - This enables hardware prefetching to hide memory latency
+   
+3. **Key Change 3: GEMM2 FP8 TC (carry forward from ff4217c7)**
+   - Keep per-tile scalar FP8 quantization: `c_scale = max(|c|) / 448.0`
+   - Keep `n_block_idx = pid_n` optimization
+   - Keep `tl.range(0, I, BLOCK_K, num_stages=4)` for GEMM2 K-loop
+
+4. **Key Change 4: Fix potential GEMM2 n_block_idx safety**
+   - The `n_block_idx = pid_n` shortcut assumes BLOCK_N=128 always
+   - Restrict all GEMM2 autotune configs to BLOCK_N=128 ONLY
+   - This prevents silent correctness bugs if autotuner explores other values
+
+### Validity Mechanism
+- BLOCK_N=128 is hardcoded for GEMM2 to ensure `n_block_idx = pid_n` is always correct
+- `torch.zeros` for G1 and O buffers ensures masked rows contribute 0
+- All pointer arithmetic uses `.to(tl.int64)` before multiplication
+- FP8 clamp: `c_scale = tl.maximum(c_abs_max / 448.0, 1e-12)` prevents div-by-zero
+- Routing unchanged from ff4217c7 (proven correct)
+
+### Why This Solution?
+**Expected improvement:** 10-20% GEMM1 speedup from num_stages=5,6 → target 2.2-2.3ms overall
+**Advantages:** Conservative, builds on proven correct solution; low implementation risk
+**Disadvantages:** Diminishing returns — autotuner in ff4217c7 already found optimal for its search space; adding more configs only helps if new configs are strictly better
+**Estimated score improvement:** 0.87-0.95 → total score ~1.1-1.2 if GEMM1 improves by 15%
+
+**Verdict: MODERATE RISK, HIGH FEASIBILITY - Good incremental improvement**

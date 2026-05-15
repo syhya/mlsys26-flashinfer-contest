@@ -1,0 +1,49 @@
+### Outline 2: Worklist-Based GEMM2 Compaction + Parent Fallback
+
+**Mathematical Formulation**
+- **Variables ($X$):**
+  - Routing solution: `sorted_tokens`, `sorted_experts`, `sorted_weights`
+  - CSR dispatch arrays: `expert_counts`, `expert_offsets`
+  - Compact worklist arrays: `work_experts[u]`, `work_tiles[u]`
+  - GEMM1 output `G1 \in R^{Tk x 4096}`
+  - GEMM2 output `O \in R^{Tk x 7168}`
+- **Constraints ($C$):**
+  1. Routing semantics exactly equal reference.
+  2. GEMM1 math unchanged: FP8 dot with per-128 post-scale multiplication in FP32.
+  3. GEMM2 math unchanged from parent except launch topology.
+  4. Worklist must enumerate exactly the active `(expert, tile_row)` pairs:
+     \[
+     U = \{(e, r) \mid 0 \le e < 32,\ 0 \le r < \lceil count_e / B_M \rceil\}
+     \]
+  5. Output scatter-add unchanged.
+- **Objective ($f(X)$):** Minimize wasted CTAs in GEMM2:
+  \[
+  f(X) = L_{total} \approx L_{fixed} + \alpha \cdot |U| \cdot N_{tiles} + \beta \cdot memory(X)
+  \]
+  where `|U|` should be much smaller than dense expert-grid tiles when routing is skewed.
+
+**Solver Strategy**
+- Use a **deterministic combinatorial compaction solver**:
+  1. Compute `expert_counts` via `torch.bincount`.
+  2. Solve active-tile enumeration exactly with vectorized integer arithmetic.
+  3. Use Triton worklist GEMM2 kernel indexed by compact work item id.
+  4. Choose between worklist GEMM2 and dense grouped GEMM2 by comparing:
+     \[
+     active\_tiles = \sum_e \lceil count_e / B_M \rceil,
+     dense\_tiles = 32 \cdot \lceil max(count_e) / B_M \rceil
+     \]
+     Use worklist iff `active_tiles <= 0.75 * dense_tiles`.
+- This is an exact dispatch optimization, not a random heuristic.
+
+**Validity Mechanism**
+- Deterministic repair/fallback:
+  1. Verify CSR offsets are monotone and sum to `Tk_total`.
+  2. Verify worklist length equals `sum(tiles_per_expert)`.
+  3. If any check fails, route execution to the parent grouped GEMM2 kernel.
+  4. Keep zero-output fallback for empty routing.
+- Maintain int64 Triton pointer arithmetic and FP32 accumulators unchanged.
+
+**Why this solution?**
+- **Expected performance improvement:** Eliminates empty expert-grid CTAs in skewed workloads, directly targeting the parent summary’s largest missing structural optimization.
+- **Advantages:** Preserves proven math, changes only dispatch geometry, naturally robust with parent fallback.
+- **Disadvantages:** Moderate implementation complexity; possible overhead for building worklists if workload is already dense.

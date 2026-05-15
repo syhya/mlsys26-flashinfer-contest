@@ -1,0 +1,34 @@
+### Outline 2: Hybrid Library GEMM with Cached Exact Weight Dequantization and Batched Expert Processing
+
+**Mathematical Formulation**
+- **Variables (X):**
+  - Exact routing variables as in the task definition.
+  - CSR dispatch variables over active local expert assignments.
+  - Per-expert exact dequantized weight caches `W1_e`, `W2_e`.
+  - Intermediate tensors `G1_e`, `C_e`, `O_e`.
+  - Output `Y`.
+- **Constraints (C):**
+  1. Routing must exactly match DeepSeek no-aux topology.
+  2. Hidden-state scales must be indexed by original token id.
+  3. Weight scales applied blockwise over 128-element blocks only.
+  4. All GEMMs accumulate in FP32.
+  5. No dynamic requantization of SwiGLU output.
+- **Objective (f(X)):** minimize total wall time = dispatch cost + dequant cost + GEMM cost + scatter cost, subject to exactness.
+
+**Solver Strategy**
+- Deterministic decomposition:
+  1. Solve routing and dispatch exactly with PyTorch ops.
+  2. Solve per-expert linear algebra with PyTorch library GEMMs (`torch.mm`, `torch.addmm`) using exact dequantized active slices.
+  3. Cache dequantized weights lazily to amortize cost across reused experts.
+- Optional deterministic branching based on `Tk_e` to choose between direct dequant and chunked dequant.
+
+**Validity Mechanism**
+- Exact dequant helper functions define the projection from FP8+scales to FP32 tensors.
+- Routing and scatter are pure PyTorch tensor ops, minimizing crash risk.
+- A final projection step casts `output.float()` to BF16 only once.
+- If cache allocation exceeds a conservative memory threshold, disable cache and process one expert at a time.
+
+**Why this solution?**
+- **Expected performance improvement:** should outperform the current child by reducing repeated weight rematerialization and by using better library GEMM scheduling, while staying fully exact.
+- **Advantages:** much simpler than Triton; highly robust; easy to debug against the exact parent-child mismatch checkpoints.
+- **Disadvantages:** unlikely to reach score >= 1.0 alone; still bottlenecked by dequant bandwidth and per-expert loops.

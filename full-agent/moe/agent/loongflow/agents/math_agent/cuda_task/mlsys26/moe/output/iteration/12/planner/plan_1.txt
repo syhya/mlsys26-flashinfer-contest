@@ -1,0 +1,29 @@
+Outline 1: Correctness-first dense reference using solver-style decomposition
+
+Mathematical Formulation:
+- Variables (X):
+  - R in R^{T x 256}: routing probabilities after sigmoid+bias pruning logic.
+  - S_tok in {0,1}^{T x 256}: top-k routing selection mask constrained by DeepSeek group-topk rules.
+  - D1_e in R^{4096 x 7168}, D2_e in R^{7168 x 2048}: dequantized expert weights.
+  - A in R^{T x 7168}: dequantized hidden states.
+  - Y in R^{T x 7168}: final output.
+- Constraints (C):
+  - Routing exactly matches reference semantics: sigmoid(logits), add bias only for ranking, group top-2 sum, top-4 groups, then top-8 experts globally among allowed groups.
+  - Final expert weights use raw sigmoid values normalized over selected experts and multiplied by routed_scaling_factor.
+  - FP8 block-scale dequantization is exact per 128-block: val = fp8 * scale.
+  - GEMM accumulations are FP32.
+  - Output dtype is bf16 only at the very end.
+- Objective f(X): maximize correctness first (drive numerical mismatch to zero wrt reference), then reduce runtime by batching dense operations.
+
+Solver Strategy:
+- Use deterministic batched linear algebra only: torch.einsum / torch.matmul after exact dequantization.
+- This is a convex linear evaluation pipeline once routing indices are fixed; no stochastic search.
+
+Validity Mechanism:
+- Build exact dequant helpers that materialize f32 hidden states and weights using repeat_interleave(128) on scale blocks.
+- Use purely vectorized PyTorch operations; no Triton indexing risk.
+- Add strict fallback: if any shape/stride assumption fails, use straightforward loops over experts with torch.matmul in FP32.
+
+Why this solution?
+- Advantages: least likely to crash; most likely to fix the persistent large absolute error by removing all custom-kernel masking/indexing bugs.
+- Disadvantages: likely too slow and memory-heavy; probably will not beat baseline enough for score >= 1.0, but best for debugging correctness.

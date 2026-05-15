@@ -1,0 +1,74 @@
+{
+  "total_generated_solutions": 6,
+  "total_valid_solutions": 6,
+  "island_feature_map": [
+    {
+      "2-0-2": "3129f60d",
+      "3-0-3": "0120d19c",
+      "3-2-3": "ca3abdbd",
+      "2-0-3": "3ebad604"
+    }
+  ],
+  "islands": [
+    [
+      "3129f60d",
+      "c93d7a5e",
+      "0120d19c",
+      "3c4a2a91",
+      "ca3abdbd",
+      "3ebad604"
+    ]
+  ],
+  "elites": [
+    "3ebad604",
+    "0120d19c",
+    "3129f60d",
+    "ca3abdbd"
+  ],
+  "best_solution_id": "3ebad604",
+  "island_best_solution": [
+    "3ebad604"
+  ],
+  "last_iteration": 6,
+  "current_island": 0,
+  "island_capacity": [
+    6
+  ],
+  "last_migration_generation": 0,
+  "feature_stats": {
+    "complexity": {
+      "min": 8881.0,
+      "max": 12787.0,
+      "values": [
+        8881.0,
+        10514.0,
+        12121.0,
+        12448.0,
+        12787.0,
+        11434.0
+      ]
+    },
+    "score": {
+      "min": 10.646692843191191,
+      "max": 51.62353906388493,
+      "values": [
+        10.646692843191191,
+        28.520760463476552,
+        43.01138098085707,
+        44.50928549046001,
+        50.09503559409295,
+        51.62353906388493
+      ]
+    },
+    "diversity": {
+      "min": 381.84000000000003,
+      "max": 772.6,
+      "values": [
+        772.6,
+        607.7666666666667,
+        549.725,
+        381.84000000000003
+      ]
+    }
+  }
+}

@@ -1,0 +1,44 @@
+### Outline 1: Frontier Rebase + Native GEMM2 Solver + Deterministic Scatter
+
+**Mathematical Formulation**
+- **Variables ($X$):**
+  - Routing assignment tensors: `topk_idx`, `weights`, `sorted_tokens`, `sorted_experts`, `expert_offsets`
+  - GEMM1 output `G1 \in R^{Tk x 4096}`
+  - SwiGLU activation `C \in R^{Tk x 2048}`
+  - GEMM2 output `O \in R^{Tk x 7168}`
+- **Constraints ($C$):**
+  1. Routing must exactly implement DeepSeek no-aux topology: sigmoid -> group top2 sum -> top4 groups -> global top8 experts.
+  2. GEMM accumulation must be FP32.
+  3. FP8 block scales must be applied per 128 block using original global token ids for `hidden_states_scale`.
+  4. Output shape `[T, 7168]`, dtype `bfloat16`.
+  5. No invalid expert accesses outside local range `[local_expert_offset, local_expert_offset + 32)`.
+- **Objective ($f(X)$):** Minimize forward latency
+  \[
+  f(X) = L_{route} + L_{dispatch} + L_{gemm1} + L_{swiglu} + L_{gemm2} + L_{scatter}
+  \]
+  subject to all correctness constraints above.
+
+**Solver Strategy**
+- Use a **deterministic hybrid solver**:
+  1. Keep routing as exact vectorized PyTorch solver.
+  2. Keep custom Triton FP8 GEMM1 solver with post-dot scale application.
+  3. Replace custom GEMM2 kernel with a standard native solver path using `torch._scaled_mm` when available or `torch.mm` on dequantized/FP16-packed activations as a fallback.
+  4. Use a piecewise dispatch policy based on `Tk_total` and per-expert counts.
+- This is effectively a **mixed exact + piecewise optimization solver** rather than heuristic tuning.
+
+**Validity Mechanism**
+- Build a deterministic fallback ladder:
+  1. Preferred: native GEMM2 path (`torch._scaled_mm` / packed matmul).
+  2. Fallback: existing proven Triton grouped GEMM2 kernel.
+  3. Fallback for empty routing: zero output.
+- Run explicit invariant checks:
+  - `expert_offsets[0] == 0`
+  - `expert_offsets[-1] == Tk_total`
+  - monotonic offsets
+  - local token count consistency with bincount sum
+- If any invariant fails, revert to parent path unchanged.
+
+**Why this solution?**
+- **Expected performance improvement:** Native vendor-tuned GEMM2 may outperform current tilewise quantized Triton GEMM2, especially on B200.
+- **Advantages:** Lowest implementation risk among structural changes; preserves parent correctness-critical routing/GEMM1; deterministic fallback keeps score >= 1.0 likely.
+- **Disadvantages:** `torch._scaled_mm` behavior can be version-sensitive; exact FP8/block-scale mapping may be awkward; may not beat the best custom path if packing overhead is high.

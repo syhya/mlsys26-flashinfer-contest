@@ -1,0 +1,20 @@
+**1. Executive Summary:**
+This iteration was a clear regression because the chunked eager dequantization plan increased launch and memory overhead without unlocking any native FP8 acceleration, performing 1st out of 1 siblings but substantially worse than its parent.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* `**Sibling Rank:**` 1 out of 1 children. Top sibling score: 8.61%.
+* `**Score Delta:**` From parent (15.22%) to child (8.61%).
+* `**Key Change:**` Replaced the parent’s full per-expert FP32 weight materialization with chunked per-expert dequantization for GEMM1 and GEMM2, including adaptive chunk sizes, per-expert scale caches, and direct slice-wise scatter-add into the output.
+* `**Core Metrics:**` Correctness: 1.0; speedup: 0.86x; kernel execution time: 61.674ms; reference time: 18.430ms; parent kernel time: 14.543ms; eval time: 416.71s; benchmark max absolute error: 4096.0; benchmark max relative error: 33593752.0; total workloads: 19.
+
+**3. Strategic Analysis (The "So What?"):**
+* `**Root Cause:**` The regression was driven by both plan and execution realities, but primarily by plan quality. The plan assumed chunking would recover the parent’s lost throughput; in practice, it preserved the same serial eager-PyTorch architecture while adding more small dequant/matmul/index_add phases and retaining Python expert loops. Execution appears faithful to that design.
+* `**Key Insight:**` Chunking alone is not a performance strategy for this workload when the backend remains eager FP32 matmul over dequantized slices. It reduces peak materialization, but it also amplifies kernel-launch overhead, scale expansion overhead, and repeated memory traffic. The useful concept to salvage is narrower: unique-token activation reuse remains valuable, and direct slice-wise accumulation can reduce temporary output storage, but neither compensates for the absence of a true high-throughput FP8/Tensor Core path.
+* `**Identified Risk:**` The biggest trap is continuing to optimize within the same low-level architecture family of serial per-expert eager dequantized GEMMs. This line is now demonstrating diminishing returns: each safety-oriented refinement lowers memory footprint yet further degrades wall-clock latency, while artifact-level error statistics remain suspiciously large despite reported correctness pass flags.
+
+**4. Actionable Guidance (The "What's Next?"):**
+* `Recommend Stripping:` Strip the adaptive chunk-size and full expanded-scale caching strategy from this lineage as a central optimization direction. It adds control complexity and memory traffic without addressing the dominant bottleneck: lack of fused high-throughput compute.
+* `Recommend Fusion:` Fuse the child’s strongest reusable idea—unique-token activation dequant caching—into a faster lineage that already has a credible FP8 or grouped-GEMM backend, rather than keeping it inside an eager FP32 execution loop.
+* `Recommend Exploration:` Explore a stage-isolation experiment: keep routing/dispatch exactly as in this child, but swap only GEMM1 or only GEMM2 to a native backend (`torch._scaled_mm` or a tightly scoped Triton kernel) while leaving the other stage as the safe oracle. This will identify which stage can recover speed without reintroducing the older structural bug.
+* `Recommend Fusion:` Use this solution as a memory-bounded oracle for validating chunk-local dequant semantics against faster candidates. In particular, compare expert-by-expert outputs before and after SwiGLU to determine whether a future fast path should target pre-SwiGLU GEMM1, post-SwiGLU GEMM2, or weighted scatter-add.
+* `Warn:` Do not treat the evaluator’s `correctness: 1.0` field as sufficient evidence of a numerically healthy implementation. The reported max absolute error doubled to 4096.0 and max relative error exploded, so future planners should regard this child as performance-regressive and numerically suspect at the artifact level, not as a stable optimization base.

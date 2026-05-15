@@ -1,0 +1,17 @@
+[
+  {
+    "round": 0,
+    "candidates": [
+      {
+        "round_idx": 0,
+        "candidate_idx": 0,
+        "random_idx": "_5a1",
+        "solution_file_path": "output/d1760fdf-53cb-46aa-a533-e328a031a276/21/executor/0_0/solution_5a1.py",
+        "evaluation_file_path": "output/d1760fdf-53cb-46aa-a533-e328a031a276/21/executor/0_0/evaluation_5a1.json",
+        "score": 7.881885709007441,
+        "reason": "{\n  \"status\": \"success\",\n  \"summary\": \"Optimization successful! Speedup: 78.82x (ref: 2.191ms, kernel: 0.028ms)\",\n  \"score\": 7.881885709007441,\n  \"metrics\": {\n    \"correctness\": 1.0,\n    \"speedup\": 78.8188570900744,\n    \"exec_time_ms\": 0.028125369565217388,\n    \"baseline_time_ms\": 2.1906651376811594,\n    \"compile_time\": 0.0,\n    \"eval_time\": 231.72291445732117\n  },\n  \"artifacts\": {\n    \"eval_backend\": \"modal+flashinfer-bench\",\n    \"task_id\": \"dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64\",\n    \"execution_time\": \"231.72s\",\n    \"kernel_latency_ms\": \"0.028ms\",\n    \"reference_latency_ms\": \"2.191ms\",\n    \"speedup\": \"78.82x\",\n    \"bench_stats\": {\n      \"reference_latency_ms\": 2.1906651376811594,\n      \"max_relative_error\": 2.034210205078125,\n      \"max_absolute_error\": 0.0078125,\n      \"total_workloads\": 23\n    },\n    \"correctness_check\": \"Passed\",\n    \"ncu_profile\": {\n      \"ncu_set\": \"full\",\n      \"ncu_page\": \"details\",\n      \"ncu_kernel_name\": null,\n      \"rows\": [\n        {\n          \"workload_uuid\": \"0c23b10c7b7645719517828c12eaa1d2\",\n          \"axes\": {\n            \"num_tokens\": 1,\n            \"num_pages\": 8462\n          },\n          \"output\": \"==PROF== Connected to process 1283 (/opt/conda/envs/py312/bin/python3.12)\\n\\n==ERROR== An error was reported by the counter measurement library:\\n==ERROR== For more information, see /tmp/nsight-compute-3e8a-04bc.log\\n==ERROR== Failed to initialize the profiler: LibraryNotLoaded. Check that a compatible driver library is loaded.\\n==ERROR== For more information, see /tmp/nsight-compute-3e8a-04bc.log\\n==PROF== Trying to shutdown target application\\n==ERROR== The application returned an error code (9).\\n\"\n        }\n      ]\n    }\n  }\n}",
+        "source": "disk"
+      }
+    ]
+  }
+]

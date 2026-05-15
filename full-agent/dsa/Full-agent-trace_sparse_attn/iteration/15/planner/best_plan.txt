@@ -1,0 +1,377 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Implement a more robust and faster CUDA kernel for `dsa_forward` that preserves exact sparse-attention semantics, guarantees correctness (`score >= 1.0`), and improves especially on the profiler-identified weak regime: very small `num_tokens`, where the current split-K path underfills the GPU and still has avoidable workspace inefficiency.
+
+**Selected Outline:** Hybrid robust redesign with small-workload persistent split-head kernel and corrected vectorized workspace path.
+
+**Rationale for Selection:**
+1. It is the most algorithmically robust because it keeps the already-successful large-workload fused kernel structure and only redesigns the weakest path.
+2. It directly addresses two hard facts from the parent summary/profile: tiny-grid under-occupancy for small workloads and the unresolved `O_tmp` vectorization/layout mismatch.
+3. It uses deterministic algebraic merging of partial online-softmax states, so correctness does not rely on luck, tuning noise, or fragile heuristics.
+4. It avoids risky overreach such as a full tensor-core rewrite or architecture-fragile `cp.async` dependence, which could easily break compilation or correctness.
+
+---
+
+## Phase 1: Mathematical Definition
+
+### 1. Define the exact attention model
+For each token `t` and head `h`, define:
+- Query vector
+  - `q_nope[t,h] ∈ R^512`
+  - `q_pe[t,h] ∈ R^64`
+- For each sparse slot `j ∈ {0,...,2047}`:
+  - `idx = sparse_indices[t,j]`
+  - If `idx == -1`, this slot is invalid and must contribute exactly zero.
+  - Else:
+    - `page = idx / 64`
+    - `offset = idx % 64`
+    - `k_nope[idx] = ckv_cache[page, offset, :] ∈ R^512`
+    - `k_pe[idx] = kpe_cache[page, offset, :] ∈ R^64`
+
+The unscaled score variable is:
+- `s_j = dot(q_nope[t,h], k_nope[idx]) + dot(q_pe[t,h], k_pe[idx])`
+
+The scaled logit is:
+- `z_j = sm_scale * s_j`
+
+The output is:
+- `w_j = exp(z_j) / Σ_valid exp(z_j)`
+- `out[t,h] = Σ_valid w_j * k_nope[idx]`
+
+The required log-sum-exp output is in base 2:
+- `lse[t,h] = log2(Σ_valid exp(z_j))`
+
+### 2. Define the online-softmax state variables
+For each `(t,h)` or partial chunk thereof, maintain FP32 state:
+- `m ∈ R` : running maximum of logits
+- `l ∈ R_+` : renormalized exponential sum
+- `O ∈ R^512` : renormalized weighted sum accumulator
+
+Online update for one valid key with logit `z` and value `v = k_nope[idx]`:
+- `m_new = max(m, z)`
+- `alpha = exp(m - m_new)` if `m != -INF`, else `0`
+- `beta = exp(z - m_new)`
+- `l_new = l * alpha + beta`
+- `O_new = O * alpha + beta * v`
+
+Final normalization:
+- if `l > 0`, `out = O / l`
+- else `out = 0`
+
+Final base-2 LSE:
+- if `l > 0`, `lse = m * log2(e) + log2(l)`
+- else `lse = -INF`
+
+### 3. Define chunk-merge algebra for split processing
+For partial results A and B with states `(m_a, l_a, O_a)` and `(m_b, l_b, O_b)`, define the exact merge:
+- `m = max(m_a, m_b)`
+- `scale_a = 0 if m_a == -INF else exp(m_a - m)`
+- `scale_b = 0 if m_b == -INF else exp(m_b - m)`
+- `l = l_a * scale_a + l_b * scale_b`
+- `O = O_a * scale_a + O_b * scale_b`
+
+This merge is mathematically exact for online softmax summaries and is the core validity guarantee for any split-K / split-head / persistent decomposition.
+
+### 4. Variables, Constraints, Objective
+- **Variables (X):**
+  1. Runtime dispatch path `p ∈ {small_path, large_path}`
+  2. Small-path decomposition parameters: `chunks_per_block`, `heads_per_block`, `partial_count`
+  3. Workspace layout parameters for `O_tmp`, `m_tmp`, `l_tmp`
+  4. Large-path block geometry retained near current best implementation
+- **Constraints (C):**
+  1. Exact sparse masking for `-1`
+  2. FP32 accumulation and reduction only
+  3. BF16 output only at final store
+  4. Base-2 LSE required
+  5. ABI/signature/module binding fixed exactly as required
+  6. Explicit BF16 conversion intrinsics only; no implicit casts
+- **Objective `f(X)`:**
+  Minimize kernel latency while preserving numerical correctness and avoiding invalid outputs or compilation failures.
+
+---
+
+## Phase 2: The Optimization Loop
+
+### Step 1: Keep the parent’s strong large-workload path as baseline
+Do **not** redesign the successful large path from scratch.
+- Preserve the current single-pass fused online-softmax kernel for larger `num_tokens`.
+- Keep its register-resident query fragments and FP32 recurrence.
+- Only perform low-risk cleanup there, such as consistent explicit conversion intrinsics and possibly minor index arithmetic simplification.
+
+Reason:
+- The current parent already reaches ~45x speedup overall.
+- Large-workload kernel profiling shows it is reasonably occupied and already the stable part.
+- Full replacement increases crash/correctness risk with uncertain benefit.
+
+### Step 2: Replace the current low-workload split-K path with an occupancy-first decomposition
+The current small-path launches too few blocks when `num_tokens` is tiny. Redesign it so total block count scales with both chunks and head groups, not just tokens.
+
+Implement:
+- Grid dimensions for small path like:
+  - `grid.x = num_tokens`
+  - `grid.y = num_head_groups`  (e.g. 4 or 8)
+  - `grid.z = num_chunk_groups` (partition the 2048 sparse slots)
+- Each block handles one `(token, head_group, chunk_group)`.
+- Each warp handles exactly one head or one partial head accumulation, depending on chosen mapping.
+
+Recommended concrete decomposition:
+- 16 heads total.
+- Use `heads_per_block = 4` or `8` to multiply block count on tiny workloads.
+- Keep chunk size at 32 sparse entries to match the natural tile and existing logic.
+- Choose enough `chunk_groups` so even `num_tokens=1` launches substantially more than 148 blocks when possible.
+
+Example target logic:
+- For `num_tokens <= 8`, use overdecomposition with many chunk groups and smaller head groups.
+- For moderate small workloads, use fewer chunk groups but still more grid dimensions than the current `(S, num_tokens)` shape.
+
+### Step 3: Use exact partial-state accumulation, not approximate partial output accumulation
+In the small path, each block should compute a valid partial state:
+- `m_partial[t, head, part]`
+- `l_partial[t, head, part]`
+- `O_partial[t, head, part, 512]`
+
+The reduce kernel must merge these partial states using the exact merge equations above.
+
+Important:
+- Do **not** normalize inside the compute kernel.
+- Do **not** average partial outputs directly.
+- Only normalize after all partial states are merged.
+
+This keeps the method mathematically exact and avoids subtle correctness loss.
+
+### Step 4: Fix the workspace layout mismatch explicitly
+The parent summary identified the unresolved high-leverage issue: `O_tmp` write pattern is not ideally aligned with its reduction read pattern.
+
+Plan:
+- Store partial accumulators in a layout that is **natively float4-packed and contiguous** in the dimension read by the reducer.
+- Use a logical layout like:
+  - `O_tmp[num_tokens][16][num_parts][128]` where each element is `float4`
+  - equivalently flattened as contiguous `float` memory but always indexed in units of `float4`
+- In compute kernel:
+  - each lane writes one contiguous `float4` pack at a time
+  - no scalar or `float2` partial-store path for `O_tmp`
+- In reduce kernel:
+  - load the same `float4` packs with matching indexing
+
+This is the main memory-traffic repair step.
+
+### Step 5: Use deterministic dispatch instead of heuristic randomness
+Use a simple runtime decision rule:
+- `if num_tokens < threshold_small -> small_path`
+- else `large_path`
+
+Recommended initial threshold:
+- Start with `threshold_small = 128` to preserve current behavior.
+- But permit a refined threshold around `32`, `64`, or `96` if executor sees that the new small path is strong enough.
+
+This is not random search; it is a finite deterministic choice among a very small candidate set.
+
+### Step 6: In the small path, prioritize occupancy and coalescing over maximal per-block work
+Concrete implementation guidance:
+- Use smaller blocks than the current `32 x 16 = 512 threads` where that helps occupancy.
+- Candidate safe shapes:
+  - `blockDim = (32, 4)` => 128 threads
+  - `blockDim = (32, 8)` => 256 threads
+- Each warp still reduces over the 576-dimensional dot product in pieces.
+- Reuse current good pattern of `__shfl_down_sync` for warp reduction.
+- Keep per-thread register pressure under control by not assigning too many heads per block.
+
+The goal is to avoid the severe tiny-grid underfill seen in profiling.
+
+### Step 7: Preserve explicit vectorization where safe
+Continue using 128-bit vectorized access where alignment is guaranteed:
+- For cache loads from `ckv_cache` and `kpe_cache`, use `float4` or equivalent 16-byte loads for BF16 data blocks when address alignment is valid.
+- For output stores, pack final BF16 values in pairs or wider vectors where safe.
+- For workspace `O_tmp`, enforce `float4` alignment in both write and read kernels.
+
+Avoid fragile vectorization when alignment cannot be guaranteed.
+
+---
+
+## Phase 3: The "Safety Valve" (CRITICAL)
+
+### Safety Valve 1: Deterministic masking repair
+Before any cache load in every kernel:
+- Read `idx = sparse_indices[...]`
+- If `idx == -1`:
+  - skip dot product update entirely, or
+  - set the partial row contribution to neutral state
+
+Neutral partial state must be:
+- `m = -INF`
+- `l = 0`
+- `O = 0`
+
+This guarantees invalid sparse slots never contaminate results.
+
+### Safety Valve 2: Exact reduction repair via algebraic merge
+After computing all partial states in the small path, the reduce kernel must:
+1. Load all `m_partial`, `l_partial`, `O_partial`
+2. Merge them with the exact online-softmax merge rule
+3. Normalize only once at the very end
+4. Write `lse` as base-2 `m*log2(e)+log2(l)`
+
+If any partial had no valid keys, its `m=-INF` forces its scaling factor to zero and removes it exactly from the final result.
+
+### Safety Valve 3: Empty-row fallback
+If a head has no valid sparse indices at all:
+- all merged partials produce `l = 0`
+- then output:
+  - `out[t,h,:] = 0`
+  - `lse[t,h] = -INF`
+
+This must be implemented explicitly and deterministically.
+
+### Safety Valve 4: Architecture-safe implementation
+Do **not** rely on architecture-fragile instructions unless guarded.
+- No mandatory `cp.async`
+- No mandatory tensor-core inline PTX for this iteration
+- Use standard CUDA + warp shuffles + vectorized memory operations only
+
+This reduces compile risk substantially.
+
+### Safety Valve 5: ABI and datatype enforcement
+The final code must preserve:
+- exact C++ function signature
+- required includes
+- required `PYBIND11_MODULE`
+- BF16 explicit conversion intrinsics only
+- output dtype and shape exactly as specified
+
+This is necessary to ensure the kernel loads and gets scored at all.
+
+---
+
+## Phase 4: Implementation Details
+
+### 1. Libraries and headers to use
+Use only standard CUDA / PyTorch extension headers already acceptable in the environment:
+- `#include <torch/extension.h>`
+- `#include <cuda_bf16.h>`
+- `#include <cuda_runtime.h>` if needed
+- `#include <tuple>`
+- optionally `#include <ATen/cuda/CUDAContext.h>` only if executor needs stream helpers, but avoid if unnecessary
+
+Do **not** introduce obscure dependencies.
+
+### 2. Core helper functions to implement
+Implement small device helpers:
+- `warp_reduce_sum(float)` via `__shfl_down_sync`
+- `merge_state(...)` for combining `(m,l,O)` summaries
+- explicit BF16 load helpers using:
+  - `__bfloat162float(...)`
+  - `__bfloat1622float2(...)` or equivalent available intrinsic form
+- explicit BF16 store helpers using:
+  - `__float2bfloat16(...)`
+  - `__floats2bfloat162_rn(...)` where available
+
+### 3. Small-path kernels to implement
+Implement two kernels for the small path:
+
+#### Kernel A: `small_partial_kernel`
+Responsibilities:
+- Process one `(token, head_group, chunk_group)` block
+- Load sparse indices for the assigned chunk
+- For valid entries only, compute partial logits and update partial online-softmax state
+- Store:
+  - `m_tmp`
+  - `l_tmp`
+  - `O_tmp` in **float4-packed contiguous layout**
+
+Implementation notes:
+- Prefer `blockDim=(32,4)` or `(32,8)`
+- One warp per head is simplest and safest
+- Query vectors should be loaded once into registers per warp
+- Use shared memory only for sparse indices and optionally staged key rows
+
+#### Kernel B: `small_reduce_kernel`
+Responsibilities:
+- For each `(token, head)`, read all partial states
+- Merge states exactly
+- Normalize once
+- Write final BF16 output and FP32 base-2 `lse`
+
+Implementation notes:
+- Use 128 or 256 threads per block
+- Use contiguous `float4` loads from `O_tmp`
+- Keep reducer deterministic and branch-light
+
+### 4. Large-path kernel handling
+Retain the parent’s large fused kernel as the default for larger token counts.
+Executor should only make low-risk edits such as:
+- consistent helper usage
+- clearer vector indexing
+- preserving FP32 recurrence
+- preserving single-pass online softmax
+
+Do not replace it wholesale.
+
+### 5. Entry-point dispatch logic
+Inside `dsa_forward(...)`:
+1. Validate tensor shapes/dtypes/device assumptions if needed with lightweight `TORCH_CHECK`
+2. Allocate:
+   - `output = torch::empty({T,16,512}, q_nope.options())`
+   - `lse = torch::empty({T,16}, float32 on same device)`
+3. If `T == 0`, return immediately
+4. Else:
+   - `if T < threshold_small`: allocate small-path workspace and launch `small_partial_kernel` then `small_reduce_kernel`
+   - `else`: launch the existing fused large kernel
+
+### 6. Workspace allocation details
+For the small path, allocate workspace with an explicitly coalesced reduction-friendly shape.
+Recommended conceptual layout:
+- `m_tmp [T, 16, P]` float32
+- `l_tmp [T, 16, P]` float32
+- `O_tmp [T, 16, P, 128, 4]` float32, or flattened equivalent
+
+`P` is the number of partial chunks/head-group combinations seen by the reducer.
+The exact flattened indexing should be chosen so the reducer reads the innermost dimension contiguously as `float4`.
+
+### 7. Deterministic finite candidate loop for threshold/block choice
+If executor wants one small degree of tuning, keep it deterministic and finite, not random.
+Allowed finite candidate set:
+- thresholds `{32, 64, 96, 128}`
+- block shapes `{(32,4), (32,8)}`
+- head-group sizes `{4, 8}`
+
+Choose one simple robust setting in code; do **not** implement runtime autotuning.
+The goal is code stability, not benchmark gambling.
+
+---
+
+## Review Checklist
+
+### Does this rely on math rather than luck?
+Yes.
+- Correctness is anchored by exact online-softmax recurrence and exact merge algebra.
+- Invalid entries are eliminated by explicit neutral-state masking.
+- No stochastic search is used.
+
+### Library Check
+Yes.
+- Uses only standard CUDA / PyTorch extension facilities.
+- No obscure libraries.
+
+### Randomness Check
+No randomness is required.
+- Therefore no multi-start loop is needed.
+- Dispatch is deterministic.
+
+### Is the code implementable?
+Yes.
+- It is an incremental rewrite, not a speculative full redesign.
+- It reuses the parent’s known-good large kernel.
+- It focuses implementation effort on the low-workload path and workspace layout, where profiler evidence is strongest.
+
+---
+
+## Executor-Facing Final Instructions
+
+1. **Do not produce an unmodified copy of the parent.** The child must materially change the small-workload path.
+2. **Primary change:** redesign the low-token path into a more overdecomposed/persistent split-head partial-state kernel.
+3. **Mandatory change:** rewrite `O_tmp` storage to a float4-packed layout with exactly matching float4 loads in the reduce kernel.
+4. **Preserve:** the parent’s large fused kernel unless only low-risk cleanup is needed.
+5. **Guarantee correctness:** by using exact online-softmax merge formulas, FP32 accumulation, explicit BF16 intrinsics, and explicit empty-row fallback.
+6. **Keep the final code block self-contained** and compliant with the exact required ABI and `PYBIND11_MODULE` ending.
+
+This plan is the most robust next step because it targets the known weak path, preserves the known strong path, and replaces benchmark luck with deterministic mathematical structure.

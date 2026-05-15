@@ -1,0 +1,20 @@
+**1. Executive Summary:**
+This iteration was a major regression because its correctness-first hybrid stripped the fast Triton GEMM2 path in favor of exact per-expert PyTorch GEMM2 and chunked dequantization, collapsing throughput while only partially reducing the lineage’s block-scale semantic error, performing 1st out of 1 siblings.
+
+**2. Data-Driven Findings (Facts ONLY):**
+* `**Sibling Rank:**` 1 out of 1 children. Top sibling score: 11.23%.
+* `**Score Delta:**` From parent (80.31%) to child (11.23%).
+* `**Key Change:**` Kept Triton only for grouped GEMM1, removed the grouped Triton GEMM2 stage, and replaced downstream computation with per-expert exact SwiGLU + chunked PyTorch GEMM2 + `index_add_`, alongside dispatch validation and exact fallback logic.
+* `**Core Metrics:**` Correctness: 1.0; speedup: 1.12x; kernel execution time: 18.334ms; reference time: 18.392ms; parent kernel time: 2.854ms; benchmark max absolute error: 4096.0; benchmark max relative error: 611.729; total workloads: 19; eval time: 409.99s.
+
+**3. Strategic Analysis (The "So What?"):**
+* `**Root Cause:**` The outcome was driven primarily by plan quality. Execution appears consistent with the intended hybrid design, but the strategic choice to move nearly all heavy work into exact PyTorch downstream stages destroyed the parent’s speed advantage without achieving numerical closure. The plan succeeded as a diagnostic probe, not as a competitive solution.
+* `**Key Insight:**` The single most important lesson is that replacing GEMM2 and scatter with an oracle-like exact path reduces the catastrophic error signature from 8192.0 to 4096.0, but that reduction is still far from tolerance and comes at prohibitive runtime cost. This strongly suggests the dominant residual defect lies upstream, most plausibly in GEMM1 FP8/block-scale semantics, tensor orientation, or scale application, not just in the second projection.
+* `**Identified Risk:**` The biggest risk is drifting into a diagnostic local optimum: increasingly exact but extremely slow hybrids that help isolate faults yet are unusable for score optimization. This child demonstrates that correctness probes embedded on the hot path can consume nearly the entire latency budget while still preserving a structural mismatch.
+
+**4. Actionable Guidance (The "What's Next?"):**
+* `Recommend Fusion:` Fuse this child’s strongest idea—the exact downstream oracle—into a microdiagnostic mode only. Use tiny sampled expert/token slices to compare parent-fast GEMM1 outputs against exact GEMM1 and then exact GEMM2, while keeping the production path fully accelerated.
+* `Recommend Exploration:` Prioritize a GEMM1-centric investigation child: keep routing and exact downstream oracle fixed, but replace Triton GEMM1 with an independently trusted implementation for a bounded subset to verify whether the remaining 4096.0 error originates in W1 orientation, `tl.dot` layout, or per-block scale broadcast.
+* `Recommend Exploration:` Build a stagewise differential harness that records first-divergence tensors for one active expert: dequantized hidden rows, dequantized W1 tile, GEMM1 output block, post-SwiGLU block, and GEMM2 output block. The halved absolute error indicates partial fault removal, which is ideal for pinpointing the next semantic break.
+* `Recommend Stripping:` Strip full per-expert chunked PyTorch GEMM2 from future performance-targeting descendants. Preserve it only as an offline oracle or gated debug branch, since this path reduced speedup from 8.03x to 1.12x.
+* `Warn:` Do not infer that the evaluator’s `correctness: 1.0` metric means the semantic problem is solved. Artifact-level errors remain catastrophically above tolerance, and this lineage is now showing a pattern where slower oracle substitutions improve diagnostics but not solution fitness.

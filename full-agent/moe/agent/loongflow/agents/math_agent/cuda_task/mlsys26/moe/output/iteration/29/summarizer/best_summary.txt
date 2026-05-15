@@ -1,0 +1,50 @@
+## Strategic Summary Report — Solution `105fe0b8`
+
+---
+
+### 1. Executive Summary
+
+This iteration was a **strong performance breakthrough** because the expanded 10-config autotune search space combined with `tl.range()` software pipelining in both GEMMs unlocked a previously unreachable tile configuration, jumping from 8.03x (parent `12a8176f`) to **11.66x** speedup — dramatically outperforming all 3 siblings of the same parent (scores: 0.872, 0.239, 0.112) and crossing the score ≥ 1.0 threshold, though still trailing the lineage's best known result (`b550fc5e`, 12.01x).
+
+---
+
+### 2. Data-Driven Findings (Facts ONLY)
+
+- **Sibling Rank:** 1 out of 4 children of parent `12a8176f`. Sibling scores: `46817723`=0.872, `c6821953`=0.239, `1bb41306`=0.112. This child at 1.166 outperforms all siblings decisively.
+- **Score Delta:** From parent (0.803, 8.03x, 2.854ms) to child (1.166, 11.66x, 2.047ms): **+0.363 absolute gain (+45.2% relative improvement)**. Kernel latency improved by -0.807ms (-28.3%).
+- **Key Change:** Expanded GEMM1 autotune from 4 to 10 configs (added BLOCK_M=16, BLOCK_M=32 with num_stages=4/5, BLOCK_M=128 with num_stages=4/5), expanded GEMM2 autotune from 4 to 9 configs (all BLOCK_N=128), moved pointer base computation outside the GEMM2 K-loop, and changed GEMM2 K-loop from `range()` to `tl.range()` for software pipelining. GEMM2 uses a BF16 intermediate dequant path (`w_bf16 + c_bf16`), NOT the planned FP8 TC path.
+- **Core Metrics:**
+  - Correctness: 1.0 (Passed)
+  - Speedup: **11.660x** (parent: 8.031x; lineage best: 12.014x)
+  - Kernel latency: **2.047ms** (parent: 2.854ms; lineage best: 2.320ms)
+  - Reference latency: 17.099ms (parent: 18.748ms — ~8.8% benchmark variation)
+  - Max absolute error: 8192.0 (persistent lineage artifact, unchanged)
+  - Max relative error: 43,599,998,976 (increased vs. parent, but correctness check passed)
+  - Eval time: 60.45s (parent: 82.23s — faster, fewer configs explored)
+  - Total workloads: 19
+
+---
+
+### 3. Strategic Analysis (The "So What?")
+
+- **Root Cause:** The gain was driven primarily by **execution quality** via expanded autotuning and `tl.range()` software pipelining. The plan intended to combine FP8 TCs in GEMM2 with pipelining, but the executor fell back to a BF16 intermediate path (identical pattern to `b550fc5e`). This is the **same structural deviation** that `b550fc5e` made — yet `b550fc5e` achieved 12.01x from that same BF16+pipelining combination. The current child achieves 11.66x via the same mechanism, slightly underperforming `b550fc5e` (12.01x, 2.320ms vs 2.047ms). The architectural similarity strongly suggests the 0.35-point gap to the lineage best is primarily due to a slightly different autotuner resolution across the 10-config space under varying benchmark variance.
+
+- **Key Insight:** The single most important lesson is that **`tl.range()` software pipelining in the GEMM2 K-loop, combined with expanded multi-stage autotune configs, is the dominant performance driver in this lineage** — worth ~3.6x raw score improvement from parent. The planned FP8 TC activation quantization for GEMM2 remains unimplemented in this child (as in `b550fc5e`), meaning the ~1.5-2x GEMM2 throughput gain from FP8 TCs over BF16 is still untapped. The `ff4217c7` solution proves FP8 TCs ARE available in the eval environment via `(c / c_scale).to(tl.float8_e4m3fn)` — the executor simply produced a BF16 fallback again.
+
+- **Identified Risk:** The biggest risk is convergence to the BF16+pipelining local optimum. The lineage has now produced two nearly identical children (`b550fc5e` and `105fe0b8`) with the same code structure and very similar scores (12.01 vs 11.66). This suggests the autotuner is finding the same optimal config in both cases. Future iterations attempting to push past 12.01x via the same BF16 GEMM2 approach will face rapidly diminishing returns — the ceiling for this design appears to be ~12x.
+
+---
+
+### 4. Actionable Guidance (The "What's Next?")
+
+- **Recommend Fusion:** The highest-priority next action is combining this child's proven `tl.range()` GEMM2 pipelining with `ff4217c7`'s proven FP8 TC activation quantization. `ff4217c7` used `(c / c_scale).to(tl.float8_e4m3fn)` with `tl.dot(c_fp8, w2_fp8)` — no `tl.range()` pipelining. `b550fc5e` and `105fe0b8` use `tl.range()` but BF16 GEMM2. Neither child has combined both. The combined child should inherit GEMM1 exactly from `b550fc5e` (proven 10-config + pipelining), and GEMM2 should merge `ff4217c7`'s FP8 TC path with `b550fc5e`'s `tl.range(0, I, BLOCK_K, num_stages=4)` K-loop structure and `n_block_idx = pid_n` scalar W2-scale lookup. Expected gain: ~1.5-2x GEMM2 throughput, pushing from ~12.0x toward ~13-14x.
+
+- **Recommend Exploration:** Explore `num_warps=16` for `BLOCK_M=128, BLOCK_N=128` configs in GEMM1. B200 has higher warp-level parallelism than A100, and the current max of `num_warps=8` may not fully saturate the SM. GEMM1's K=7168 loop (56 iterations) is the dominant compute stage, so even a 5% improvement here translates directly to score gains. Add `triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=16, num_stages=4)` as a new autotune candidate.
+
+- **Recommend Exploration:** Investigate the persistent 8192.0 max absolute error. This artifact has survived every high-speed implementation across 19 workloads and is a discrete power-of-two value (2^13), strongly suggesting an integer arithmetic bug or tile boundary condition rather than floating-point precision drift. Add a targeted test: for the `seq_len=7` workload (identified in ncu profile axes), instrument per-expert max error to locate the first failing tile. The fix may be as simple as ensuring masked tiles are stored with `m_mask[:, None] & n_mask[None, :]` on ALL partial tiles — specifically the last N-tile at H=7168 where the tile boundary sits at 56×128=7168 exactly.
+
+- **Recommend Stripping:** Strip the fallback `_fallback_run` function from future performance-targeting descendants. The try/except wrapper and fallback path are dead code in normal operation, add code complexity, and may mask genuine Triton compilation errors during diagnostic iterations. Retain only for robustness-critical deployment variants.
+
+- **Warn:** Do not treat the 11.66x score in this child as evidence that further autotune expansion alone (e.g., 12+ configs) will push past `b550fc5e`'s 12.01x ceiling. The two solutions are structurally identical in their GEMM2 path; additional BF16 configs will face the same throughput limit. The only credible route to >12x is FP8 TC activation quantization in GEMM2, as shown by `ff4217c7` (which then lacked pipelining). The next child should execute the FP8 TC + pipelining fusion precisely as originally planned in this iteration's `generate_plan`.
+
+- **Warn:** The elevated max relative error (43.6B vs. parent's 14.6B) suggests that this child's GEMM2 BF16 path introduces larger relative error on low-magnitude outputs than the parent's FP32 path. While the evaluator's correctness check still passes, this is a fragility indicator. If tolerance bounds tighten in future evaluation versions, the BF16 dequant path may fail where the per-tile FP8 scalar quantization path from `ff4217c7` would not (which achieved max relative error of only 70,376 — 5 orders of magnitude lower).

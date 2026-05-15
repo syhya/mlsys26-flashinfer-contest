@@ -1,0 +1,31 @@
+Outline 3: Hybrid native-op/Triton solver using torch._scaled_mm for GEMM1 and Triton for GEMM2/scatter
+
+Mathematical Formulation
+- Variables (X):
+  1. Per-expert gathered A_e = hidden_states[token_idx_e].
+  2. Per-expert GEMM1 outputs G1_e from native scaled matmul.
+  3. SwiGLU activations S_e.
+  4. GEMM2 outputs O_e and weighted scatter-add into output.
+- Constraints (C):
+  1. Exact routing and top-k semantics.
+  2. All GEMM accumulations fp32.
+  3. Native op must consume exact per-block scales with correct layout transforms.
+  4. Final output shape [T,7168], dtype bf16.
+- Objective f(X): minimize engineering risk by outsourcing GEMM1 to vendor-optimized native FP8 op while retaining custom sparse dispatch.
+
+Solver Strategy
+- Deterministic decomposition:
+  1. Solve routing on GPU.
+  2. Partition tokens by expert.
+  3. For each active expert, invoke torch._scaled_mm or equivalent on packed views.
+  4. Use Triton/PyTorch for postprocessing and scatter-add.
+
+Validity Mechanism
+- Safety valve: if native op signature/layout mismatch is encountered, revert fully to parent implementation.
+- Validate scales by explicit shape checks and contiguous/transpose fixes before call.
+- Use only active experts and parent scatter path to guarantee correctness.
+
+Why this solution?
+- Expected improvement: Blackwell native FP8 kernels may outperform hand-rolled Triton GEMM1.
+- Advantages: potentially large upside from library kernels.
+- Disadvantages: highest integration risk; torch._scaled_mm semantics for block-scale FP8 may not align cleanly with expert batched sparse dispatch; likely extra packing overhead.

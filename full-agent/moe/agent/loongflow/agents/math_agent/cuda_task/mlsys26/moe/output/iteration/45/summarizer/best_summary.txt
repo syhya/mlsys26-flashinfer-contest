@@ -1,0 +1,21 @@
+## 1. Executive Summary:
+This iteration was a regression because the generation plan’s intended GEMM2 TMA structural optimization was not executed in the submitted code, causing it to underperform the parent and ranking behind all known siblings by default.
+
+## 2. Data-Driven Findings (Facts ONLY):
+- **Sibling Rank:** 1 out of 1 children. Top sibling score: 1.5762.
+- **Score Delta:** From parent (1.5985) to child (1.5762).
+- **Key Change:** The submitted child code is effectively a preservation of the parent’s raw-pointer GEMM1/GEMM2 kernels and routing path, with no implemented GEMM2 TMA kernel or fallback dispatch despite that being the stated plan.
+- **Core Metrics:** Correctness: 1.0; Speedup: 15.7623x; Kernel latency: 1.473ms; Parent kernel latency: 1.448ms; Baseline latency: 16.659ms; Eval time: 93.88s; Max absolute error: 32768.0; Max relative error: 3.584e11; Total workloads: 19.
+
+## 3. Strategic Analysis (The "So What?"):
+- **Root Cause:** The outcome was driven primarily by execution quality failure relative to the plan. The plan proposed adding a new GEMM2 TMA/block-pointer kernel plus deterministic fallback, but the actual child code contains neither. This means the iteration did not test the intended hypothesis and instead produced a near-parent-but-worse variant.
+- **Key Insight:** The most important lesson is that plan-to-code fidelity now matters more than idea quality. The proposed direction may still be valid, but this iteration provides almost no evidence about GEMM2 TMA because the implementation never materialized. The salvageable concept is the plan itself: GEMM2 load-path optimization remains untested, not disproven.
+- **Identified Risk:** The biggest trap is silent no-op evolution: generating a sophisticated optimization plan while submitting code that reverts to an older or simplified kernel stack. This wastes iterations and can falsely suggest an optimization direction has failed when it was never actually evaluated.
+
+## 4. Actionable Guidance (The "What's Next?"):
+- **Recommend Fusion:** Rebase the next child directly on parent `6da80c61` and preserve it byte-for-byte before adding exactly one new `grouped_gemm2_kernel_tma` path with `try/except` fallback. This isolates the GEMM2 TMA hypothesis while keeping the proven GEMM1 TMA gain.
+- **Recommend Stripping:** Remove any planned-but-unimplemented scaffolding from future iterations. If a child does not actually include the new kernel or dispatch path, do not alter surrounding code at all; submit the exact parent instead to preserve the score floor.
+- **Recommend Exploration:** Add a strict implementation checklist for executor validation: confirm presence of new kernel symbol, confirm dispatch calls it, confirm fallback exists, and confirm parent fast path remains intact. This should be treated as a pre-submission gate.
+- **Warn:** Do not interpret this regression as evidence against GEMM2 TMA. The experiment was not run. Treat the result as an execution miss, not a strategic disproof.
+- **Warn:** The frontier is close to saturation, so accidental regressions from incomplete rebases are now more damaging than low-yield micro-optimizations. Prioritize exact frontier preservation over partial edits.
+- **Warn:** Since there are no other known siblings under parent `6da80c61`, this child currently defines the only descendant evidence for that branch; its misleadingly negative signal should not be allowed to downweight the parent’s actual value without noting the implementation mismatch.

@@ -1,0 +1,19 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Maximize the performance of the GDN prefill forward pass kernel. Building upon the success of the ILP staggering in the parent, we will push optimization further by vectorizing computation via `__nv_bfloat162` intrinsics for the hot-path operations where FP32 precision isn't strictly required, combined with vectorized loads.
+
+**Mathematical Formulation:**
+*   **Objective**: Minimize execution time $E(x)$.
+*   **Variables ($X$)**: The data types and intrinsics used in the inner loop (e.g., `__nv_bfloat162` vs `float`).
+*   **Constraints ($C$)**:
+    *   $C_1$: The output must remain within the strict numerical tolerance ($rtol=1e-2, atol=1e-2$). This is the critical constraint when downcasting math.
+
+**Solver Strategy:**
+*   Identify parts of the FMA chain that can tolerate bfloat16 precision without violating the strict correctness constraint.
+*   Use `__nv_bfloat162` variables and `__hfma2` (or equivalent bf162 intrinsics) to double the arithmetic throughput for those specific parts.
+
+**Validity Mechanism:**
+*   If the BF16 math violates the correctness constraint, the executor must revert to FP32 for accumulation. However, loading/storing can definitely be vectorized using `float4` or `int4` equivalents.
+
+**Why this solution?:**
+*   Directly attacks the arithmetic density of the kernel. If successful, it effectively halves the number of FMA instructions.

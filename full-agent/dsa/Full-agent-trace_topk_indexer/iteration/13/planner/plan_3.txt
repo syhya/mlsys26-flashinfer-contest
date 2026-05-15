@@ -1,0 +1,12 @@
+Plan 3: Fused in-kernel block-level Top-K filter emitting only top-32 per (batch,page) block -> reduced CUB sort input.
+
+Mathematical: compute scores, then cub::BlockRadixSort local top-32. Reduce sort input from N=max_num_pages*64 to max_num_pages*32 = 2x reduction. Plus fast-path dispatch.
+
+Solver: In-kernel BlockRadixSort + device segmented sort.
+
+Validity: The top 2048 globally must come from union of per-page top-32 only if topk (2048) / pages >= 32 always; otherwise some top-scoring tokens from a single dense page could be missed! **Correctness risk**: if one page has 50 of the top-2048 scores, emitting only top-32 loses 18.
+
+Why: High risk of correctness failure. Reject unless emitted K >= 64 per page (which equals page size -> no reduction).
+
+Advantages: Could reduce sort cost.
+Disadvantages: Hard correctness guarantee; likely to fail 1.0 correctness.

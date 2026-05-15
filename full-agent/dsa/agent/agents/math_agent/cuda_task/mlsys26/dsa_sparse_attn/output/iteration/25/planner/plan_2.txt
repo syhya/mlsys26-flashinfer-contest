@@ -1,0 +1,15 @@
+PLAN 2: Reduce S (partitions) from 64 to 32 in split-K path
+
+Mathematical model:
+- Variables X: S (partitions), each covering 2048/S sparse slots.
+- Constraints C: 2048 mod S == 0; each partition runs exact online softmax over its slots; exact merge; FP32; BF16 output; base-2 lse.
+- Objective f(X): minimize total latency = compute_kernel_time(S) + reduce_kernel_time(S). Compute time ~ constant (total work same). Reduce time scales with S. Workspace allocation scales with S.
+
+Solver strategy: Switch S=64 → S=32. Each split_k_compute block processes 64 sparse slots instead of 32 (two 32-slot tiles inside each block). Reducer iterates 32 partitions instead of 64, halving reducer iterations and workspace memory traffic.
+
+Validity: Exact online-softmax merge is associative, so any partition count works. Must update the inner compute kernel to loop over 2 tiles of 32 indices (reusing smem_Kc/Kp sequentially). Update m_tmp/l_tmp/O_tmp shape to [T,16,32] and [T,32,16,512]. Reducer trivially adapted.
+
+Why: Directly cuts reducer work in half, and workspace write volume in half. Compute kernel total flops unchanged. Strong structural argument for smaller reducer latency, which currently dominates at T=1.
+
+Advantages: Mathematically guaranteed same result; halves HBM traffic for O_tmp.
+Disadvantages: Compute kernel becomes slightly more complex (two-tile loop) and may have less parallelism at T=1 (32 blocks vs 64 blocks × 16 heads = still plenty: 32×1×16=512 warps? Actually grid is (S, T), block (32,16)=16 warps, so 32*1*16=512 warps for T=1 — fine).

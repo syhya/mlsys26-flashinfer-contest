@@ -1,0 +1,40 @@
+Outline 2: Two-Warp-Per-Head Cooperative Kernel with Deterministic Merge
+
+Mathematical Formulation
+- Variables X:
+  - Partition of the 576-dimensional query/key dot product into two subspaces:
+    - warp A handles first 288 dims,
+    - warp B handles second 288 dims.
+  - Per warp partial dot p_w, merged logit z = sum_w p_w.
+  - Online softmax state (m, l, O) in FP32 for each (token, head).
+- Constraints C:
+  - Exact same semantics as reference attention over valid sparse indices only.
+  - page = idx >> 6, offset = idx & 63.
+  - No invalid index may contribute.
+  - O accumulates value vectors from ckv_cache only, normalized by online softmax.
+  - lse returned in base-2.
+  - Final output converted to bf16 only at store.
+- Objective f(X):
+  - Reduce per-thread register footprint by splitting query fragments and dot-product work across two warps.
+  - Increase warp eligibility and occupancy without changing mathematical result.
+
+Solver Strategy
+- Structured decomposition of one large reduction into two deterministic partial reductions followed by a fixed merge.
+- No stochastic search; algorithm is a fixed parallel reduction scheme.
+- Compare this scheme against the baseline one-warp-per-head scheme under a static dispatch rule.
+
+Validity Mechanism
+- Merge step is exact FP32 summation of the two warp partial dots before softmax update.
+- Keep a single authoritative online state per head to prevent mismatch.
+- If cooperative communication introduces complexity, use shared memory handoff plus __syncthreads for determinism.
+- Provide fallback to baseline fused kernel if block shape assumptions are violated.
+
+Why this solution?
+- Expected improvement:
+  - Potentially lower register pressure and better occupancy on large workloads.
+- Advantages:
+  - Still mathematically exact.
+  - Targets the main large-workload kernel rather than tiny side paths.
+- Disadvantages:
+  - More synchronization and communication.
+  - More complex implementation and higher crash risk than vertical tuning.

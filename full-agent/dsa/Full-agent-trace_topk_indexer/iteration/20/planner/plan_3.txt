@@ -1,0 +1,9 @@
+Plan 3: REVERT to dc51d5fc + ONE micro-optimization: skip TIER-L CUB pipeline allocations when no batch is in TIER-L.
+- Restore exact 3-tier algorithm of dc51d5fc (proven 9.564).
+- Add tiny host-side preflight: copy seq_lens to host (small, batch_size <= ~64) ONCE,
+  compute has_long = any(L > L_MED_MAX). If !has_long, skip allocating scores_sorted/indices_sorted/
+  begin_offsets/end_offsets/temp_storage and the two CUB calls and extract kernel.
+- Reduces ~3 kernel launches and several allocations when L<=6144 universally.
+- Validity: when has_long, behavior identical to dc51d5fc.
+- Advantages: known floor + measurable launch overhead reduction; H2D copy of int32[batch_size] is ~1us.
+- Disadvantages: H2D sync may itself cost too much; depends on workload distribution.

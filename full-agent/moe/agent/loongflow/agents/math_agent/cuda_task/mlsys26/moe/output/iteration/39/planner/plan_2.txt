@@ -1,0 +1,6 @@
+Plan 2: Rebase to 302d2eb3 + GEMM1 N-dim swizzle (pid_m/pid_n reorder) for L2 reuse
+- Variables: pid layout permutation, GROUP_M parameter
+- Constraints: same correctness, deterministic order
+- Solver: deterministic swizzle math: pid -> (pid_m, pid_n) with GROUP_M=8 grouping
+- Risk: Higher; affects critical GEMM1 kernel that dominates 55% of time
+- Why: ~5% potential GEMM1 speedup but unproven in lineage

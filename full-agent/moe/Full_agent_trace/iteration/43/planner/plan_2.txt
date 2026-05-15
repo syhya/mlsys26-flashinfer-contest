@@ -1,0 +1,37 @@
+Outline 2: Worklist-Based Triton Rebuild with Two-Stage Exact Dequant Verification
+
+Mathematical Formulation
+- Variables (X):
+  1. E_offsets in N^{33}: CSR expert offsets.
+  2. WL1, WL2: compact worklists of (expert_id, tile_id) pairs for GEMM1 and GEMM2.
+  3. G1 tiles and O tiles in FP32.
+  4. Optional row scales q for dynamic FP16 quantization of SwiGLU outputs.
+- Constraints (C):
+  1. Every launched CTA corresponds to a valid active tile only.
+  2. K-block scales are indexed by exact block id k//128 and original token id.
+  3. All pointer arithmetic uses int64.
+  4. Final accumulation over duplicate tokens is exact in FP32.
+- Objective f(X): maximize throughput of custom kernels while maintaining exact topology and avoiding any inactive-CTA or out-of-bounds behavior.
+
+Solver Strategy
+- Deterministic combinatorial construction of worklists using exact GPU prefix sums.
+- Autotuned Triton kernels for GEMM1/GEMM2 over active tiles only.
+- No stochastic component.
+
+Validity Mechanism
+- Add an explicit verification subproblem:
+  1. For one selected expert batch per call (or when T small), compute a reference slice via exact dequant + torch.mm.
+  2. Compare against Triton output on-device; if mismatch exceeds threshold, route the whole call through the safe fallback implementation.
+- Post-processing repair:
+  1. Zero-fill all intermediate/output buffers.
+  2. Bounds-check every load/store mask.
+  3. If any worklist length is zero, skip kernel entirely.
+
+Why this solution?
+- Expected improvement: can outperform parent by eliminating empty CTAs and fixing wrong grid sizing.
+- Advantages:
+  1. Highest custom-kernel speed ceiling.
+  2. Directly addresses parent’s likely grid/work partition bug.
+- Disadvantages:
+  1. Highest implementation risk.
+  2. Verification/fallback logic increases complexity.

@@ -1,0 +1,5 @@
+Plan 1: Fuse split-K into a single persistent kernel for small T.
+- Eliminate O_tmp HBM round-trip by using cooperative groups grid sync OR by moving reduction inside the same kernel using shared memory across split-K blocks via atomicMax/atomicAdd on m,l and weighted O accumulation.
+- Risk: grid-wide sync requires cooperative launch. Could fail.
+- Validity: Online softmax merge equations. Mathematically exact.
+- Speedup expected: ~2x by removing 64*16*512*4=2MB workspace traffic per token.

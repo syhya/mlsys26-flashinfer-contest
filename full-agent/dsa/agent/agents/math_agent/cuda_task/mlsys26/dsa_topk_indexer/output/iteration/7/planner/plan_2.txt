@@ -1,0 +1,14 @@
+Outline 2: TMA + Tensor Core FP8 MMA via CuTe
+Mathematical Formulation:
+- Variables (X): ThreadBlock shape (e.g., 64x64x128), Warp shape (32x32x128).
+- Constraints (C): SM90 architecture constraints, FP8 tensor core instruction requirements (e4m3fn).
+- Objective f(X): Maximize FLOPS utilization via WGMMA instructions.
+
+Solver Strategy:
+Model the Q @ K.T operation as a batched GEMM. Use CuTe layouts to define the tensors and utilize SM90 TMA (Tensor Memory Accelerator) to asynchronously fetch Q and K tiles. Perform the GEMM using Hopper FP8 Tensor Cores.
+
+Validity Mechanism:
+CuTe layouts inherently handle bounds if properly configured, but pad to multiples of 16/32 to satisfy Tensor Core alignment constraints. Fallback to scalar iteration for edge cases if necessary.
+
+Why this solution?
+Offers the highest theoretical speedup since it utilizes Hopper-specific hardware. However, it is very complex and prone to compilation or alignment errors in Phase 2.

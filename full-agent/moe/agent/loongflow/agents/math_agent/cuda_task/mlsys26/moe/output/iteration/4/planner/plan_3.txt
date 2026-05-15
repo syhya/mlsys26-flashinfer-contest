@@ -1,0 +1,13 @@
+**Mathematical Formulation**:
+- Variables (X): Triton tile sizes.
+- Constraints (C): FP32 FMA precision.
+- Objective (f(X)): Minimize precision loss.
+
+**Solver Strategy**:
+Multi-Start Autotuning over tile sizes.
+
+**Validity Mechanism**:
+Dequantize all FP8 operands into FP32 registers before the dot product: `a_fp32 = a * a_scale`, `w_fp32 = w * w_scale`, `tl.dot(a_fp32, w_fp32)`.
+
+**Why this solution?**:
+Provides FP32 precision, but at the cost of TF32/FP32 core speed (much slower than FP8/BF16 Tensor Cores).

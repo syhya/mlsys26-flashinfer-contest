@@ -1,0 +1,23 @@
+### Final Child Solution Generation Plan
+
+**Objective:** Maximize the performance of the GDN prefill forward pass kernel. The prior iteration achieved a 516.24x speedup by utilizing Instruction-Level Parallelism (ILP). The next logical step to increase performance while guaranteeing correctness is to incorporate vectorized memory accesses and asynchronous data movement.
+
+**Mathematical Formulation:**
+*   **Objective**: Minimize the latency $L(x)$ of the GDN prefill forward pass, where $x$ represents the configuration of the kernel (block size, grid size, memory layout).
+*   **Variables ($X$)**: Use of vectorized data types (`__nv_bfloat162`, `float4`), asynchronous memory copies (`cp.async`), and register allocation.
+*   **Constraints ($C$)**:
+    *   $C_1$: Output tensors (`output`, `new_state`) must exactly match the expected shape and dtype.
+    *   $C_2$: Numerical correctness within tolerance ($rtol=1e-2, atol=1e-2$).
+    *   $C_3$: Thread-block size and shared memory usage must not exceed hardware limits.
+
+**Solver Strategy:**
+*   Implement vectorized memory accesses using `__nv_bfloat162` and `float4` to double the effective memory bandwidth and reduce instruction count.
+*   Implement asynchronous shared memory loading using PTX `cp.async` to overlap global memory reads with computation.
+
+**Validity Mechanism:**
+*   Strict adherence to tensor contiguous checks and alignment requirements before launching the kernel.
+*   Ensure fallback mechanisms (e.g., standard loads) are in place if alignment constraints are not met for vectorized loads, although the PyTorch tensors are expected to be well-behaved.
+
+**Why this solution?:**
+*   Vectorization directly addresses the memory-bound nature of the kernel by maximizing load/store efficiency.
+*   Asynchronous copies hide global memory latency, a classic and highly effective optimization for sequence processing kernels.

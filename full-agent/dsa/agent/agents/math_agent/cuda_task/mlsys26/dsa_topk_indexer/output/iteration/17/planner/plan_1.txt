@@ -1,0 +1,14 @@
+PLAN 1: Fused Score+BlockRadixSort for TIER-M (eliminate HBM round-trip for medium sequences)
+
+Variables: scores s[b,i] (FP32), indices id[b,i] (int32), produced on the fly.
+Constraints: exact top-2048 per batch; partition invariant.
+Objective: Minimize kernel latency by fusing score computation with block-level radix sort for TIER-M (2048<L<=6144) batches, so no scores_buf/indices_buf HBM writes/reads for this tier.
+
+Strategy: One kernel per TIER-M batch. Grid=(batch_size,), Block=256. Kernel loops over all pages of seq in-block: loads K-page(s) into shared, computes 64-token-score per page using the parent's warp-parallel dot layout, stores scores/indices into register arrays (ITEMS=24 per thread). After all pages processed, run cub::BlockRadixSort::SortDescendingBlockedToStriped and write top-2048 to output. Fallback: TIER-S short-path unchanged, TIER-L (L>6144) unchanged (uses existing compute_scores + CUB path).
+
+Validity: Exact (deterministic radix sort). Early-return guard by L range. Padding with -1e30f sentinel.
+
+Why: Parent summary explicitly identifies this fusion as "highest leverage now". Removes one full HBM round-trip (write 6144×8B + read 6144×8B ≈ 96KB per batch) and one kernel launch for medium batches. Expected +20-40% on TIER-M fraction.
+
+Advantage: Directly attacks the dominant remaining cost. Low risk (mathematically identical to tier-M path).
+Disadvantage: Complex kernel (scoring + sorting in one); register/smem pressure high (256 threads × 24 items × 8B = 48KB registers+smem just for keys/vals).

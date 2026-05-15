@@ -1,0 +1,163 @@
+# Role
+You are a world-class expert in high-performance computing, specializing in PyTorch and CUDA C++ programming. Your expertise includes writing custom CUDA kernels, optimizing memory access patterns, and leveraging low-level hardware features for maximum performance.
+
+# Task
+You will be given with a JSON task definition describing a GPU kernel operation. Your goal is to implement a **highly optimized CUDA kernel** that significantly outperforms the provided PyTorch reference implementation while maintaining strict numerical correctness.
+
+The definition includes:
+1. **Tensor specifications**: shapes, dtypes, and descriptions for all inputs and outputs
+2. **Axes**: dimension parameters (some constant, some variable like batch_size)
+3. **Constraints**: relationships between dimensions
+4. **Reference implementation**: a correct but unoptimized Python/PyTorch `run()` function
+
+# Input Format
+The initial file is a JSON object with the following structure:
+```json
+{
+  "name": "task_identifier",
+  "description": "What this kernel does",
+  "axes": { ... },       // Dimension parameters
+  "inputs": { ... },     // Input tensor specs (shape, dtype)
+  "outputs": { ... },    // Expected output specs
+  "constraints": [...],  // Dimension constraints
+  "reference": "..."     // Reference Python implementation
+}
+```
+The `reference` field contains a Python function `run(*inputs) -> outputs` that serves as the correctness baseline.
+
+
+# Output Format
+Provide exactly one final `cpp` code block containing the full contents of `kernel.cu`.
+
+Formatting requirements:
+1. Output exactly one fenced code block with language tag `cpp`.
+2. Include no explanation, analysis, or extra text outside the code block.
+3. Include all required `#include`s, helper functions, CUDA kernels, the required entry point, and the `PYBIND11_MODULE(...)` binding in the same file.
+4. Follow the exact function name and signature specified below.
+5. Return tensors with exactly the required shapes and dtypes.
+6. Make the code self-contained and directly compilable as `kernel.cu`.
+
+Your `kernel.cu` MUST include `<torch/extension.h>` and expose exactly this C++ entry point:
+
+```cpp
+#include <torch/extension.h>
+#include <cuda_bf16.h>
+#include <tuple>
+
+// ... your CUDA kernels and helpers ...
+
+// Entry point – must have this exact name and signature
+std::tuple<torch::Tensor, torch::Tensor> gdn_forward(
+    torch::Tensor q,       // [batch_size, 1, 4, 128]     bfloat16
+    torch::Tensor k,       // [batch_size, 1, 4, 128]     bfloat16
+    torch::Tensor v,       // [batch_size, 1, 8, 128]     bfloat16
+    torch::Tensor state,   // [batch_size, 8, 128, 128]   float32  (k-last layout: [B, HV, V, K])
+    torch::Tensor A_log,   // [8]                          float32
+    torch::Tensor a,       // [batch_size, 1, 8]           bfloat16
+    torch::Tensor dt_bias, // [8]                          float32
+    torch::Tensor b,       // [batch_size, 1, 8]           bfloat16
+    float scale            // scalar
+);
+// Returns: {output [batch_size, 1, 8, 128] bfloat16, new_state [batch_size, 8, 128, 128] float32}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gdn_forward", &gdn_forward, "GDN Forward");
+}
+```
+
+# Build Environment Constraints (CRITICAL)
+The build environment uses `-D__CUDA_NO_BFLOAT16_CONVERSIONS__`, which **disables implicit casts** between `__nv_bfloat16` and `float`. You MUST use explicit conversion intrinsics:
+- **BF16 to float**: `__bfloat162float(bf16_val)` -- NOT `(float)bf16_val`
+- **float to BF16**: `__float2bfloat16(float_val)` -- NOT `(__nv_bfloat16)float_val`
+- Always `#include <cuda_bf16.h>` at the top
+
+
+# Correctness Requirements
+1. Output shapes and dtypes must match exactly: `output` is bfloat16, `new_state` is float32.
+2. Numerical tolerance: rtol=1e-2, atol=1e-2.
+3. All intermediate accumulation must be in **FP32**; convert back to BF16 only for final `output` store.
+4. All variable axes (e.g., `batch_size`) must work for any valid value.
+5. Gate formulas must be exact:
+   - `softplus(x) = log(1 + exp(x))` (stable: return `x` directly when `x > 20`)
+   - `g = exp(-exp(A_log) * softplus(a + dt_bias))`
+   - `beta = sigmoid(b) = 1 / (1 + exp(-b))`
+
+
+# Core Optimization Strategy
+Your solution must demonstrate a **substantial architectural or performance improvement** over a naive implementation. Superficial changes are forbidden. The following dimensions are key areas where meaningful gains can be achieved — addressing more dimensions generally leads to better performance:
+
+## 1. Thread/Block Parallelism Design
+The GDN decode state update is dominated by reads and writes to the large state tensor `[B, HV, V, K]`.
+The optimal work partitioning across warps and thread blocks is a key design decision:
+- Threads can be mapped to the K dimension (128 elements), V rows, or a combination of both.
+- Block size and grid shape directly affect occupancy and warp utilization.
+- Different batch sizes may benefit from different launch configurations to maximize GPU utilization.
+
+## 2. Memory Access Optimization
+The state tensor `[B, HV, 128, 128]` in float32 is the dominant memory traffic source.
+Effective strategies include:
+- Vectorized loads/stores (e.g., `float4` for float32 state rows, `uint2` / `__nv_bfloat162` for bfloat16 inputs) and other wide-load approaches to maximize memory bus utilization.
+- Keeping q and k vectors in registers across the V-row loop to avoid repeated global memory loads.
+- Fusing state decay (`g * h`) and state update (`+ dv * k`) into a single read-modify-write pass to minimize memory traffic.
+
+## 3. Warp-level Computation
+Dot products over the K=128 dimension (kh, qh, qk_dot) are reduction operations across a warp.
+Effective strategies include:
+- Warp shuffle primitives such as `__shfl_xor_sync` / `__shfl_sync`, or other intra-warp communication mechanisms, for fast reductions.
+- Fusing multiple reductions (e.g., kh and qh) into a single communication step to save instructions.
+- Broadcasting per-head scalar values (g, beta) from a single lane to all lanes in the warp.
+
+## 4. Scalar Hoisting and Computation Order
+Gates `g` and `beta` are per-head scalars independent of V and K indices.
+Reordering computation can significantly reduce instruction count and register pressure:
+- Values independent of the V-row loop (gates, qk_dot, scale factors) can be precomputed once before the loop begins.
+- The output formula `scale * (qh + dv * qk_dot)` can be algebraically rearranged to reduce operations in the inner loop.
+
+## 5. Instruction-level Efficiency
+The gate formulas (softplus, sigmoid, exp) and inner-loop accumulations are hot paths.
+Fast math intrinsics (e.g., `__expf`, `__logf`, `__frcp_rn`) and fused multiply-add operations (e.g., `fmaf`) reduce instruction latency on CUDA hardware. Using `__launch_bounds__` helps the compiler make better register allocation decisions and improve occupancy.
+
+## 6. Library Usage
+You are encouraged to call third-party CUDA libraries directly from `kernel.cu` when they provide a performance advantage. Available libraries in the build environment include:
+- **CUB** (`<cub/cub.cuh>`): block-level and warp-level primitives (e.g., `cub::WarpReduce`, `cub::BlockReduce`) for dot-product reductions over the K dimension.
+- **CUTLASS / CuTe** (`<cute/tensor.hpp>` etc.): tile-level abstractions and layout utilities; less central for GDN's element-wise state update, but useful if a tiled approach is explored.
+- **Standard CUDA math** (`<cuda_bf16.h>`, `<cuda_fp16.h>`): bfloat16/fp16 arithmetic helpers already available without extra includes.
+
+
+Below is an example. You can refer to the format in this example. Your question code is in the initial file.
+
+===== Example Start =====
+
+Given model:
+
+```json
+{
+  "name": "task_identifier",
+  "description": "What this kernel does",
+  "axes": { ... },       // Dimension parameters
+  "inputs": { ... },     // Input tensor specs (shape, dtype)
+  "outputs": { ... },    // Expected output specs
+  "constraints": [...],  // Dimension constraints
+  "reference": "..."     // Reference Python implementation
+}
+```
+
+You should respond with your final answer
+
+```cpp
+#include <torch/extension.h>
+#include <tuple>
+
+// ... your CUDA kernels and helpers ...
+
+// Use the exact gdn_forward signature specified above.
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gdn_forward", &gdn_forward, "GDN Forward");
+}
+```
+
+===== Example End =====
+
+
+Now, provide your answer below:

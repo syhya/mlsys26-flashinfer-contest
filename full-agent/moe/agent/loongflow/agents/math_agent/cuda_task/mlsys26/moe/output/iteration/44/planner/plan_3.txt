@@ -1,0 +1,34 @@
+Outline 3: T-Adaptive Hybrid Algorithm with Structure/Parameter Decoupling
+
+Mathematical Formulation
+- Variables X:
+  - Exact routing variables R,W as in the task definition.
+  - CSR dispatch variables counts, offsets, sorted_tokens, sorted_experts, sorted_weights.
+  - Regime variable g(T) in {decode, medium, prefill}.
+  - Kernel parameters K = {BM, BN, BK, SPLIT_K, num_warps, num_stages, backend_stage1, backend_stage2}.
+  - Output O in fp32.
+- Constraints C:
+  1. Routing and dispatch are backend-independent and must be exact.
+  2. For every stage, accumulator dtype is fp32.
+  3. Stage1 may use fp8-tensor-core Triton only if BK=128 aligns to one scale block and post-scale semantics are exact.
+  4. Stage2 may use fp16-TC only if activation quantization includes explicit row scales and epilogue scale correction; otherwise fallback to fp32 mm.
+  5. Output is bf16 after single terminal cast.
+- Objective f(X): maximize score = correctness-pass * speedup, with correctness lexicographically dominant.
+
+Solver Strategy
+- Deterministic regime selection based on T:
+  - decode (T<=8): split-K and small-tile kernels to improve occupancy.
+  - medium (9<=T<=128): worklist grouped kernels.
+  - prefill (T>128): larger tiles and fewer launches.
+- This is an algorithmic selector, not a random heuristic search.
+- Use PyTorch ops to solve structure; Triton/PyTorch native ops solve stage execution under exact preconditions.
+
+Validity Mechanism
+- Hard separation between structure and execution: routing/dispatch is exact and shared across all regimes.
+- Each backend has an admissibility predicate; if false, use deterministic fallback.
+- Include a final repair path: safe chunked fp32 dequantized execution per expert for any stage that cannot prove exact semantics.
+
+Why this solution?
+- Advantages: best balance of robustness and performance; localizes risk to execution backends while keeping exact topology fixed.
+- Disadvantages: more code than a pure safe path.
+- Expected performance: highest probability of exceeding baseline among robust plans because it preserves exact math and adapts to T-dependent bottlenecks.

@@ -1,0 +1,19 @@
+{
+  "status": "validation_failed",
+  "summary": "Validation failed: RUNTIME_ERROR: Traceback (most recent call last):\n  File \"/opt/conda/envs/py312/lib/python3.12/site-packages/flashinfer_bench/bench/evaluators/lowbit.py\", line 57, in check_correctness\n    result = sol_runnable(*inp)\n             ^^^^^^^^^^^^^^^^^^\n  File \"/opt/conda/envs/py312/lib/python3.12/site-packages/flashinfer_bench/compile/runnable.py\", line 95, in __call__\n    ret = self._callable(*args)\n          ^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/conda/envs/py312/lib/python3.12/site-packages/torch/utils/_contextlib.py\", line 124, in decorate_context\n    return func(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/.cache/flashinfer_bench/cache/triton/fib_triton_agent_120dbb27_cbf5a5/fib_triton_agent_120dbb27_cbf5a5/kernel.py\", line 120, in run\n    w1 = _dequant_gemm1_weight_one(gemm1_weights, gemm1_weights_scale, e)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/.cache/flashinfer_bench/cache/triton/fib_triton_agent_120dbb27_cbf5a5/fib_triton_agent_120dbb27_cbf5a5/kernel.py\", line 27, in _dequant_gemm1_weight_one\n    return (w * s).permute(0, 2, 1, 3).reshape(2 * I, H)\n            ~~^~~\nRuntimeError: The size of tensor a (128) must match the size of tensor b (56) at non-singleton dimension 1\n",
+  "score": 0.0,
+  "metrics": {
+    "correctness": 0.0,
+    "speedup": 0.0,
+    "exec_time_ms": 0.0,
+    "baseline_time_ms": 0.0,
+    "compile_time": 0.0,
+    "eval_time": 340.13957166671753
+  },
+  "artifacts": {
+    "eval_backend": "modal+flashinfer-bench",
+    "task_id": "moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048",
+    "execution_time": "340.14s",
+    "error": "RUNTIME_ERROR: Traceback (most recent call last):\n  File \"/opt/conda/envs/py312/lib/python3.12/site-packages/flashinfer_bench/bench/evaluators/lowbit.py\", line 57, in check_correctness\n    result = sol_runnable(*inp)\n             ^^^^^^^^^^^^^^^^^^\n  File \"/opt/conda/envs/py312/lib/python3.12/site-packages/flashinfer_bench/compile/runnable.py\", line 95, in __call__\n    ret = self._callable(*args)\n          ^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/conda/envs/py312/lib/python3.12/site-packages/torch/utils/_contextlib.py\", line 124, in decorate_context\n    return func(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/.cache/flashinfer_bench/cache/triton/fib_triton_agent_120dbb27_cbf5a5/fib_triton_agent_120dbb27_cbf5a5/kernel.py\", line 120, in run\n    w1 = _dequant_gemm1_weight_one(gemm1_weights, gemm1_weights_scale, e)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/.cache/flashinfer_bench/cache/triton/fib_triton_agent_120dbb27_cbf5a5/fib_triton_agent_120dbb27_cbf5a5/kernel.py\", line 27, in _dequant_gemm1_weight_one\n    return (w * s).permute(0, 2, 1, 3).reshape(2 * I, H)\n            ~~^~~\nRuntimeError: The size of tensor a (128) must match the size of tensor b (56) at non-singleton dimension 1\n"
+  }
+}

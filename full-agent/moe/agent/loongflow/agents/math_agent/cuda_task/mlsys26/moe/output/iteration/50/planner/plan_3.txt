@@ -1,0 +1,43 @@
+### Outline 3: Two-Regime Exact Solver with Small-T Split-K GEMM and Large-T Dense GEMM
+
+**Mathematical Formulation**
+- **Variables ($X$):**
+  - Routing/dispatch tensors as in parent.
+  - Kernel regime selector `r \in {smallT, largeT}`.
+  - Split-K factor `s \in {1,2,4,8}` for small routed batches.
+  - Partial accumulation tensor `P` for split-K reduction.
+- **Constraints ($C$):**
+  1. Routing semantics exact.
+  2. GEMM1 and GEMM2 total sums equal the unsplit matmul:
+     \[
+     Y = \sum_{q=0}^{s-1} Y_q
+     \]
+  3. Atomic or staged reduction must preserve FP32 accumulation.
+  4. `BLOCK_K = 128` to align with scale blocks.
+  5. Final output must be `[T,7168]` bf16.
+- **Objective ($f(X)$):**
+  \[
+  \min_{r,s} L_{route} + L_{dispatch}(r) + L_{gemm1}(r,s) + L_{gemm2}(r,s)
+  \]
+  subject to exact-sum and dtype constraints.
+
+**Solver Strategy**
+- Use a **piecewise deterministic regime solver**:
+  1. If `Tk_total <= 32`, use split-K GEMM1 and/or GEMM2 with `s` selected from a fixed set based on occupancy model.
+  2. Otherwise use parent dense grouped kernels.
+  3. Use simple cost model:
+     \[
+     cost(s) = launch\_overhead \cdot s + reduction\_overhead(s) - occupancy\_gain(s)
+     \]
+     Choose smallest `s` improving estimated occupancy.
+- This is an integer regime optimization problem solved over a tiny finite set.
+
+**Validity Mechanism**
+- If split-K path is selected, use deterministic reduction into FP32 scratch followed by one exact combine step.
+- If scratch allocation fails or shape preconditions are not met, fall back to unsplit parent path.
+- Output always passes through the same final `index_add_` and bf16 cast.
+
+**Why this solution?**
+- **Expected performance improvement:** Better utilization for tiny decode-like workloads where current GEMMs may under-occupy the GPU.
+- **Advantages:** Targets a known weakness from task guidance; finite discrete solver, no randomness.
+- **Disadvantages:** Bench mix may not be dominated by tiny-T cases; more intrusive than dispatch-only change; atomic/reduction path adds correctness/performance risk.

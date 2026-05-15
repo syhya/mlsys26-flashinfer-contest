@@ -1,0 +1,56 @@
+## Strategic Summary Report — Solution `2cd061d6` (Iteration 33, Generation 6)
+
+---
+
+### 1. Executive Summary
+
+This iteration was a **meaningful lineage improvement but a strategic underperformance** because the executor partially deviated from the prescriptive plan (using only 14 autotune configs per kernel instead of the specified 15/14, and notably OMITTING the critical `num_warps=16` plus `num_stages=4` variants present in `8e3c776e`), resulting in **14.33x (score=1.4333)** — a strong +23% jump over parent `105fe0b8` (11.66x) but **underperforming the cross-lineage frontier `8e3c776e` (15.40x) by ~7%** despite the plan's explicit "floor-guarantee" design.
+
+---
+
+### 2. Data-Driven Findings (Facts ONLY)
+
+- **Sibling Rank:** 1 out of 1 children of parent `105fe0b8` (no other siblings of this parent exist). Cross-lineage frontier peer `8e3c776e` = 1.5395 (15.40x); this child at 1.4333 ranks **#2 on the global lineage frontier**, behind `8e3c776e` by -0.1062.
+- **Score Delta:** Parent `105fe0b8` (0.8031→later re-eval 1.1661, 11.66x, 2.047ms) → child (**1.4333, 14.33x, 1.624ms**). Absolute gain: **+0.267 (+22.9% relative)**. Kernel latency: **-0.423ms (-20.7%)**.
+- **Key Change:** GEMM2 kernel upgraded from BF16-intermediate dequant path to **FP8 TC path** via `(c / c_scale).to(tl.float8e4nv)` + `tl.dot(c_fp8, w2_fp8)` — the proven-optimal pattern from `8e3c776e`/`a96d6608`. Both autotune lists expanded with `BLOCK_M=256` configs. Routing and run() preserved verbatim from parent.
+- **Plan-vs-Execution Deviation:** The plan specified that both kernels should be "copied verbatim from `8e3c776e`" (which has 13 GEMM1 / 12 GEMM2 configs) plus 2 new additions. The executor instead produced **14 configs per kernel** and omitted the critical `BLOCK_M=128, num_warps=16, num_stages=4` variant from both autotune lists. GEMM2 is also missing `BLOCK_M=256, num_warps=16, num_stages=3`. This is a direct violation of the "floor guarantee" design.
+- **Core Metrics:**
+  - Correctness: **1.0** (Passed)
+  - Speedup: **14.333x** (vs `8e3c776e`: 15.40x — underperforms by 1.07x)
+  - Kernel latency: **1.624ms** (vs `8e3c776e`: 1.523ms — 6.6% slower)
+  - Max absolute error: **36,352** (vs `8e3c776e`: 32,768 — marginally worse)
+  - Max relative error: 7.78e11 (vs `8e3c776e`: 2.08e11 — 3.7x worse)
+  - Eval time: 58.75s; workloads: 19
+
+---
+
+### 3. Strategic Analysis (The "So What?")
+
+- **Root Cause:** The outcome is primarily an **execution-quality failure against a high-quality plan**. The plan was rigorous: it correctly identified `8e3c776e` as the global frontier, designed a pure-superset autotune expansion with a mathematical floor guarantee of ≥15.34x, and provided an explicit anti-regression checklist. The executor captured the most important element (FP8 TC GEMM2 body) but dropped the `num_warps=16` configs — the very configs that `8e3c776e`'s summary identified as load-bearing. The ~7% gap vs frontier is thus **not inherent to the algorithmic design** but to missing autotune entries. The score still improved because swapping BF16-dequant → FP8 TC in GEMM2 is itself worth ~20%.
+
+- **Key Insight:** The single most important lesson is that **"floor-guarantee via config superset" plans require exact execution fidelity to deliver their guarantee** — the guarantee is purely nominal if the executor drops configs from the base. When the autotune list is the load-bearing lever, the plan's checklist must be literally enforced ("Config count must equal N+2; any missing config is a regression"). The deeper insight: the FP8 TC GEMM2 pattern (`float8e4nv` + scalar tile quant + `tl.range`) is now robust enough that two independent lineages have re-derived it (`a96d6608`, `8e3c776e`, and this child) — it should be treated as **mandatory scaffolding** for all future descendants.
+
+- **Identified Risk:** Three risks:
+  1. **Executor drift from floor-guarantee plans is silently catastrophic.** Score 1.43 vs floor 1.53 = 7% performance left on the table with no warning — correctness passed, so there's no signal. Future planners should include the config count as a runtime-checkable assertion or in-code comment.
+  2. **Max relative error 7.78e11 is now the worst in the lineage** (~4x worse than `8e3c776e`). Still correctness-passing, but this child erodes the precision margin further than the frontier. The cause is likely the missing `num_stages` variants producing suboptimal scheduling on tail workloads.
+  3. **This child is strictly dominated by `8e3c776e`** on every metric (score, latency, max_abs_err, max_rel_err). It provides no MAP-Elite niche value unless complexity/diversity features differ.
+
+---
+
+### 4. Actionable Guidance (The "What's Next?")
+
+- **Recommend Stripping:** Archive or down-weight `2cd061d6` as a sampling parent. `8e3c776e` (1.5395) strictly dominates it on all measurable axes. Future iterations branching from this lineage should re-base on `8e3c776e` directly — sampling this solution instead wastes budget re-deriving improvements `8e3c776e` already has.
+
+- **Recommend Fusion [immediate, highest confidence]:** Generate a trivial "recovery" child that simply merges this solution's routing/run driver (identical to `8e3c776e`'s anyway) with `8e3c776e`'s full 13/12 autotune lists — effectively producing `8e3c776e` verbatim plus this child's minor `BLOCK_M=256, num_warps=8, num_stages=4` addition. Expected floor: 15.34x; upside: marginal. This corrects the execution deviation and establishes the true floor.
+
+- **Recommend Exploration [highest upside]:** Since autotune expansion is saturating (per `8e3c776e`'s summary), pivot to a **fused Triton routing kernel**. PyTorch routing (`sigmoid + 3×topk + nonzero + argsort + bincount + cumsum`) likely consumes 15-25% of the 1.5ms budget, especially on small-T decode workloads. Fusing routing + CSR dispatch into 1-2 Triton kernels with atomics is now the dominant untapped lever, targeting ~16-17x overall.
+
+- **Recommend Exploration:** Introduce **TMA-style bulk loads via `tl.make_block_ptr`** for the W1 tile reads in GEMM1 (K=7168, the compute bottleneck). B200 TMA bandwidth exceeds strided loads by ~20% on wide-K inner loops. No lineage member has tested this; expected +3-5% on GEMM1.
+
+- **Recommend Exploration [precision insurance]:** The max_abs_err 36,352 continues the lineage's worrying growth pattern (8192 → 32768 → 36352). Prototype a **per-row (BLOCK_M×1) scalar FP8 quantization** variant of GEMM2 (one extra `tl.max(axis=1)` per K-iter, ~2% overhead). Expected benefit: 2-4x reduction in max_abs_err, protecting the lineage against future tolerance tightening.
+
+- **Warn:** Future planners using the "copy verbatim + N additions → guaranteed floor" pattern MUST require the executor to emit an in-file comment counting and naming each config, e.g., `# GEMM1 configs: 13 inherited from 8e3c776e + 2 new = 15 total`. Without this, executor drift silently erodes the floor guarantee — as happened here.
+
+- **Warn:** Do NOT treat this child's score (1.4333) as representative of the "FP8 TC + BLOCK_M=256 expansion" strategy. That strategy's true ceiling is 15.40x (per `8e3c776e`). Any future planner sampling this child for analysis should cross-reference `8e3c776e` to avoid setting an artificially low target.
+
+- **Warn:** The 2x worse max_relative_error vs `8e3c776e` (7.78e11 vs 2.08e11) despite near-identical kernel bodies suggests that the missing `num_warps=16` configs mattered not just for performance but for scheduling-dependent numerical ordering. This reinforces that autotune configs affect numerical reproducibility, not just latency — another reason to prefer exact config-set replication from the frontier.

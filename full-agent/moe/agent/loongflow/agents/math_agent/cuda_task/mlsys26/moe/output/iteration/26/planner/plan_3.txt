@@ -1,0 +1,150 @@
+## Plan 3: Enhanced Parent with Performance Optimization Focus (Larger Autotune Space + Richer Software Pipelining)
+
+### Mathematical Formulation
+
+**Variables ($X$):**
+- Triton kernel tile configs: BLOCK_M, BLOCK_N, num_warps, num_stages
+- Software pipelining depth: num_stages ∈ {2,3,4,5}
+- GEMM2 approach: FP8 tensor cores using correct scale-after-dot pattern
+
+**Constraints ($C$):**
+- BLOCK_K = 128 (aligned to scale blocks)
+- All FP8 semantics preserved from parent (proven correct for correctness=1.0)
+- Parent's GEMM1 A-scale indexing: keep exactly (proven correct)
+- Parent's GEMM2 structure: keep but apply scale AFTER dot not before
+
+**Objective ($f(X)$):**
+- Push speedup from 8.72x toward 10x+ by:
+  1. Using FP8 tensor cores in GEMM2 (scale AFTER dot, not before)
+  2. Better software pipelining with num_stages=4-5
+  3. Larger BLOCK_M configs for better SM occupancy
+
+### Root Cause Analysis
+
+**The parent's GEMM2 approach (casting W2 to FP32 before dot):**
+```python
+w2_f32 = w2_fp8.to(tl.float32) * w2_scale  # Dequant W2 first
+acc += tl.dot(swiglu_out, w2_f32, out_dtype=tl.float32)  # FP32 GEMM
+```
+
+This is correct numerically but DOES NOT use FP8 tensor cores. It uses FP32 Tensor Cores.
+Switching to FP8 tensor cores: keep W2 in FP8, apply scale AFTER dot:
+```python
+c_fp8 = swiglu_out.to(tl.float8_e4m3fn)  # For FP8 TC usage
+# But swiglu is float32 with arbitrary range - can't directly cast!
+```
+
+The challenge: swiglu activations are float32 with arbitrary range, can't directly cast to FP8.
+
+**BETTER APPROACH - Scale A (swiglu) AFTER the fact:**
+For a single K-block tile:
+```python
+# Keep swiglu in fp32 for the dot with fp8 weights
+# This is the correct approach: dot(fp32_A, fp8_B) 
+# But Triton only supports dot(fp8, fp8) for fp8 tensor cores
+```
+
+**ACTUAL FP8 GEMM2 approach:**
+To use FP8 tensor cores, we need BOTH inputs in FP8.
+Option: Quantize swiglu tile per-block:
+```python
+x1 = load_x1(...)  # float32
+x2 = load_x2(...)  # float32
+c = x1 * x2 * tl.sigmoid(x2)  # [BLOCK_M, BLOCK_K] float32
+
+# Per-block quantization for FP8 TC
+c_scale = tl.max(tl.abs(c)) / 448.0  # scalar scale for whole BLOCK_M x BLOCK_K tile
+c_scale = tl.maximum(c_scale, 1e-12)
+c_fp8 = (c / c_scale).to(tl.float8_e4m3fn)
+
+# Now both inputs are FP8 -> uses FP8 tensor cores
+dot_res = tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32)
+
+# Apply scales after dot
+acc += dot_res * c_scale * w2_scale  # w2_scale is [1, BLOCK_N] per tile
+```
+
+**Why this failed before (iteration c9eb9072):**
+The previous attempt (score 86.26%) used `c_scale = tl.max(tl.abs(c), axis=1) / 448.0` (per-ROW scaling), which created asymmetric scaling. Our fix: use a SINGLE scalar scale per tile.
+
+The key difference from the failed attempt:
+1. Use `tl.max(tl.abs(c))` (single scalar, no axis) instead of per-row max
+2. This means the scale applies uniformly to the entire [BLOCK_M, BLOCK_K] tile
+3. After the dot: `acc += dot_res * c_scale * w2_scale` where w2_scale is the W2 tile scale
+
+**Why this is mathematically exact:**
+`result[m,n] = sum_k(c[m,k] * W2_fp8[k,n]) * W2_scale[n_block, k_block]`
+With per-tile quantization of c:
+`c[m,k] = c_fp8[m,k] * c_scale`
+So: `result[m,n] = c_scale * sum_k(c_fp8[m,k] * W2_fp8[k,n]) * W2_scale[n_block, k_block]`
+             = `dot(c_fp8, W2_fp8)[m,n] * c_scale * W2_scale[n_block, k_block]`
+
+This is mathematically exact IF c_scale is a SINGLE SCALAR per tile (not per-row).
+
+### Solver Strategy
+
+1. Keep parent's GEMM1 kernel unchanged (proven correct)
+2. Rewrite GEMM2 kernel to use FP8 tensor cores with per-tile c quantization
+3. Expand autotuning to include larger tiles and more stages
+4. Use BLOCK_M=16 for small-batch prefill and BLOCK_M=128 for large-batch
+
+### Validity Mechanism
+
+1. Use `tl.max(tl.abs(c))` NOT `tl.max(tl.abs(c), axis=1)` for scalar tile scale
+2. Clamp scale to prevent division by zero: `tl.maximum(c_scale, 1e-12)`
+3. Clamp FP8 range: `(c / c_scale).clamp(-448.0, 448.0)`
+4. All output stores masked with m_mask & n_mask
+5. Keep torch.zeros initialization for G1 and O tensors
+
+### Implementation
+
+Phase 1: Mathematical Definition
+- C[m,k] is the SwiGLU output, float32, shape [BLOCK_M, BLOCK_K] per tile
+- c_scale = max(|C|) / 448.0 (scalar per tile)
+- c_fp8 = clamp(C / c_scale, -448, 448).to(fp8_e4m3fn)
+- w2_fp8 = W2_fp8[e, n_start:n_start+BN, k_start:k_start+BK] (loaded from HBM)
+- w2_scale = W2_scale[e, n_block, k_block] (scalar per tile)
+- dot_tile = tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32)  # FP8 tensor cores
+- acc += dot_tile * c_scale * w2_scale
+
+Phase 2: Optimization Loop
+- Expanded autotune configs:
+  - (BLOCK_M=16, BLOCK_N=128, num_warps=4, num_stages=4)  -- decode regime
+  - (BLOCK_M=32, BLOCK_N=128, num_warps=4, num_stages=5)
+  - (BLOCK_M=64, BLOCK_N=128, num_warps=4, num_stages=4)
+  - (BLOCK_M=64, BLOCK_N=128, num_warps=8, num_stages=3)
+  - (BLOCK_M=128, BLOCK_N=128, num_warps=8, num_stages=3)
+  - (BLOCK_M=128, BLOCK_N=128, num_warps=8, num_stages=4)
+- Key=["MAX_TK"] to tune per actual workload size
+
+Phase 3: Safety Valve
+- Keep parent's routing logic exactly (it's correct)
+- Keep parent's GEMM1 exactly (it's correct and fast)
+- Keep parent's CSR dispatch and scatter-add
+- Only change is GEMM2 inner computation: FP8 TC instead of FP32 TC
+- If FP8 TC produces error > threshold, fall back to parent's FP32 dequant approach
+
+Phase 4: Implementation Details
+- Python: `torch`, `triton`, `triton.language as tl`
+- GEMM2 kernel change: single scalar max instead of per-row max
+- This should be ~15-20% faster than parent's GEMM2 (FP8 TC vs FP32 TC)
+- Target speedup: 9.5-10.5x (currently 8.72x)
+
+Critical code difference from failed attempt (c9eb9072):
+```python
+# WRONG (per-row, creates asymmetric scale):
+c_max = tl.max(tl.abs(c), axis=1)  # [BLOCK_M]
+c_scale = tl.maximum(c_max / 448.0, 1e-12)  # [BLOCK_M]
+c_fp8 = (c / c_scale[:, None]).to(fp8)
+acc += tl.dot(c_fp8, w2_fp8) * c_scale[:, None] * w2_scale  # broadcasting wrong!
+
+# CORRECT (per-tile, scalar):
+c_max = tl.max(tl.abs(c))  # scalar
+c_scale = tl.maximum(c_max / 448.0, 1e-12)  # scalar
+c_fp8 = (c / c_scale).clamp(-448, 448).to(fp8)
+acc += tl.dot(c_fp8, w2_fp8, out_dtype=tl.float32) * c_scale * w2_scale
+```
+
+After accumulation over all K tiles:
+- acc[m,n] = sum_k(dot_tile[k_block][m,n] * c_scale[k_block] * w2_scale[n_block, k_block])
+- This correctly implements block-scale dequantization for BOTH inputs

@@ -1,0 +1,22 @@
+### Strategic Analysis Report
+
+**1. Executive Summary:**
+This iteration was a minor regression because the newly added TIER-L2 `block_topk_kernel_large<512,24>` launched unconditionally for every batch and added launch+smem overhead without any productive work on the actual workload distribution, dragging the score from 9.564 → 9.364 despite preserving full correctness.
+
+**2. Data-Driven Findings (Facts ONLY):**
+*   **Sibling Rank:** 1 out of 1 child of parent `dc51d5fc` (only child so far; assessed as regression).
+*   **Score Delta:** Parent **9.564** → Child **9.364** (−0.20, ≈ −2.1%).
+*   **Key Change:** Added a fourth tier (TIER-L2) for sequences `6144 < L ≤ 12288` via a new `cub::BlockRadixSort<float, 512, 24, int32_t>` kernel; raised CUB device-wide segmented-sort cutoff from `L_MED_MAX (6144)` to `L_L2_MAX (12288)` in `generate_offsets_begin_end` and `extract_topk_kernel`; configured 160 KB dynamic smem for the new kernel.
+*   **Core Metrics:** Kernel latency 0.0356 ms → **0.0366 ms** (+2.7%); speedup 95.64× → 93.64×; correctness 1.0; max abs/rel error 0; 12/12 workloads passed; reference baseline 3.256 → 3.245 ms; eval time 544 s → 319 s.
+
+**3. Strategic Analysis (The "So What?"):**
+*   **Root Cause:** **Plan flaw, faithful execution.** The Executor implemented the plan exactly as specified (correct strided-load + `SortDescendingBlockedToStriped` + strided-write pairing — the parent's flagged correctness pitfall was respected). The regression stems from the Planner's untested assumption that the benchmark contains batches in `(6144, 12288]`. The new kernel is launched **unconditionally** for `batch_size` blocks of 512 threads each — every block pays the kernel-launch + dynamic-smem-config cost, but apparently no batch actually meets the entry condition, so the work is pure overhead. Additionally, `block_topk_kernel_large` and `block_topk_kernel` (TIER-M) both run on every launch even when their tier is empty, doubling block-launch overhead vs. parent.
+*   **Key Insight:** **Tier extensions only pay off if the workload actually populates the new tier.** The parent's gain came from real medium-L batches existing in the benchmark; without empirical evidence of L2-band batches, adding L2 is dead weight. The "diminishing-returns" risk flagged in the parent summary materialized as an actual regression. A useful salvageable concept: the `<512,24>` BlockRadixSort instantiation itself works and is correctness-safe — it's a tool waiting for the right workload.
+*   **Identified Risk:** Speculative tier proliferation without workload-distribution profiling. The pipeline now launches **6 kernels per call** (emit_short, compute_scores, block_topk, block_topk_large, generate_offsets, two CUB sorts, extract_topk) — launch overhead is becoming the irreducible floor near 0.036 ms. Adding more unconditional tiers will only worsen this.
+
+**4. Actionable Guidance (The "What's Next?"):**
+*   **Recommend Stripping:** Remove the unconditional TIER-L2 launch (or guard it host-side by inspecting `seq_lens` once on a small device-to-host copy / via a lightweight count kernel) and revert to the 3-tier parent. This alone should restore 9.564.
+*   **Recommend Exploration (host-side dispatch):** Before launching block-sort kernels, run a tiny histogram kernel that counts batches per tier; only launch tier kernels whose count > 0. This makes future tier additions free when unused.
+*   **Recommend Fusion (highest leverage now):** Fuse `compute_scores_kernel` directly into the per-batch block-sort kernels (TIER-M / TIER-L) — eliminate the `scores_buf`/`indices_buf` HBM round-trip. Scores can be produced into shared/registers and sorted in-place. This attacks the now-dominant memory-traffic + launch-count floor.
+*   **Recommend Exploration:** For the long tail (`L > 6144`), try **radix-select** (find K-th threshold + filter) instead of full sort — O(N) work, single block per batch, no device-wide CUB launch.
+*   **Warn:** Do NOT add further speculative tiers without first profiling the actual `seq_lens` distribution in the 12 benchmark workloads. Every unconditional kernel launch now costs ~1–2% of the 0.036 ms budget. Also preserve the `BlockedToStriped` + strided-write pairing — it remains correctness-critical for any block-sort kernel.

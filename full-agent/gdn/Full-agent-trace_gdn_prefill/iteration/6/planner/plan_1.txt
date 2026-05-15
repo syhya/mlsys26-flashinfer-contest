@@ -1,0 +1,21 @@
+Outline 1: Register-Level Prefetching with Explicit ILP Reordering
+
+Mathematical Formulation:
+Variables (X): Memory location assignments for variables `v`, `a`, `b`, and instruction scheduling order for the FMA loop.
+Constraints (C): 
+- Shared memory capacity <= 48KB.
+- Register count <= 255 per thread.
+- Data dependencies in state update $S_t = g S_{t-1} + \Delta v k^T$.
+Objective (f(X)): Minimize memory access latency and FMA execution stalls.
+
+Solver Strategy: Static Analysis & Latency Hiding (Deterministic Scheduling).
+- Move `v`, `a`, `b` to thread-local registers.
+- Use `__shfl_sync` for warp-level broadcast of `a` and `b`.
+- Reorder independent FMA instructions `new_s_{x,y,z,w} = fmaf(...)` before dependent `o_val_{0,1,2,3} = fmaf(...)` to hide the 4-cycle arithmetic latency.
+
+Validity Mechanism:
+- Double-buffering logic ensures memory fetches don't overwrite current compute data.
+- Enforce explicit `__shfl_sync` masks (0xffffffff) to prevent warp divergence bugs.
+
+Why this solution?
+Provides deterministic execution speedup by avoiding shared memory read-after-write barriers for scalar values and perfectly hiding ALU latency in the hottest loop.

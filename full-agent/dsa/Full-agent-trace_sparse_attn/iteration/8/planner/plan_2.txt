@@ -1,0 +1,19 @@
+**Objective:** Fuse the reduce kernel directly into the compute kernel to entirely eliminate intermediate HBM writes (`O_tmp`, `m_tmp`, `l_tmp`).
+
+**Mathematical Formulation:**
+* **Variables ($X$):** Block allocation mapping.
+* **Constraints ($C$):** 
+  1. Split-K segments $S$ must perform a block-wide or grid-wide reduction.
+  2. Total shared memory limit per block $\le 100$ KB.
+* **Objective ($f(X)$):** Minimize total latency by setting $N_{HBM\_writes} = 0$.
+
+**Solver Strategy:** 
+Persistent Kernel Grid. Instead of launching a grid of $S \times T \times 1$, launch $T \times H$ blocks. Each block loops over all $S$ chunks internally.
+
+**Validity Mechanism:**
+Standard `__syncthreads()` block-level reductions. We maintain global variables `m_global` and `l_global` in shared memory and incrementally update them over the loop.
+
+**Why this solution?:**
+* **Expected Performance:** Massive reduction in memory I/O.
+* **Advantages:** No intermediate global memory buffers.
+* **Disadvantages:** Loss of sequence-level parallelism (SM saturation drops significantly for $T < 128$). The parent explicitly notes this path is for "Low Workloads / SM Saturation", meaning reducing grid size will drastically hurt occupancy.
