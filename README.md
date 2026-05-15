@@ -1,24 +1,33 @@
 # MLSys 2026 FlashInfer Contest Submissions
 
-[Technical report](./report.pdf)
+[Technical report](./agent-assisted/report.pdf)
 
-This repository is a compact public snapshot of our MLSys 2026 FlashInfer AI
-Kernel Generation Contest submissions for the NVIDIA Track. It keeps the final
-kernel submission surface small while preserving the scripts and skills needed
-to reproduce, evaluate, and continue optimization.
+This repository is organized into two top-level tracks:
+
+- `agent-assisted/`: the compact public snapshot of our MLSys 2026 FlashInfer
+  AI Kernel Generation Contest submissions for the NVIDIA Track.
+- `full-agent/`: reserved for the broader full-agent materials and historical
+  optimization records.
+
+The `agent-assisted/` package keeps the final kernel submission surface small
+while preserving the scripts and skills needed to reproduce, evaluate, and
+continue optimization.
 
 ## Repository Layout
 
 ```text
 .
-|-- report.pdf
-|-- scripts/
-|-- skills/
-|-- moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048/
-|-- gdn_decode_qk4_v8_d128_k_last/
-|-- gdn_prefill_qk4_v8_d128_k_last/
-|-- dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64/
-`-- dsa_topk_indexer_fp8_h64_d128_topk2048_ps64/
+|-- README.md
+|-- agent-assisted/
+|   |-- report.pdf
+|   |-- scripts/
+|   |-- skills/
+|   |-- moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048/
+|   |-- gdn_decode_qk4_v8_d128_k_last/
+|   |-- gdn_prefill_qk4_v8_d128_k_last/
+|   |-- dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64/
+|   `-- dsa_topk_indexer_fp8_h64_d128_topk2048_ps64/
+`-- full-agent/
 ```
 
 Each kernel directory contains:
@@ -32,16 +41,17 @@ Each kernel directory contains:
 
 | Track | Kernel | Retained result |
 | --- | --- | --- |
-| MoE FP8 | [Block-scale routing](./moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048/)<br>`kernel.py::run` | 19/19 passed<br>0.289740 ms, three-repeat mean |
-| Gated DeltaNet | [Decode QK4](./gdn_decode_qk4_v8_d128_k_last/)<br>`kernel.py::kernel_hybrid_dispatch` | 54/54 passed<br>0.006201 ms average |
-| Gated DeltaNet | [Prefill QK4](./gdn_prefill_qk4_v8_d128_k_last/)<br>`kernel.py::kernel_prefill_hybrid` | 100/100 passed<br>0.051992 ms average |
-| DeepSeek Sparse Attention | [Sparse attention](./dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64/)<br>`kernel.py::run` | 23/23 passed<br>0.011128 ms average |
-| DeepSeek Sparse Attention | [Top-k indexer](./dsa_topk_indexer_fp8_h64_d128_topk2048_ps64/)<br>`kernel.cu::kernel_cuda` | 128/128 passed<br>0.006893 ms average |
+| MoE FP8 | [Block-scale routing](./agent-assisted/moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048/)<br>`kernel.py::run` | 19/19 passed<br>0.289740 ms, three-repeat mean |
+| Gated DeltaNet | [Decode QK4](./agent-assisted/gdn_decode_qk4_v8_d128_k_last/)<br>`kernel.py::kernel_hybrid_dispatch` | 54/54 passed<br>0.006201 ms average |
+| Gated DeltaNet | [Prefill QK4](./agent-assisted/gdn_prefill_qk4_v8_d128_k_last/)<br>`kernel.py::kernel_prefill_hybrid` | 100/100 passed<br>0.051992 ms average |
+| DeepSeek Sparse Attention | [Sparse attention](./agent-assisted/dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64/)<br>`kernel.py::run` | 23/23 passed<br>0.011128 ms average |
+| DeepSeek Sparse Attention | [Top-k indexer](./agent-assisted/dsa_topk_indexer_fp8_h64_d128_topk2048_ps64/)<br>`kernel.cu::kernel_cuda` | 128/128 passed<br>0.006893 ms average |
 
 ## Full Optimization Records
 
-This combined repository is intentionally curated. The original project
-repositories keep the broader optimization traces, scratch work, references, and
+This combined repository is intentionally curated. The `full-agent/` directory
+is the local home for broader full-agent materials, while the original project
+repositories keep additional optimization traces, scratch work, references, and
 historical context:
 
 | Track | Source repository |
@@ -52,17 +62,17 @@ historical context:
 
 ## Skills
 
-The `skills/` directory contains the agent workflow instructions used for
-optimization and submission handling:
+The `agent-assisted/skills/` directory contains the agent workflow instructions
+used for optimization and submission handling:
 
 | Skill | Purpose |
 | --- | --- |
-| [flashinfer-b200-contest-optimizer](./skills/flashinfer-b200-contest-optimizer/) | FlashInfer B200 contest loop: reference-first recon, shape-aware Modal benchmarking, NCU analysis, and promotion gates. |
-| [flashinfer-submission-tagger](./skills/flashinfer-submission-tagger/) | Submission tag and `config.toml` topology validation helper. |
+| [flashinfer-b200-contest-optimizer](./agent-assisted/skills/flashinfer-b200-contest-optimizer/) | FlashInfer B200 contest loop: reference-first recon, shape-aware Modal benchmarking, NCU analysis, and promotion gates. |
+| [flashinfer-submission-tagger](./agent-assisted/skills/flashinfer-submission-tagger/) | Submission tag and `config.toml` topology validation helper. |
 
 For further optimization, start from `flashinfer-b200-contest-optimizer`, use
-the active kernel directory as the project root, and apply the multi sub-agent
-prompt template below when deeper debate is useful.
+the active kernel directory under `agent-assisted/` as the project root, and
+apply the multi sub-agent prompt template below when deeper debate is useful.
 
 ## Setup
 
@@ -83,6 +93,7 @@ The Modal scripts expect the official contest workloads to be available in the
 Pack any kernel directory by pointing at its local `config.toml`:
 
 ```bash
+cd agent-assisted
 python scripts/pack_solution.py \
   --config-path gdn_decode_qk4_v8_d128_k_last/config.toml \
   --output /tmp/gdn_decode.solution.json
@@ -97,6 +108,7 @@ from that `config.toml`.
 For local evaluation on a machine with the dataset and a compatible CUDA GPU:
 
 ```bash
+cd agent-assisted
 export FIB_DATASET_PATH=/path/to/mlsys26-contest
 python scripts/run_local.py \
   --config-path dsa_topk_indexer_fp8_h64_d128_topk2048_ps64/config.toml
@@ -107,6 +119,7 @@ a workload UUID or a workload index. This is the fastest path for correctness
 checks, targeted latency checks, and optional profiler runs:
 
 ```bash
+cd agent-assisted
 python -m modal run scripts/run_modal_single.py \
   --workload-uuid <workload_uuid_or_index> \
   --config-path dsa_topk_indexer_fp8_h64_d128_topk2048_ps64/config.toml \
@@ -114,8 +127,8 @@ python -m modal run scripts/run_modal_single.py \
 ```
 
 `run_modal_single.py` writes `benchmark_detailed_result_single.json` at the
-repository root. To collect profiling data for the same selected workload, use
-`--profile-torch` or `--profile-ncu`; NCU profiling also writes
+`agent-assisted/` root. To collect profiling data for the same selected
+workload, use `--profile-torch` or `--profile-ncu`; NCU profiling also writes
 `ncu_profile_report_single.md`.
 
 For Modal B200 full-kernel evaluation with `run_modal_multiple_gpus.py`, set
@@ -123,6 +136,7 @@ For Modal B200 full-kernel evaluation with `run_modal_multiple_gpus.py`, set
 run all workloads in parallel:
 
 ```bash
+cd agent-assisted
 export FIB_DATASET_PATH=/path/to/mlsys26-contest
 python scripts/run_modal_multiple_gpus.py \
   --config-path dsa_topk_indexer_fp8_h64_d128_topk2048_ps64/config.toml \
@@ -136,6 +150,7 @@ any workload fails because of a transient Modal or container issue, rerun only
 the missing or failed workloads:
 
 ```bash
+cd agent-assisted
 python scripts/run_modal_multiple_gpus.py \
   --config-path dsa_topk_indexer_fp8_h64_d128_topk2048_ps64/config.toml \
   --workers 4 \
@@ -144,4 +159,4 @@ python scripts/run_modal_multiple_gpus.py \
 ```
 
 To evaluate another kernel, replace the `--config-path` and `--out-dir` with
-the corresponding top-level kernel directory.
+the corresponding kernel directory under `agent-assisted/`.
