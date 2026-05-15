@@ -152,8 +152,8 @@ uv pip install -e .
 
 # Configure the LLM endpoint.
 cd ..                                    # back to the track root
-export LLM_API_KEY="sk-..."
-export LLM_BASE_URL="https://api.chatanywhere.tech/v1"   # dsa only; gdn/moe hard-code url
+export LLM_API_KEY="..."
+export LLM_BASE_URL="..."   # dsa only; gdn/moe hard-code url
 
 # Run one task-specific launcher in the selected repository.
 ./run_<task>.sh                           # outputs land in ./<task>_run/
