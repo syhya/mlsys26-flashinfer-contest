@@ -2,6 +2,10 @@
 
 [Technical report](./agent-assisted/report.pdf)
 
+Agent-assisted and full-agent reproducibility package for MLSys 2026 FlashInfer
+AI Kernel Generation Contest submissions: kernels, agent workflows, skills,
+configs, writeup, benchmark artifacts, and full optimization records.
+
 This repository is organized into two top-level tracks:
 
 - `agent-assisted/`: the compact public snapshot of our MLSys 2026 FlashInfer
