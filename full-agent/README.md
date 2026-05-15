@@ -223,12 +223,20 @@ managed by `uv`. See each track's `agent/README.md` and `agent/AGENTS.md`
 for deeper framework documentation, and `report.pdf` for the full system
 design and per-task analysis.
 
+## License
+
+This package is licensed under the [Apache License 2.0](../LICENSE).
+
 ## Citation
 
-If you reference this work, please cite the technical report:
+If this work is helpful, please cite the technical report:
 
-```
-Chenyu Ma, Yue Shui, Hangfei Xu, Shengzhao Wen, Yanpeng Wang.
-"Full-Agent Kernel Generation for FlashInfer @ MLSys 2026."
-FlashInfer AI Kernel Generation Contest @ MLSys 2026, Baidu Inc.
+```bibtex
+@misc{ma2026fullagentkernelgeneration,
+  title        = {Full-Agent Kernel Generation for FlashInfer at MLSys 2026},
+  author       = {Chenyu Ma and Yue Shui and Hangfei Xu and Shengzhao Wen and Yanpeng Wang},
+  year         = {2026},
+  howpublished = {\url{https://github.com/syhya/mlsys26-flashinfer-contest}},
+  note         = {Technical report for the MLSys 2026 FlashInfer AI Kernel Generation Contest}
+}
 ```

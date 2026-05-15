@@ -297,3 +297,7 @@ python scripts/run_modal_multiple_gpus.py \
 
 To evaluate another kernel, replace the `--config-path` and `--out-dir` with
 the corresponding kernel directory under `agent-assisted/`.
+
+## License
+
+This repository is licensed under the [Apache License 2.0](./LICENSE).
