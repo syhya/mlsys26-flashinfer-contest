@@ -1,26 +1,34 @@
-# MLSys 2026 FlashInfer Contest · Full-Agent Track
+# Full-Agent Submission Package for the MLSys 2026 FlashInfer Contest
 
 > **Full-Agent Kernel Generation for FlashInfer @ MLSys 2026**
 > Chenyu Ma, Yue Shui, Hangfei Xu, Shengzhao Wen, Yanpeng Wang — Baidu Inc.
-> [Technical report (PDF)](./report.pdf)
+> [Technical report (PDF)](./FULL_AGENT_WRITEUP.pdf)
 
 This directory holds the **Full-Agent** submissions for the MLSys 2026
 FlashInfer AI Kernel Generation Contest. Every kernel under this tree was
 produced end-to-end by an autonomous CUDA / Triton kernel-search system
-adapted from **Baidu Baige LoongFlow** — after task setup, no human edits
+adapted from [**Baidu Baige LoongFlow**](https://github.com/baidu-baige/LoongFlow) — after task setup, no human edits
 intermediate kernels, selects parents, filters failures, or steers the next
 implementation direction. The complete search history (planner / executor /
 evaluator / summarizer I/O, population snapshots, and per-evaluation logs)
 is preserved on disk for reproducibility and audit.
 
-For the compact, manually-curated submission package see `../agent-assisted/`.
-For an overview of the whole repository see `../README.md`.
+This is the **Full-Agent** package, not the **Agent-Assisted** package:
+
+| Scope | Report | Directory | Source repositories |
+| --- | --- | --- | --- |
+| Agent-Assisted | [`../agent-assisted/report.pdf`](../agent-assisted/report.pdf) | [`../agent-assisted/`](../agent-assisted/) | Agent-assisted source repositories listed in [`../README.md`](../README.md#external-historical-source-repositories). |
+| Full-Agent | [`FULL_AGENT_WRITEUP.pdf`](./FULL_AGENT_WRITEUP.pdf) | This `full-agent/` directory | Full-agent source repositories listed in [`../README.md`](../README.md#external-historical-source-repositories). |
+
+For the human-in-the-loop Agent-Assisted package see `../agent-assisted/`.
+For an overview of the whole repository and the two-column source-repository
+map, see `../README.md`.
 
 ## Final Submitted Kernels
 
 All five final kernels pass correctness on the official evaluator. Kernel
 latency is the primary metric (lower is better); reference latency is the
-supplied FlashInfer baseline included as contextual context only.
+supplied FlashInfer baseline included as context only.
 
 | Track | Task | Impl. | Kernel latency | Reference latency | Best iter. | Solution ID |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -32,13 +40,13 @@ supplied FlashInfer baseline included as contextual context only.
 
 See the technical report for per-iteration trajectories, NCU evidence,
 and the multi-model switching ablation. Per-task reproducibility details
-live in each sub-track README.
+live in each operator-group README.
 
-## Sub-Tracks
+## Operator Groups
 
-Three independent agent runs cover the five contest kernels:
+Three operator-group packages cover the five Full-Agent contest kernels:
 
-| Sub-track | Kernels | Iterations | Trace mirror |
+| Operator group | Kernels | Iterations, same order as kernels | Trace mirror |
 | --- | --- | --- | --- |
 | [`dsa/`](./dsa/) | `dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps64`<br>`dsa_topk_indexer_fp8_h64_d128_topk2048_ps64` | 29 / 20 | `Full-agent-trace_sparse_attn/`, `Full-agent-trace_topk_indexer/` |
 | [`gdn/`](./gdn/) | `gdn_decode_qk4_v8_d128_k_last`<br>`gdn_prefill_qk4_v8_d128_k_last` | 10 / 10 | `Full-agent-trace_gdn_decode/`, `Full-agent-trace_gdn_prefill/` |
@@ -49,13 +57,14 @@ Three independent agent runs cover the five contest kernels:
 ```text
 full-agent/
 ├── README.md            this file
-├── report.pdf           technical report (Full-Agent Kernel Generation for FlashInfer)
+├── FULL_AGENT_WRITEUP.pdf
+│                         technical report (Full-Agent Kernel Generation for FlashInfer)
 ├── dsa/                 DeepSeek Sparse Attention — 2 CUDA kernels + LoongFlow
 ├── gdn/                 Gated DeltaNet — 2 CUDA kernels + LoongFlow
 └── moe/                 MoE FP8 block-scale — 1 Triton kernel + LoongFlow
 ```
 
-Each sub-track is a self-contained reproducibility package containing:
+Each operator-group package is a self-contained reproducibility package containing:
 
 - `solution/` — the final kernel(s) submitted to the evaluator (CUDA or Triton).
 - `config.toml` — FlashInfer submission metadata (`entry_point`, `binding`,
@@ -69,7 +78,7 @@ Each sub-track is a self-contained reproducibility package containing:
   without descending into `agent/...`.
 - `run_*.sh` — top-level launcher that renders `task_config.yaml` via
   `envsubst` and starts the agent in an isolated working directory.
-- `README.md` — per-track notes covering best result, layout, and how to
+- `README.md` — per-operator-group notes covering best result, layout, and how to
   reproduce.
 
 ### Trace directory schema
@@ -91,12 +100,12 @@ same three subtrees:
   - `evaluation_process.log` — compile / run / scoring log.
   - `result.json` — final score payload.
 
-The `solution` field of each winning `best_solution.json` is byte-identical
+The `solution` field of each selected `best_solution.json` is byte-identical
 to the corresponding submission file under `solution/`.
 
-### Winning checkpoints
+### Selected Checkpoints
 
-| Task | Winning checkpoint |
+| Task | Selected checkpoint |
 | --- | --- |
 | GDN decode | `gdn/Full-agent-trace_gdn_decode/database/checkpoints/checkpoint-checkpoint-iter-10-10/best_solution.json` |
 | GDN prefill | `gdn/Full-agent-trace_gdn_prefill/database/checkpoints/checkpoint-checkpoint-iter-10-10/best_solution.json` |
@@ -104,46 +113,18 @@ to the corresponding submission file under `solution/`.
 | DSA top-k indexer | `dsa/Full-agent-trace_topk_indexer/database/checkpoints/checkpoint-checkpoint-iter-14-13/best_solution.json` |
 | MoE FP8 routing | `moe/Full_agent_trace/database/checkpoints/checkpoint-checkpoint-iter-40-37/best_solution.json` |
 
-## System Design (summary)
+## System Design
 
-The system keeps LoongFlow's directed evolutionary substrate and replaces
-its generic task interface with FlashInfer operator contracts, CUDA / Triton
-executors, official-style evaluator bindings, trace packaging, and
-final-solution export. Key design contributions (see report §2):
+This package adapts [Baidu Baige LoongFlow](https://github.com/baidu-baige/LoongFlow) to FlashInfer kernel generation. It combines autonomous planning, code generation, official-style evaluation, checkpointing, and trace export for CUDA / Triton submissions. See [`FULL_AGENT_WRITEUP.pdf`](./FULL_AGENT_WRITEUP.pdf) for the full system design and per-task analysis.
 
-- **LoongFlow-derived autonomous PES runtime** — planner, executor,
-  evaluator, summarizer, database, and finalizer roles. The same runtime
-  is reused across GDN, DSA, and MoE; only the task prompts, evaluator
-  bindings, and final export paths vary by contest definition.
-- **Evidence-conditioned prompt and memory policy** — the planner prompt
-  is rebuilt at every iteration from the fixed operator contract plus
-  evolving evidence (parent solutions, archived evaluator records, compile
-  failures, correctness failures, latency measurements, summarizer
-  lessons). The prompt is therefore a state-dependent search policy rather
-  than a static instruction.
-- **Shape-specialized kernel search without manual intervention** — the
-  agent is allowed to introduce dispatch paths or specialized kernels for
-  distinct shape regimes; the routes are generated and validated inside
-  the autonomous loop rather than inserted by a human.
-- **Block-level multi-model switching** — because the search state lives in
-  the trace database rather than in a single chat context, the system can
-  switch planner or executor models at block boundaries (e.g. broad
-  exploration → code-heavy refinement → conservative review) while
-  preserving parent ids, evaluator logs, and handoff summaries.
-- **Auditable full-agent trajectories** — the output is not only a final
-  kernel: every iteration's planner, executor, evaluator, and summarizer
-  artifacts are retained on disk so reviewers can inspect which candidate
-  failed, which parent was preserved, and where the agent shifted from
-  broad exploration to narrow exploitation.
+## Reproducing a Full-Agent Run
 
-## Reproducing a Run
-
-Each sub-track is self-contained. Pick one and follow its README. The
-common shape is:
+Each operator group is self-contained. Pick one and follow its README. For
+DSA and GDN, the common shape is:
 
 ```bash
-# Select track: <track> = gdn, dsa, or moe.
-cd full-agent/<track>/agent              # or agent/loongflow for moe
+# Select operator group: <group> = gdn or dsa.
+cd full-agent/<group>/agent
 
 # Create and activate the Python environment.
 uv venv .venv --python 3.12
@@ -151,12 +132,26 @@ source .venv/bin/activate
 uv pip install -e .
 
 # Configure the LLM endpoint.
-cd ..                                    # back to the track root
+cd ..                                    # back to full-agent/<group>/
 export LLM_API_KEY="..."
-export LLM_BASE_URL="..."   # dsa only; gdn/moe hard-code url
+export LLM_BASE_URL="..."   # dsa only; gdn hard-codes url
 
-# Run one task-specific launcher in the selected repository.
+# Run one task-specific launcher in the selected operator group.
 ./run_<task>.sh                           # outputs land in ./<task>_run/
+```
+
+For MoE, create the environment from `full-agent/moe/agent/loongflow/`, then
+return to `full-agent/moe/` before launching:
+
+```bash
+cd full-agent/moe/agent/loongflow
+uv venv .venv --python 3.12
+source .venv/bin/activate
+uv pip install -e .
+
+cd ../..                                  # back to full-agent/moe/
+export LLM_API_KEY="..."
+./run_moe.sh
 ```
 
 Python 3.12 and [`uv`](https://docs.astral.sh/uv/) are required. The
@@ -166,11 +161,14 @@ initial seed, and Modal-side evaluator. Once launched, the same PES loop
 handles planning, code generation, evaluation, summarization,
 checkpointing, and parent selection without manual intervention.
 
-## Packing & Evaluation
+## Full-Agent Packing & Evaluation
 
-Every track ships the standard FlashInfer scripts under `scripts/`:
+Every operator group ships the standard FlashInfer scripts under `scripts/`.
+Run these commands from the selected operator-group directory:
 
 ```bash
+cd full-agent/<group>                     # <group> = dsa, gdn, or moe
+
 # Pack the final kernel into solution.json
 python3 scripts/pack_solution.py --config-path <kernel_dir>/config.toml \
   --output /tmp/<kernel>.solution.json
@@ -184,8 +182,8 @@ python3 scripts/run_modal.py --config-path <kernel_dir>/config.toml
 ```
 
 For DSA and GDN, replace `<kernel_dir>` with the kernel folder under the
-track root. For MoE, the track itself is the kernel directory (single
-submission), so omit `<kernel_dir>` and use the track's own `config.toml`.
+operator-group root. For MoE, the operator-group root is the kernel directory (single
+submission), so omit `<kernel_dir>` and use the operator group's own `config.toml`.
 
 ## About LoongFlow
 
@@ -219,9 +217,9 @@ of a submission can be walked backwards through the snapshots.
 
 The framework is LLM-agnostic (OpenAI / DeepSeek / Gemini / any
 OpenAI-compatible endpoint), Python 3.12, async runtime, dependencies
-managed by `uv`. See each track's `agent/README.md` and `agent/AGENTS.md`
-for deeper framework documentation, and `report.pdf` for the full system
-design and per-task analysis.
+managed by `uv`. For deeper framework documentation, see `dsa/agent/README.md`,
+`gdn/agent/README.md`, and `moe/agent/loongflow/README.md`; use
+`FULL_AGENT_WRITEUP.pdf` for the full system design and per-task analysis.
 
 ## License
 
