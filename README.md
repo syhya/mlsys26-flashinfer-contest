@@ -4,7 +4,7 @@ This repository contains two distinct MLSys 2026 FlashInfer submission
 packages. They cover overlapping contest kernels, but they document different
 levels of agent autonomy and point to different source repositories.
 
-## Technical Reports
+## Technical Reports and Blog Post
 
 - [Agent-Assisted Report](./agent-assisted/report.pdf): human-in-the-loop
   optimization using agent skills, benchmark harnesses, and curated retained
@@ -12,6 +12,11 @@ levels of agent autonomy and point to different source repositories.
 - [Full-Agent Report](./full-agent/FULL_AGENT_WRITEUP.pdf): autonomous
   LoongFlow-derived PES kernel search after task setup, with full planner /
   executor / evaluator / summarizer traces.
+- [GPU Kernel Generation and Optimization with Coding Agents: MLSys 2026
+  FlashInfer Contest Summary](https://syhya.github.io/posts/2026-05-18-flashinfer-contest/):
+  blog overview of the contest background, Agent-Assisted and Full-Agent
+  system designs, experimental results, optimization trajectories, and future
+  work.
 
 ## Official Results
 
