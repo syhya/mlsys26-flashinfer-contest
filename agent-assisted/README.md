@@ -126,11 +126,13 @@ This package is licensed under the [Apache License 2.0](../LICENSE).
 If this work is helpful, please cite the technical report:
 
 ```bibtex
-@misc{shui2026harnessengineering,
-  title        = {Harness Engineering for LLM-Driven GPU Kernel Generation},
-  author       = {Yue Shui and Chenyu Ma and Hangfei Xu and Shengzhao Wen and Yanpeng Wang},
-  year         = {2026},
-  howpublished = {\url{https://github.com/syhya/mlsys26-flashinfer-contest}},
-  note         = {Technical report for the MLSys 2026 FlashInfer AI Kernel Generation Contest}
+@misc{shui2026harnessengineeringllmdrivengpu,
+      title={Harness Engineering for LLM-Driven GPU Kernel Generation},
+      author={Yue Shui and Chenyu Ma and Hangfei Xu and Shengzhao Wen and Yanpeng Wang},
+      year={2026},
+      eprint={2607.17979},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2607.17979},
 }
 ```

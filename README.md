@@ -292,6 +292,22 @@ checkpointing, and parent selection without manual intervention. See
 [`full-agent/README.md`](./full-agent/README.md) for Full-Agent package details
 and the per-task analysis in the technical report.
 
+## Citation
+
+If this work is helpful, please cite the technical report:
+
+```bibtex
+@misc{shui2026harnessengineeringllmdrivengpu,
+      title={Harness Engineering for LLM-Driven GPU Kernel Generation},
+      author={Yue Shui and Chenyu Ma and Hangfei Xu and Shengzhao Wen and Yanpeng Wang},
+      year={2026},
+      eprint={2607.17979},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2607.17979},
+}
+```
+
 ## License
 
 This repository is licensed under the [Apache License 2.0](./LICENSE).
