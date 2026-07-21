@@ -3,7 +3,8 @@
 This directory is the agent-assisted reproducibility package for our MLSys
 2026 FlashInfer AI Kernel Generation Contest submissions. It contains the
 retained kernels, submission configs, benchmark artifacts, workflow scripts,
-agent skills, and the agent-assisted technical report.
+agent skills, and the
+[agent-assisted technical report](https://arxiv.org/abs/2607.17979).
 
 ## Layout
 

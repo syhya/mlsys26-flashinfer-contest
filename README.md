@@ -6,7 +6,8 @@ levels of agent autonomy and point to different source repositories.
 
 ## Technical Reports and Blog Post
 
-- [Agent-Assisted Report](./agent-assisted/report.pdf): human-in-the-loop
+- [Agent-Assisted Report](https://arxiv.org/abs/2607.17979):
+  human-in-the-loop
   optimization using agent skills, benchmark harnesses, and curated retained
   kernels.
 - [Full-Agent Report](./full-agent/FULL_AGENT_WRITEUP.pdf): autonomous
